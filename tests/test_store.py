@@ -74,9 +74,17 @@ def test_live_reader_retries_until_partial_tail_is_completed(tmp_path: Path) -> 
 
     finisher = threading.Thread(target=finish_append)
     finisher.start()
+    reader = EventReader(run_dir)
+    tail = reader.tail(
+        follow=True,
+        poll_interval=0.001,
+        retries=20,
+        retry_interval=0.01,
+    )
     try:
-        events = EventReader(run_dir).read(live=True, retries=20, retry_interval=0.01)
+        events = [next(tail), next(tail)]
     finally:
+        tail.close()
         finisher.join()
 
     assert [event.seq for event in events] == [0, 1]

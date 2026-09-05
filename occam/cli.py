@@ -40,7 +40,7 @@ def validate_run(
         if first_bytes != second_bytes:
             raise ValueError("reducer is not deterministic: state bytes differ")
 
-        validate_state(first_state.model_dump(mode="json", exclude_none=False))
+        validate_state(json.loads(first_bytes))
 
         if reader.state_path.exists():
             actual = reader.state_path.read_bytes()

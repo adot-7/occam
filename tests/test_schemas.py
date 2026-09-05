@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from occam.core import Architecture, Event, GenerationState, MetricsSnapshot, State
+from occam.core.models import EventType
 from occam.store.reader import EventReader
 from occam.store.reducer import reduce, state_json_bytes
 from occam.store.schema import load_schema, validate_event, validate_state, validate_task
@@ -31,23 +33,7 @@ def test_every_fixture_event_validates_against_event_schema() -> None:
 
     assert len(payloads) >= 100
     assert [payload["seq"] for payload in payloads] == list(range(len(payloads)))
-    assert {payload["type"] for payload in payloads} == {
-        "run.started",
-        "architecture.proposed",
-        "execution.started",
-        "execution.case",
-        "execution.completed",
-        "ablation.started",
-        "ablation.role",
-        "ablation.completed",
-        "baseline.completed",
-        "diagnosis.emitted",
-        "mutation.applied",
-        "mutation.reverted",
-        "metrics.snapshot",
-        "run.completed",
-        "log",
-    }
+    assert {payload["type"] for payload in payloads} == set(get_args(EventType))
     for payload in payloads:
         validate_event(payload)
         Event.model_validate(payload)

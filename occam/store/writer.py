@@ -24,7 +24,7 @@ class EventWriter:
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.events_path = self.run_dir / "events.jsonl"
-        existing = EventReader(self.run_dir).read() if self.events_path.exists() else []
+        existing = self._read_existing()
         self._next_seq = existing[-1].seq + 1 if existing else 0
         if run_id is not None and not run_id:
             raise ValueError("run_id must be non-empty")
@@ -39,7 +39,7 @@ class EventWriter:
         """Append one event, assigning sequence/run id for a plain mapping."""
 
         with self._append_lock():
-            existing = EventReader(self.run_dir).read() if self.events_path.exists() else []
+            existing = self._read_existing()
             self._next_seq = existing[-1].seq + 1 if existing else 0
             if existing:
                 existing_run_id = existing[0].run_id
@@ -75,6 +75,13 @@ class EventWriter:
             self._next_seq += 1
             self._write_state()
             return parsed
+
+    def _read_existing(self) -> list[Event]:
+        """Read an existing log, allowing a newly created zero-byte file."""
+
+        if not self.events_path.exists() or self.events_path.stat().st_size == 0:
+            return []
+        return EventReader(self.run_dir).read()
 
     @contextmanager
     def _append_lock(self) -> Iterator[None]:
