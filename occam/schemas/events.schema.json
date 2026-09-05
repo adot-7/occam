@@ -1,0 +1,382 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://occam.local/schemas/events.schema.json",
+  "title": "Occam event log",
+  "description": "One append-only, versioned event per JSONL line.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ts", "run_id", "seq", "type", "data"],
+  "properties": {
+    "ts": {"type": "string", "format": "date-time"},
+    "run_id": {"type": "string", "minLength": 1},
+    "seq": {"type": "integer", "minimum": 0},
+    "type": {
+      "type": "string",
+      "enum": [
+        "run.started",
+        "architecture.proposed",
+        "execution.started",
+        "execution.case",
+        "execution.completed",
+        "ablation.started",
+        "ablation.role",
+        "ablation.completed",
+        "baseline.completed",
+        "diagnosis.emitted",
+        "mutation.applied",
+        "mutation.reverted",
+        "metrics.snapshot",
+        "run.completed",
+        "log"
+      ]
+    },
+    "data": {
+      "oneOf": [
+        {"$ref": "#/$defs/runStarted"},
+        {"$ref": "#/$defs/architectureProposed"},
+        {"$ref": "#/$defs/executionStarted"},
+        {"$ref": "#/$defs/executionCase"},
+        {"$ref": "#/$defs/executionCompleted"},
+        {"$ref": "#/$defs/ablationStarted"},
+        {"$ref": "#/$defs/ablationRole"},
+        {"$ref": "#/$defs/ablationCompleted"},
+        {"$ref": "#/$defs/baselineCompleted"},
+        {"$ref": "#/$defs/diagnosisEmitted"},
+        {"$ref": "#/$defs/mutationApplied"},
+        {"$ref": "#/$defs/mutationReverted"},
+        {"$ref": "#/$defs/metricsSnapshot"},
+        {"$ref": "#/$defs/runCompleted"},
+        {"$ref": "#/$defs/log"}
+      ]
+    }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "justification", "model", "system_prompt", "tools", "inputs", "output_key"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "justification": {
+          "type": "string",
+          "enum": ["parallel", "context_isolation", "verification", "ensemble", "control", "unspecified"]
+        },
+        "model": {"type": "string", "minLength": 1},
+        "system_prompt": {"type": "string"},
+        "tools": {"type": "array", "items": {"type": "string"}},
+        "inputs": {"type": "array", "items": {"type": "string"}},
+        "output_key": {"type": "string", "minLength": 1},
+        "memory": {"type": "string", "enum": ["none", "scratchpad", "summary"], "default": "none"},
+        "max_turns": {"type": "integer", "minimum": 1, "default": 6}
+      }
+    },
+    "architecture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "parent_id", "roles", "final_role"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "parent_id": {"type": ["string", "null"]},
+        "roles": {"type": "array", "items": {"$ref": "#/$defs/role"}},
+        "final_role": {"type": "string", "minLength": 1},
+        "control": {"type": "string", "enum": ["llm", "deterministic"], "default": "deterministic"},
+        "notes": {"type": "string", "default": ""}
+      }
+    },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lo", "hi"],
+      "properties": {
+        "lo": {"type": "number"},
+        "hi": {"type": "number"}
+      }
+    },
+    "influenceCi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lo", "hi"],
+      "properties": {
+        "lo": {"type": "number", "minimum": -1, "maximum": 1},
+        "hi": {"type": "number", "minimum": -1, "maximum": 1}
+      }
+    },
+    "runStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task", "config"],
+      "properties": {
+        "task": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "domain", "n_cases", "goal"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "domain": {"type": "string", "minLength": 1},
+            "n_cases": {"type": "integer", "minimum": 0},
+            "goal": {"type": "string"}
+          }
+        },
+        "config": {"type": "object"}
+      }
+    },
+    "architectureProposed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["architecture", "generation"],
+      "properties": {
+        "architecture": {"$ref": "#/$defs/architecture"},
+        "generation": {"type": "integer", "minimum": 0}
+      }
+    },
+    "executionStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "variant", "n_cases"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "variant": {"type": "string", "minLength": 1},
+        "n_cases": {"type": "integer", "minimum": 0}
+      }
+    },
+    "executionCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "variant", "case_id", "passed", "cost_usd", "latency_s"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "variant": {"type": "string", "minLength": 1},
+        "case_id": {"type": "string", "minLength": 1},
+        "passed": {"type": "boolean"},
+        "cost_usd": {"type": "number", "minimum": 0},
+        "latency_s": {"type": "number", "minimum": 0}
+      }
+    },
+    "executionCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "variant", "pass_rate", "cost_usd", "latency_s_mean", "tokens", "ci"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "variant": {"type": "string", "minLength": 1},
+        "pass_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "cost_usd": {"type": "number", "minimum": 0},
+        "latency_s_mean": {"type": "number", "minimum": 0},
+        "tokens": {"type": "integer", "minimum": 0},
+        "ci": {"$ref": "#/$defs/ci"}
+      }
+    },
+    "ablationStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "roles", "n_cases"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "roles": {"type": "array", "items": {"type": "string"}},
+        "n_cases": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ablationRole": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "role_id", "influence", "influence_ci", "divergence", "cost_share", "verdict"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "role_id": {"type": "string", "minLength": 1},
+        "influence": {"type": "number", "minimum": -1, "maximum": 1},
+        "influence_ci": {"$ref": "#/$defs/influenceCi"},
+        "divergence": {"type": "number", "minimum": 0, "maximum": 1},
+        "cost_share": {"type": "number", "minimum": 0, "maximum": 1},
+        "verdict": {"type": "string", "enum": ["load_bearing", "witness", "harmful", "uncertain"]}
+      }
+    },
+    "ablationCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "structural_fidelity", "witnesses"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "structural_fidelity": {"type": "number", "minimum": 0, "maximum": 1},
+        "witnesses": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "baselineCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "method", "k", "pass_rate", "cost_usd", "latency_s_mean", "matched_to_cost_usd"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "method": {"const": "cot_sc"},
+        "k": {"type": "integer", "minimum": 1, "maximum": 9},
+        "pass_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "cost_usd": {"type": "number", "minimum": 0},
+        "latency_s_mean": {"type": "number", "minimum": 0},
+        "matched_to_cost_usd": {"type": "number", "minimum": 0}
+      }
+    },
+    "chosenMutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "target_role", "rationale"],
+      "properties": {
+        "type": {"type": "string", "enum": ["prune", "rewrite_prompt", "rebind_tools", "split", "merge", "set_memory", "set_retry", "collapse"]},
+        "target_role": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string"}
+      }
+    },
+    "diagnosisEmitted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "text", "failure_summary", "chosen_mutation"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "text": {"type": "string", "maxLength": 600},
+        "failure_summary": {"type": "string"},
+        "chosen_mutation": {"$ref": "#/$defs/chosenMutation"}
+      }
+    },
+    "mutationApplied": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "parent", "type", "target_role", "diff"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "parent": {"type": "integer", "minimum": 0},
+        "type": {"type": "string", "enum": ["prune", "rewrite_prompt", "rebind_tools", "split", "merge", "set_memory", "set_retry", "collapse"]},
+        "target_role": {"type": "string", "minLength": 1},
+        "diff": {"type": "string", "minLength": 1}
+      }
+    },
+    "mutationReverted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "restored_to", "reason"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "restored_to": {"type": "integer", "minimum": 0},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "metricsSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "pass_rate",
+        "ci",
+        "cost_usd",
+        "latency_s_mean",
+        "latency_s_p50",
+        "latency_s_p90",
+        "tokens",
+        "reliability",
+        "speed",
+        "structural_fidelity",
+        "vs_baseline"
+      ],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "pass_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "ci": {"$ref": "#/$defs/ci"},
+        "cost_usd": {"type": "number", "minimum": 0},
+        "latency_s_mean": {"type": "number", "minimum": 0},
+        "latency_s_p50": {"type": "number", "minimum": 0},
+        "latency_s_p90": {"type": "number", "minimum": 0},
+        "tokens": {"type": "integer", "minimum": 0},
+        "reliability": {"type": "number", "minimum": 0, "maximum": 1},
+        "speed": {"type": "number", "minimum": 0},
+        "structural_fidelity": {"type": "number", "minimum": 0, "maximum": 1},
+        "vs_baseline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pass_delta", "cost_ratio"],
+          "properties": {
+            "pass_delta": {"type": "number", "minimum": -1, "maximum": 1},
+            "cost_ratio": {"type": "number", "minimum": 0}
+          }
+        }
+      }
+    },
+    "runCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["best_generation", "summary"],
+      "properties": {
+        "best_generation": {"type": "integer", "minimum": 0},
+        "summary": {"type": "object"}
+      }
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "message"],
+      "properties": {
+        "level": {"type": "string", "enum": ["debug", "info", "warning", "error"]},
+        "message": {"type": "string"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "run.started"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/runStarted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "architecture.proposed"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/architectureProposed"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "execution.started"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/executionStarted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "execution.case"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/executionCase"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "execution.completed"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/executionCompleted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "ablation.started"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/ablationStarted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "ablation.role"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/ablationRole"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "ablation.completed"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/ablationCompleted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "baseline.completed"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/baselineCompleted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "diagnosis.emitted"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/diagnosisEmitted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "mutation.applied"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/mutationApplied"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "mutation.reverted"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/mutationReverted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "metrics.snapshot"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/metricsSnapshot"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "run.completed"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/runCompleted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "log"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/log"}}}
+    }
+  ]
+}
