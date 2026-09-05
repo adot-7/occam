@@ -94,4 +94,4 @@ Differentiation: every other Track 1 demo shows a diagram growing and a line goi
 
 ## 9. Prior art we must be able to speak to
 
-ADAS (2408.08435), DGM (2505.22954), AgentSquare, AFlow, GPTSwarm, DyLAN, MaAS, MAS-Zero, Meta-Harness (2603.28052), Self-Harness (2606.09498), Co-Coder (2606.00953), OpenEvolve, GEPA/DSPy. **Our delta:** they optimise *for a score*; we optimise *against redundancy*, using causal ablation as the signal inside the loop. Full verified citation list in the team's research pack.
+ADAS (2408.08435), DGM (2505.22954), AgentSquare, AFlow, GPTSwarm, DyLAN, MaAS, MAS-Zero, Meta-Harness (2603.28052), Self-Harness (2606.09498), Co-Coder (2606.00953), OpenEvolve, GEPA/DSPy. **Our delta:** they optimise *for a score*; we optimise *against redundancy*, using causal ablation as the signal inside the loop. Full verified citation list: `prd/07-CITATIONS.md`. Citations appear in the README and pitch only — **never in the TUI**.

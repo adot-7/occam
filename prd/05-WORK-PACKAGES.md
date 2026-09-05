@@ -90,16 +90,18 @@ README per submission rules: what it does, how to run, track, agent workflow, wh
 - [ ] Every claim in README traces to a run dir or a citation
 
 ### WP-13 — Legibility + `textual serve` + recording rig  **[H2, any time after WP-09; do a first pass by hour 12]**
-Large-font palette, `textual serve` wrapper, a `scripts/record_demo.sh` that launches replay with the right `--to-gen`/speed for each demo beat.
+Large-font palette, `textual serve` wrapper, `--at` and `--pause` replay flags, and `scripts/record_demo.sh` that launches one replay per shot in `09-DEMO-SHOTLIST.md`.
 - [ ] A 1080p screen recording of the ablation table is readable at 100% zoom (human check)
 
 ### WP-14 (stretch) — Live task creation
 `occam task new --goal ...`: LLM drafts cases; TUI approval screen; writes `tasks/live_<slug>/`.
 - [ ] Draft → approve 8/10 → run proceeds using only approved cases
 
-### WP-15 (stretch) — Neatlogs + TensorMux
-Optional OTel export of LLM spans to Neatlogs; `worker_fast` routed via TensorMux hosted `base_url` for dollar-denominated tracking.
-- [ ] One run visible as traces in Neatlogs; TensorMux dashboard shows spend matching our computed cost within 10%
+### WP-15 — Neatlogs tracing  **[H1, right after WP-05 — no longer stretch]**
+`occam/llm/tracing.py` per `06 §3`: span per `complete()` with `occam.*` attributes from a contextvar; off when no key; flush on exit. TensorMux and GPT-5 nano are just `models.yaml` entries (WP-02) and need no separate package.
+- [ ] A 5-case MGSM run produces 5 traces in Neatlogs with role/generation/variant attributes visible
+- [ ] With `NEATLOGS_API_KEY` unset, runs are byte-identical in events and timing (±5%)
+- [ ] Spans flushed: last case's span present after a short run
 
 ---
 

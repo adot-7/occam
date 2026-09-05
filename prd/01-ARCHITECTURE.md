@@ -169,11 +169,12 @@ Plateau: no improvement in `(pass_rate, -cost)` lexicographic for 2 generations.
 - Providers behind it: OpenAI-compatible (covers Groq, TensorMux, OpenRouter, Gemini's OpenAI endpoint), Anthropic. All via `base_url` + key from `.env`.
 - `models.yaml`:
   ```yaml
-  worker_fast:   {provider: openai_compat, base_url: ${GROQ_BASE_URL}, model: llama-3.3-70b-versatile, in_per_m: 0.59, out_per_m: 0.79, rpm: 30, tpm: 6000}
-  worker_alt:    {provider: openai_compat, base_url: ${GEMINI_OPENAI_BASE_URL}, model: gemini-2.5-flash, in_per_m: 0.30, out_per_m: 2.50, rpm: 60}
+  worker_fast:   {provider: openai_compat, base_url: ${TENSORMUX_BASE_URL}, model: glm-4.7-flash, in_per_m: 0, out_per_m: 0, grant_equiv_in_per_m: <fill>, grant_equiv_out_per_m: <fill>, rpm: 120}   # TensorMux grant, 50M tokens
+  worker_alt:    {provider: openai_compat, base_url: https://api.openai.com/v1, model: gpt-5-nano, in_per_m: 0.05, out_per_m: 0.40, rpm: 500}   # AI Grants India credits; BFCL default worker + second ablation lane
+  worker_free:   {provider: openai_compat, base_url: ${GROQ_BASE_URL}, model: <check /models>, rpm: 30, tpm: 6000}   # emergency fallback only
   architect:     {provider: anthropic, model: claude-sonnet-5, in_per_m: 2.00, out_per_m: 10.00}
   ```
-  Cost is computed client-side from token counts × these rates; **verify rates on Saturday morning**.
+  Cost is computed client-side from token counts × rates. For granted tokens (`in_per_m: 0`) the TUI shows **list-rate-equivalent** cost using `grant_equiv_*` and labels it so. See `06-SPONSOR-INTEGRATIONS.md`. **Verify model ids and rates on day one.**
 - Rate limiting per model key (token bucket). Retries with backoff on 429/5xx.
 - Content-addressed disk cache under `runs/<run_id>/cache/` (and a global `~/.occam/cache/` for cross-run reuse).
 
@@ -190,7 +191,7 @@ Registry: `name -> (ToolSpec, callable)`. Tools available to candidate agents ar
 ```
 occam run     --task <pack_dir|name> [--max-gens 6] [--cases 20] [--ablate-cases 10] [--budget-usd 2] [--out runs/]
 occam tui     --run <run_dir>                # attach to live or finished run
-occam replay  <run_dir> [--speed 4] [--to-gen 3]
+occam replay  <run_dir> [--speed 4] [--to-gen 3] [--at <event.type>] [--pause]   # --at: fast-forward to first event of that type within --to-gen; --pause: start paused (static frame for recording)
 occam task new --goal "..." [--n 10]         # stretch; drafts cases for review
 occam task list / occam task show <name>
 occam baseline --task <pack> --cost <usd>    # standalone

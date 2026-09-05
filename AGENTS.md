@@ -14,6 +14,10 @@ Occam is an automated agent-engineering system: given a goal, a set of tools and
 4. `prd/03-ABLATION-AND-METRICS.md` — the algorithm, its cost, noise handling, metric definitions
 5. `prd/04-TUI-SPEC.md` — Textual screens and widgets
 6. `prd/05-WORK-PACKAGES.md` — ordered, independently-shippable work packages with acceptance criteria
+7. `prd/06-SPONSOR-INTEGRATIONS.md` — TensorMux (primary compute), GPT-5 nano, Neatlogs tracing; where each plugs in
+8. `prd/07-CITATIONS.md` — verified references; README/pitch only, never the TUI
+9. `prd/08-END-TO-END-WALKTHROUGH.md` — one run traced with every number worked; if the TUI shows a number you can't derive this way, it's a bug
+10. `prd/09-DEMO-SHOTLIST.md` — what `occam replay` must support, shot by shot
 
 If a PRD and this file disagree, the PRD wins. If two PRDs disagree, `01-ARCHITECTURE.md` wins on structure and `03-ABLATION-AND-METRICS.md` wins on algorithm.
 
