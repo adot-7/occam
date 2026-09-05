@@ -124,6 +124,37 @@ class RunResult(ContractModel):
     tokens: int = Field(default=0, ge=0)
 
 
+class ConfidenceInterval(ContractModel):
+    """A lower/upper confidence interval for a reported metric."""
+
+    lo: float
+    hi: float
+
+
+class BaselineComparison(ContractModel):
+    """Comparison between a generation and its cost-matched baseline."""
+
+    pass_delta: float = Field(ge=-1.0, le=1.0)
+    cost_ratio: float = Field(ge=0.0)
+
+
+class MetricsSnapshot(ContractModel):
+    """The complete metrics strip emitted for one generation."""
+
+    generation: int = Field(ge=0)
+    pass_rate: float = Field(ge=0.0, le=1.0)
+    ci: ConfidenceInterval
+    cost_usd: float = Field(ge=0.0)
+    latency_s_mean: float = Field(ge=0.0)
+    latency_s_p50: float = Field(ge=0.0)
+    latency_s_p90: float = Field(ge=0.0)
+    tokens: int = Field(ge=0)
+    reliability: float = Field(ge=0.0, le=1.0)
+    speed: float = Field(ge=0.0)
+    structural_fidelity: float = Field(ge=0.0, le=1.0)
+    vs_baseline: BaselineComparison
+
+
 class SourceSpec(ContractModel):
     """Provenance for a committed or generated task pack."""
 
@@ -159,9 +190,10 @@ class GenerationState(BaseModel):
     executions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     ablation: dict[str, Any] | None = None
     baseline: dict[str, Any] | None = None
-    metrics: dict[str, Any] | None = None
+    metrics: MetricsSnapshot | None = None
     diagnosis: dict[str, Any] | None = None
     mutation: dict[str, Any] | None = None
+    revert: dict[str, Any] | None = None
     reverted: bool = False
 
 
@@ -204,6 +236,8 @@ __all__ = [
     "CaseResult",
     "CheckerName",
     "ControlMode",
+    "ConfidenceInterval",
+    "BaselineComparison",
     "Event",
     "EventType",
     "GenerationState",
@@ -212,6 +246,7 @@ __all__ = [
     "Role",
     "RoleTrace",
     "RunResult",
+    "MetricsSnapshot",
     "SourceSpec",
     "State",
     "Task",

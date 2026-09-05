@@ -33,6 +33,9 @@ occam = "occam.cli:main"
 [tool.setuptools.packages.find]
 include = ["occam*"]
 
+[tool.setuptools.package-data]
+"occam.schemas" = ["*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

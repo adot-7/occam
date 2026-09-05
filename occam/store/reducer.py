@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from occam.core.models import Event, GenerationState, State
+from occam.core.models import Event, GenerationState, MetricsSnapshot, State
 
 
 def _generation_key(generation: int) -> str:
@@ -137,12 +137,18 @@ def reduce(events: Iterable[Event | Mapping[str, Any]]) -> State:
             generation = int(data["generation"])
             current = _generation(state, generation)
             current.reverted = True
-            current.mutation = data
+            current.revert = data
+            if current.mutation is not None:
+                current.mutation = {
+                    **current.mutation,
+                    "reverted": True,
+                    "revert": data,
+                }
             state.mutations.append(data)
         elif event_type == "metrics.snapshot":
             generation = int(data["generation"])
             current = _generation(state, generation)
-            current.metrics = data
+            current.metrics = MetricsSnapshot.model_validate(data)
             state.current_generation = generation
         elif event_type == "run.completed":
             state.best_generation = int(data["best_generation"])

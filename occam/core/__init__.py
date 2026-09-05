@@ -2,10 +2,13 @@
 
 from occam.core.models import (
     Architecture,
+    BaselineComparison,
     Case,
     CaseResult,
+    ConfidenceInterval,
     Event,
     GenerationState,
+    MetricsSnapshot,
     Role,
     RoleTrace,
     RunResult,
@@ -18,10 +21,13 @@ from occam.core.models import (
 
 __all__ = [
     "Architecture",
+    "BaselineComparison",
     "Case",
     "CaseResult",
+    "ConfidenceInterval",
     "Event",
     "GenerationState",
+    "MetricsSnapshot",
     "Role",
     "RoleTrace",
     "RunResult",
