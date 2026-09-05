@@ -1,0 +1,24 @@
+# Model identifiers are configuration, not code. Verify rates before a live run.
+worker_fast:
+  provider: openai_compat
+  base_url: ${GROQ_BASE_URL}
+  api_key_env: GROQ_API_KEY
+  model: llama-3.3-70b-versatile
+  in_per_m: 0.59
+  out_per_m: 0.79
+  rpm: 30
+  tpm: 6000
+worker_alt:
+  provider: openai_compat
+  base_url: ${GEMINI_OPENAI_BASE_URL}
+  api_key_env: GEMINI_API_KEY
+  model: gemini-2.5-flash
+  in_per_m: 0.30
+  out_per_m: 2.50
+  rpm: 60
+architect:
+  provider: anthropic
+  api_key_env: ANTHROPIC_API_KEY
+  model: claude-sonnet-5
+  in_per_m: 2.00
+  out_per_m: 10.00

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://occam.local/schemas/state.schema.json",
+  "title": "Occam run state",
+  "description": "The latest snapshot derived purely from an Occam event stream.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "last_seq",
+    "task",
+    "config",
+    "generations",
+    "current_generation",
+    "best_generation",
+    "completed",
+    "summary",
+    "diagnoses",
+    "mutations",
+    "logs"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1},
+    "last_seq": {"type": "integer", "minimum": -1},
+    "task": {"type": ["object", "null"]},
+    "config": {"type": "object"},
+    "generations": {
+      "type": "object",
+      "patternProperties": {"^g[0-9]{3,}$": {"$ref": "#/$defs/generation"}},
+      "additionalProperties": false
+    },
+    "current_generation": {"type": ["integer", "null"], "minimum": 0},
+    "best_generation": {"type": ["integer", "null"], "minimum": 0},
+    "completed": {"type": "boolean"},
+    "summary": {"type": "object"},
+    "diagnoses": {"type": "array", "items": {"type": "object"}},
+    "mutations": {"type": "array", "items": {"type": "object"}},
+    "logs": {"type": "array", "items": {"type": "object"}}
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "justification", "model", "system_prompt", "tools", "inputs", "output_key"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "justification": {
+          "type": "string",
+          "enum": ["parallel", "context_isolation", "verification", "ensemble", "control", "unspecified"]
+        },
+        "model": {"type": "string", "minLength": 1},
+        "system_prompt": {"type": "string"},
+        "tools": {"type": "array", "items": {"type": "string"}},
+        "inputs": {"type": "array", "items": {"type": "string"}},
+        "output_key": {"type": "string", "minLength": 1},
+        "memory": {"type": "string", "enum": ["none", "scratchpad", "summary"], "default": "none"},
+        "max_turns": {"type": "integer", "minimum": 1, "default": 6}
+      }
+    },
+    "architecture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "parent_id", "roles", "final_role"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "parent_id": {"type": ["string", "null"]},
+        "roles": {"type": "array", "items": {"$ref": "#/$defs/role"}},
+        "final_role": {"type": "string", "minLength": 1},
+        "control": {"type": "string", "enum": ["llm", "deterministic"], "default": "deterministic"},
+        "notes": {"type": "string", "default": ""}
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "architecture", "executions", "ablation", "baseline", "metrics", "diagnosis", "mutation", "reverted"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "architecture": {"oneOf": [{"$ref": "#/$defs/architecture"}, {"type": "null"}]},
+        "executions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "ablation": {"type": ["object", "null"]},
+        "baseline": {"type": ["object", "null"]},
+        "metrics": {"type": ["object", "null"]},
+        "diagnosis": {"type": ["object", "null"]},
+        "mutation": {"type": ["object", "null"]},
+        "reverted": {"type": "boolean"}
+      }
+    }
+  }
+}

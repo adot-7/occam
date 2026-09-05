@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://occam.local/schemas/task.schema.json",
+  "title": "Occam task-pack manifest",
+  "description": "The YAML-equivalent manifest for a task directory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "domain", "goal", "answer_format", "tools", "checker", "examples", "source"],
+  "properties": {
+    "name": {"type": "string", "minLength": 1},
+    "domain": {"type": "string", "minLength": 1},
+    "goal": {"type": "string", "minLength": 1},
+    "answer_format": {"type": "string", "minLength": 1},
+    "tools": {"type": "array", "items": {"type": "string"}},
+    "checker": {
+      "type": "string",
+      "enum": ["json_set_equal", "numeric_exact", "bfcl_ast", "exact", "llm_judge"]
+    },
+    "examples": {"type": "integer", "minimum": 0},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "repo", "file", "license"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "repo": {"type": "string", "minLength": 1},
+        "file": {"type": "string", "minLength": 1},
+        "license": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
