@@ -15,3 +15,4 @@ All notable changes to Occam are documented here.
 - `occam validate` for fixture schema validation and reducer determinism checks.
 - Hand-authored four-generation SMFR replay fixture.
 - Schema resources packaged in the installable wheel.
+- Strict empty-run and derived-state validation, append-safe writers, and live-tail retry handling.

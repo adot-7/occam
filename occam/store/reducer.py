@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from occam.core.models import Event, GenerationState, MetricsSnapshot, State
+from occam.store.schema import validate_event
 
 
 def _generation_key(generation: int) -> str:
@@ -35,6 +36,14 @@ def _generation(state: State, generation: int) -> GenerationState:
     return state.generations[key]
 
 
+def _materialize_event(raw_event: Event | Mapping[str, Any]) -> Event:
+    """Validate both the typed envelope and its event-specific JSON contract."""
+
+    event = raw_event if isinstance(raw_event, Event) else Event.model_validate(raw_event)
+    validate_event(event.model_dump(mode="json", exclude_none=False))
+    return event
+
+
 def reduce(events: Iterable[Event | Mapping[str, Any]]) -> State:
     """Apply events in order and return a deterministic state snapshot.
 
@@ -45,15 +54,15 @@ def reduce(events: Iterable[Event | Mapping[str, Any]]) -> State:
 
     materialized = list(events)
     if not materialized:
-        return State(run_id="")
+        raise ValueError("cannot reduce an empty event stream")
 
     first = materialized[0]
-    first_event = first if isinstance(first, Event) else Event.model_validate(first)
+    first_event = _materialize_event(first)
     state = State(run_id=first_event.run_id)
     expected_seq = 0
 
     for raw_event in materialized:
-        event = raw_event if isinstance(raw_event, Event) else Event.model_validate(raw_event)
+        event = _materialize_event(raw_event)
         if event.run_id != state.run_id:
             raise ValueError(
                 f"event seq {event.seq} belongs to run {event.run_id!r}, expected {state.run_id!r}"

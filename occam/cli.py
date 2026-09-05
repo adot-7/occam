@@ -40,6 +40,8 @@ def validate_run(
         if first_bytes != second_bytes:
             raise ValueError("reducer is not deterministic: state bytes differ")
 
+        validate_state(first_state.model_dump(mode="json", exclude_none=False))
+
         if reader.state_path.exists():
             actual = reader.state_path.read_bytes()
             payload = json.loads(actual)
@@ -48,12 +50,15 @@ def validate_run(
                 raise ValueError("state.json does not match the canonical reduced state")
             snapshot_message = "state.json matches"
         else:
-            snapshot_message = "state.json absent (reduced state validated in memory)"
+            snapshot_message = "state.json absent"
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise typer.BadParameter(str(exc), param_hint="run_dir") from exc
 
     typer.echo(f"valid: {len(events)} events in {run_dir}")
-    typer.echo(f"deterministic: yes ({len(first_bytes)} state bytes; {snapshot_message})")
+    typer.echo(
+        f"deterministic: yes ({len(first_bytes)} state bytes; "
+        f"derived state schema validated; {snapshot_message})"
+    )
 
 
 def main() -> None:

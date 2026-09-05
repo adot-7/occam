@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Justification = Literal[
     "parallel",
@@ -185,7 +186,7 @@ class GenerationState(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    generation: int
+    generation: int = Field(ge=0)
     architecture: dict[str, Any] | None = None
     executions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     ablation: dict[str, Any] | None = None
@@ -202,13 +203,13 @@ class State(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    run_id: str
+    run_id: str = Field(min_length=1)
     last_seq: int = Field(default=-1, ge=-1)
     task: dict[str, Any] | None = None
     config: dict[str, Any] = Field(default_factory=dict)
     generations: dict[str, GenerationState] = Field(default_factory=dict)
-    current_generation: int | None = None
-    best_generation: int | None = None
+    current_generation: int | None = Field(default=None, ge=0)
+    best_generation: int | None = Field(default=None, ge=0)
     completed: bool = False
     summary: dict[str, Any] = Field(default_factory=dict)
     diagnoses: list[dict[str, Any]] = Field(default_factory=list)
@@ -223,11 +224,35 @@ class Event(ContractModel):
     JSON Schema by the store layer before anything is written or consumed.
     """
 
-    ts: str
-    run_id: str
+    ts: datetime
+    run_id: str = Field(min_length=1)
     seq: int = Field(ge=0)
     type: EventType
     data: dict[str, Any]
+
+    @field_validator("ts", mode="before")
+    @classmethod
+    def timestamp_must_be_iso(cls, value: Any) -> Any:
+        """Require an ISO timestamp input rather than a numeric datetime."""
+
+        if isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or ("T" not in value and "t" not in value):
+            raise ValueError("ts must be an ISO 8601 datetime string")
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("ts must be an ISO 8601 datetime string") from exc
+        return value
+
+    @field_validator("ts")
+    @classmethod
+    def timestamp_must_have_timezone(cls, value: datetime) -> datetime:
+        """Require RFC 3339 timestamps with an explicit UTC offset."""
+
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("ts must include a timezone offset")
+        return value
 
 
 __all__ = [
