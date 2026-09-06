@@ -11,6 +11,7 @@ import time
 import pytest
 
 from occam.tools.python_exec import (
+    _BOOTSTRAP,
     ALLOWED_IMPORTS,
     BOUND_METHOD_GUARDS,
     BOUND_METHOD_POLICIES,
@@ -19,11 +20,29 @@ from occam.tools.python_exec import (
     ENV_PASSTHROUGH,
     MAX_INTEGER_BITS,
     MAX_OUTPUT_CHARS_LIMIT,
+    NETWORK_BLOCKED_MESSAGE,
     PythonExecResult,
     child_env,
     python_exec,
     run,
 )
+
+# Windows's CreateProcess refuses a command line longer than this many
+# characters ([WinError 206]).  The capability evaluator inlined into the
+# bootstrap is well past it, which is why the bootstrap must reach the child
+# through a file rather than a ``-c`` argument.
+_WINDOWS_ARGV_LIMIT = 32_767
+
+
+def _rendered_bootstrap() -> str:
+    return (
+        _BOOTSTRAP.replace("__ALLOWED__", repr(sorted(ALLOWED_IMPORTS)))
+        .replace("__BOUND_METHOD_POLICIES__", repr(BOUND_METHOD_POLICIES))
+        .replace("__NETWORK_MESSAGE__", repr(NETWORK_BLOCKED_MESSAGE))
+        .replace("__MAX_OUTPUT__", repr(DEFAULT_MAX_OUTPUT_CHARS))
+        .replace("__MAX_INTEGER_BITS__", repr(MAX_INTEGER_BITS))
+        .strip()
+    )
 
 
 def test_returns_stdout_of_a_successful_program() -> None:
@@ -110,6 +129,50 @@ def test_child_env_is_explicit_and_allows_cpython_locale_synthesis(
         for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TENSORMUX_API_KEY")
     )
     assert "secret-locale-value" not in completed.stdout
+
+
+def test_full_size_bootstrap_exceeds_the_windows_argv_limit() -> None:
+    """The real bootstrap is far past what ``-c`` could carry on Windows.
+
+    A test built from a short, hand-written bootstrap would not reproduce the
+    launch failure: the AST capability evaluator inlined into ``_BOOTSTRAP``
+    is what pushes the command line over Windows's limit.
+    """
+    assert len(_rendered_bootstrap()) > _WINDOWS_ARGV_LIMIT
+
+
+def test_sandbox_starts_with_the_real_full_size_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test: python_exec.py used to pass ``_BOOTSTRAP`` via ``-c``.
+
+    On Windows, ``CreateProcess`` rejects a command line over 32,767
+    characters, so the ~100K-character bootstrap could never launch the
+    sandbox at all ([WinError 206]).  The fix writes the bootstrap to a file
+    inside the run's temporary directory and launches that file instead, so
+    every argv element must stay short and no element may be the bootstrap
+    itself.
+    """
+    captured_argv: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(argv, *args, **kwargs):
+        captured_argv.append(list(argv))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+
+    result = run("print(1 + 1)")
+
+    assert result.ok
+    assert result.stdout == "2\n"
+    assert len(captured_argv) == 1
+    argv = captured_argv[0]
+    assert "-c" not in argv
+    bootstrap = _rendered_bootstrap()
+    assert bootstrap not in argv
+    for arg in argv:
+        assert len(arg) < _WINDOWS_ARGV_LIMIT
 
 
 def test_absolute_env_file_read_is_blocked(tmp_path) -> None:
