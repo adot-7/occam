@@ -12,6 +12,7 @@ full.  The remaining panels render a summary derived from the same
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from rich.console import RenderableType
@@ -96,7 +97,12 @@ class HeaderBar(Static):
         badge = AMBER if view.mode == "replay" else GREEN
         text.append(view.mode_badge, style=f"bold {badge}")
         text.append(GAP)
-        text.append(f"{view.elapsed_s:,.0f}s", style=DIM)
+        elapsed = "elapsed ?" if view.elapsed_s is None else f"{view.elapsed_s:,.0f}s"
+        text.append(elapsed, style=DIM)
+        if view.status:
+            text.append(GAP)
+            status_style = RED if "error" in view.status or "incomplete" in view.status else AMBER
+            text.append(view.status, style=status_style)
         text.append(GAP)
         text.append(_money(view.spend_usd), style=DIM)
         self.update(text)
@@ -385,7 +391,12 @@ class DiagnosisFeed(RichLog):
         generation = view.selected
         self.border_title = "DIAGNOSIS" if generation is None else f"DIAGNOSIS · {generation.label}"
 
-    def ingest(self, events: list[Event]) -> None:
+    def prime(self, events: Sequence[Event]) -> None:
+        """Hydrate historical narration without replaying it through the reducer."""
+
+        self.ingest(events)
+
+    def ingest(self, events: Sequence[Event]) -> None:
         """Append feed lines for the events that just arrived."""
 
         for event in events:

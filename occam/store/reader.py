@@ -29,6 +29,13 @@ class EventReader:
         self.run_dir = Path(run_dir)
         self.events_path = self.run_dir / "events.jsonl"
         self.state_path = self.run_dir / "state.json"
+        self._last_read_had_incomplete_trailing_line = False
+
+    @property
+    def last_read_had_incomplete_trailing_line(self) -> bool:
+        """Whether the last live read returned before a partial final line."""
+
+        return self._last_read_had_incomplete_trailing_line
 
     def read(
         self,
@@ -52,6 +59,7 @@ class EventReader:
         if retry_interval < 0:
             raise ValueError("retry_interval must be non-negative")
 
+        self._last_read_had_incomplete_trailing_line = False
         attempts = 0
         while True:
             try:
@@ -59,6 +67,7 @@ class EventReader:
             except _IncompleteTrailingLine as exc:
                 if not live or attempts >= retries:
                     if live:
+                        self._last_read_had_incomplete_trailing_line = True
                         return exc.events
                     message = f"invalid JSON on events.jsonl line {exc.line_number}: {exc.cause}"
                     raise ValueError(message) from exc.cause

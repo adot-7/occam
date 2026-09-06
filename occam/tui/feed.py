@@ -36,17 +36,22 @@ class StateFeed:
     def last_seq(self) -> int:
         return self._reduction.last_seq
 
-    def prime(self, state: State) -> State:
+    def prime(self, state: State, history: Sequence[Event] = ()) -> State:
         """Paint a snapshot loaded from ``state.json`` before any event arrives.
 
         The incremental reducer is primed with the same sequence number, so a
-        live source can hand us only events written after the snapshot.
+        live source can hand us only events written after the snapshot.  The
+        already-read history only supplies the UI clock; it is never reduced.
         """
 
         if self.state is not None:
             return self.state
         self.state = self._reduction.prime(state)
         self._count = max(0, state.last_seq + 1)
+        observed = [event for event in history if event.seq <= state.last_seq]
+        if observed:
+            self._first_ts = observed[0].ts
+            self._last_ts = observed[-1].ts
         self.primed = True
         return self.state
 
@@ -66,11 +71,11 @@ class StateFeed:
         self.primed = False
         return self.state
 
-    def elapsed_s(self) -> float:
+    def elapsed_s(self) -> float | None:
         """Run-clock seconds between the first and last observed event."""
 
         if self._first_ts is None or self._last_ts is None:
-            return 0.0
+            return None
         return (self._last_ts - self._first_ts).total_seconds()
 
 

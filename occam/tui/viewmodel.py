@@ -165,7 +165,8 @@ class RunView:
         speed: float = 1.0,
         paused: bool = False,
         finished: bool = False,
-        elapsed_s: float = 0.0,
+        elapsed_s: float | None = None,
+        status: str | None = None,
         compare: dict[str, Any] | None = None,
     ):
         self.state = state
@@ -174,6 +175,7 @@ class RunView:
         self.paused = paused
         self.finished = finished
         self.elapsed_s = elapsed_s
+        self.status = status
         self.compare = compare
         self._generations = {
             snapshot.generation: GenerationView(

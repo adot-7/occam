@@ -38,6 +38,7 @@ include = ["occam*"]
 [tool.setuptools.package-data]
 "occam.schemas" = ["*.json"]
 "occam.config" = ["models.yaml"]
+"occam.tui" = ["*.tcss"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

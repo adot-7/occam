@@ -17,6 +17,7 @@ from occam.cli import app as cli_app
 from occam.core.models import Event, GenerationState, State
 from occam.store.reader import EventReader
 from occam.store.reducer import Reduction, reduce, state_json_bytes
+from occam.store.writer import EventWriter
 from occam.tui.app import OccamApp
 from occam.tui.panels import AblationPanel, DiagnosisFeed, HeaderBar
 from occam.tui.source import (
@@ -166,6 +167,150 @@ def test_live_attach_to_a_completed_snapshot_does_not_poll_forever(tmp_path: Pat
     finished, received = _drive(scenario)
     assert finished
     assert received == []
+
+
+def test_finished_snapshot_primes_diagnosis_feed_and_event_clock(tmp_path: Path) -> None:
+    events = _events(RUN1)
+    run_dir = tmp_path / "finished-snapshot"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_bytes((RUN1 / "events.jsonl").read_bytes())
+    (run_dir / "state.json").write_bytes(state_json_bytes(reduce(events)))
+
+    async def scenario() -> tuple[int, str, float | None]:
+        source = LiveSource(run_dir, poll_interval=0)
+        app = OccamApp(run_dir, source=source)
+
+        async def body(pilot: Any) -> tuple[int, str, float | None]:
+            await asyncio.wait_for(source.wait_finished(), timeout=2)
+            await pilot.pause()
+            feed = app.query_one(DiagnosisFeed)
+            entries = sum(line.text.startswith("▸ ") for line in feed.lines)
+            return entries, _header(app), app.feed.elapsed_s()
+
+        return await _run_app(app, body)
+
+    lines, header, elapsed = _drive(scenario)
+    expected_lines = sum(1 for event in events if event.type in DiagnosisFeed.FEED_TYPES)
+    assert lines == expected_lines
+    assert elapsed == pytest.approx(281.0)
+    assert "281s" in header
+    assert "elapsed 0s" not in header
+
+
+def test_live_snapshot_primes_history_before_new_tail_events(tmp_path: Path) -> None:
+    events = _events(RUN1)
+    checkpoint = 150
+    run_dir = tmp_path / "live-snapshot"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_bytes((RUN1 / "events.jsonl").read_bytes())
+    (run_dir / "state.json").write_bytes(state_json_bytes(reduce(events[:checkpoint])))
+
+    async def scenario() -> tuple[int, str, bytes]:
+        ready = asyncio.Event()
+        release = asyncio.Event()
+
+        class HeldLiveSource(LiveSource):
+            async def run(self, sink: Any) -> None:
+                ready.set()
+                await release.wait()
+                await super().run(sink)
+
+        source = HeldLiveSource(run_dir, follow=False, poll_interval=0)
+        app = OccamApp(run_dir, source=source)
+
+        async def body(pilot: Any) -> tuple[int, str, bytes]:
+            await asyncio.wait_for(ready.wait(), timeout=2)
+            await pilot.pause()
+            primed_lines = sum(
+                line.text.startswith("▸ ") for line in app.query_one(DiagnosisFeed).lines
+            )
+            primed_header = _header(app)
+            release.set()
+            await asyncio.wait_for(source.wait_finished(), timeout=2)
+            await pilot.pause()
+            return primed_lines, primed_header, state_json_bytes(app.feed.state)
+
+        return await _run_app(app, body)
+
+    primed_lines, primed_header, replayed_state = _drive(scenario)
+    expected_primed = sum(
+        1 for event in events[:checkpoint] if event.type in DiagnosisFeed.FEED_TYPES
+    )
+    expected_elapsed = (events[checkpoint - 1].ts - events[0].ts).total_seconds()
+    assert primed_lines == expected_primed
+    assert f"{expected_elapsed:,.0f}s" in primed_header
+    assert "elapsed 0s" not in primed_header
+    assert replayed_state == state_json_bytes(reduce(events))
+
+
+def test_live_tail_surfaces_persistent_incomplete_state_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "incomplete-tail"
+    run_dir.mkdir()
+    with EventWriter(run_dir, run_id="tail_test") as writer:
+        writer.append(
+            {
+                "ts": "2026-09-06T00:00:00Z",
+                "type": "log",
+                "data": {"level": "info", "message": "first"},
+            }
+        )
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write('{"run_id":"tail_test","seq":1')
+
+    async def scenario() -> tuple[int, str, str | None]:
+        source = LiveSource(
+            run_dir,
+            poll_interval=0,
+            incomplete_timeout_s=0,
+        )
+        app = OccamApp(run_dir, source=source)
+
+        async def body(pilot: Any) -> tuple[int, str, str | None]:
+            await asyncio.wait_for(source.wait_finished(), timeout=2)
+            await pilot.pause()
+            return app.feed.count, _header(app), source.status
+
+        return await _run_app(app, body)
+
+    count, header, status = _drive(scenario)
+    assert count == 1
+    assert status is not None and "tail incomplete" in status
+    assert "tail incomplete" in header
+
+
+def test_live_tail_surfaces_malformed_log_without_reducing_a_duplicate_prefix(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "malformed-tail"
+    run_dir.mkdir()
+    with EventWriter(run_dir, run_id="tail_test") as writer:
+        writer.append(
+            {
+                "ts": "2026-09-06T00:00:00Z",
+                "type": "log",
+                "data": {"level": "info", "message": "first"},
+            }
+        )
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write("not-json\n")
+
+    async def scenario() -> tuple[int, str, str | None]:
+        source = LiveSource(run_dir, poll_interval=0)
+        app = OccamApp(run_dir, source=source)
+
+        async def body(pilot: Any) -> tuple[int, str, str | None]:
+            await asyncio.wait_for(source.wait_finished(), timeout=2)
+            await pilot.pause()
+            return app.feed.count, _header(app), source.status
+
+        return await _run_app(app, body)
+
+    count, header, status = _drive(scenario)
+    assert count == 1
+    assert status is not None and "tail error" in status
+    assert "tail error" in header
 
 
 def test_to_gen_fast_forwards_to_the_first_event_of_that_generation() -> None:

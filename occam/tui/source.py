@@ -9,6 +9,7 @@ into the run directory.
 from __future__ import annotations
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -101,6 +102,17 @@ class EventSource(ABC):
 
     def initial_state(self) -> State | None:
         """A snapshot for the first paint, when one is available and honest."""
+
+        return None
+
+    def initial_events(self) -> Sequence[Event]:
+        """Already-read history used for non-reducer UI metadata."""
+
+        return ()
+
+    @property
+    def status(self) -> str | None:
+        """A user-visible source warning, if the source cannot tail cleanly."""
 
         return None
 
@@ -261,29 +273,100 @@ class LiveSource(EventSource):
         *,
         poll_interval: float = 0.25,
         follow: bool = True,
+        incomplete_timeout_s: float = 2.0,
     ):
         self.run_dir = Path(run_dir)
+        if poll_interval < 0:
+            raise ValueError("poll_interval must not be negative")
+        if incomplete_timeout_s < 0:
+            raise ValueError("incomplete_timeout_s must not be negative")
         self.poll_interval = poll_interval
         self.follow = follow
+        self.incomplete_timeout_s = incomplete_timeout_s
         self._reader = EventReader(self.run_dir)
         if not self._reader.events_path.exists() and not self._reader.state_path.exists():
             raise FileNotFoundError(f"event log not found: {self._reader.events_path}")
         self._finished = asyncio.Event()
         self._start_seq = 0
+        self._initial_events: tuple[Event, ...] = ()
+        self._status: str | None = None
+        self._incomplete_since: float | None = None
+        self._stop_on_error = False
 
     @property
     def finished(self) -> bool:
         return self._finished.is_set()
+
+    @property
+    def status(self) -> str | None:
+        return self._status
+
+    def initial_events(self) -> Sequence[Event]:
+        """Return history read for first-paint diagnosis and clock metadata."""
+
+        return self._initial_events
+
+    def _set_error(self, message: str, *, stop: bool = False) -> None:
+        self._status = f"⚠ tail error: {message}"
+        self._incomplete_since = None
+        self._stop_on_error = self._stop_on_error or stop
+
+    def _mark_incomplete(self) -> bool:
+        """Mark a partial tail and return whether its bounded wait expired."""
+
+        if self._incomplete_since is None:
+            self._incomplete_since = time.monotonic()
+        elapsed = time.monotonic() - self._incomplete_since
+        if not self.follow or elapsed >= self.incomplete_timeout_s:
+            self._status = f"⚠ tail incomplete after {elapsed:.2f}s"
+            return True
+        self._status = "⚠ tail waiting for complete event"
+        return False
+
+    def _clear_incomplete(self) -> None:
+        self._incomplete_since = None
+        if self._status == "⚠ tail waiting for complete event":
+            self._status = None
 
     def initial_state(self) -> State | None:
         """Load ``state.json`` for an instant first paint when it exists."""
 
         try:
             state = self._reader.load_state()
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            self._set_error(f"state snapshot: {exc}")
             return None
         self._start_seq = max(0, state.last_seq + 1)
-        if state.completed:
+        self._initial_events = ()
+        if self._reader.events_path.exists():
+            try:
+                self._initial_events = tuple(self._reader.read(live=True))
+            except (OSError, ValueError) as exc:
+                # Keep the snapshot available for first paint, but make the
+                # malformed log visible and let ``run`` finish the status path.
+                self._set_error(f"event log: {exc}", stop=True)
+            else:
+                if self._reader.last_read_had_incomplete_trailing_line:
+                    self._mark_incomplete()
+                elif not self._initial_events and state.last_seq >= 0:
+                    self._set_error("state snapshot is ahead of an empty event log", stop=True)
+                elif self._initial_events[-1].seq < state.last_seq:
+                    self._set_error(
+                        f"state snapshot seq {state.last_seq} is ahead of event log seq "
+                        f"{self._initial_events[-1].seq}",
+                        stop=True,
+                    )
+
+        if (
+            state.completed
+            and self._status is None
+            and (
+                (self._initial_events and self._initial_events[-1].seq == state.last_seq)
+                or (not self._initial_events and state.last_seq == -1)
+            )
+        ):
             # A normal finished run has a snapshot at the log head.  There is
             # nothing left to tail, so a default ``occam tui --run`` must not
             # poll forever waiting for a second ``run.completed`` event.
@@ -296,22 +379,43 @@ class LiveSource(EventSource):
     async def run(self, sink: EventSink) -> None:
         if self._finished.is_set():
             return
+        if self._stop_on_error:
+            self._finished.set()
+            return
         # ``initial_state`` primes the app's reducer to this sequence.  If no
         # snapshot was available, the full event log is the only source of
         # truth and playback starts at zero.
         next_seq = self._start_seq
-        while True:
-            events = await asyncio.to_thread(self._reader.read, live=True)
-            fresh = [event for event in events if event.seq >= next_seq]
-            if fresh:
-                next_seq = fresh[-1].seq + 1
-                sink(fresh)
-                if any(event.type == "run.completed" for event in fresh):
+        try:
+            while True:
+                try:
+                    events = await asyncio.to_thread(self._reader.read, live=True)
+                except (OSError, ValueError) as exc:
+                    # A malformed middle/trailing line is not a transient
+                    # partial write. Stop visibly; EventReader remains strict.
+                    self._set_error(f"event log: {exc}", stop=True)
                     break
-            if not self.follow:
-                break
-            await asyncio.sleep(self.poll_interval)
-        self._finished.set()
+
+                incomplete = self._reader.last_read_had_incomplete_trailing_line
+                fresh = [event for event in events if event.seq >= next_seq]
+                if fresh:
+                    next_seq = fresh[-1].seq + 1
+                    sink(fresh)
+
+                if incomplete:
+                    if self._mark_incomplete() or not self.follow:
+                        break
+                    await asyncio.sleep(self.poll_interval)
+                    continue
+
+                self._clear_incomplete()
+                if fresh and any(event.type == "run.completed" for event in fresh):
+                    break
+                if not self.follow:
+                    break
+                await asyncio.sleep(self.poll_interval)
+        finally:
+            self._finished.set()
 
 
 __all__ = [

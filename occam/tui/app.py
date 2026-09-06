@@ -166,7 +166,11 @@ class OccamApp(App[None]):
     async def _drive(self) -> None:
         initial = self.source.initial_state()
         if initial is not None:
-            self.feed.prime(initial)
+            history = tuple(
+                event for event in self.source.initial_events() if event.seq <= initial.last_seq
+            )
+            self.feed.prime(initial, history=history)
+            self.query_one(DiagnosisFeed).prime(history)
             self.post_message(StateChanged(initial))
         await self.source.run(self._on_events)
         if self.feed.state is not None:
@@ -174,6 +178,10 @@ class OccamApp(App[None]):
             # repaint once more so the mode badge reflects that transition even
             # for logs without a run.completed event.
             self.post_message(StateChanged(self.feed.state))
+        else:
+            # A source can fail before producing its first event; refresh the
+            # header so a bounded-tail error is still visible.
+            self.refresh_view()
 
     def _on_events(self, events: Sequence[Event]) -> None:
         """Sink handed to the source; runs on the app's event loop."""
@@ -205,6 +213,7 @@ class OccamApp(App[None]):
             paused=getattr(source, "paused", False),
             finished=getattr(source, "finished", False),
             elapsed_s=self.feed.elapsed_s(),
+            status=getattr(source, "status", None),
             compare=self.compare,
         )
 
