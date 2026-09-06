@@ -192,7 +192,7 @@ Plateau: no improvement in `(pass_rate, -cost)` lexicographic for 2 generations.
 
 ## 5. LLM layer (`occam/llm/`)
 
-- One client interface: `complete(model_key, messages, tools=None, response_schema=None) -> Completion{text, tool_calls, tokens_in, tokens_out, cost_usd, latency_s, cached}`.
+- One client interface: `complete(model_key, messages, tools=None, response_schema=None) -> Completion{text, tool_calls, tokens_in, tokens_out, cost_usd, billed_cost_usd, cost_label, latency_s, cached}`.
 - Providers behind it: OpenAI-compatible (TensorMux, OpenAI; any other OpenAI-shaped gateway is a `base_url` swap), Anthropic. All via `base_url` + key from `.env`.
 - `models.yaml`:
   ```yaml

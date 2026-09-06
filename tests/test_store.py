@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -15,6 +16,8 @@ import pytest
 
 from occam.store.reader import EventReader
 from occam.store.writer import EventWriter
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # One process's worth of appends, run in a real subprocess so the writer's file
 # lock is exercised across processes rather than across threads of one process.
@@ -39,6 +42,21 @@ finally:
 """
 
 
+def _subprocess_env() -> dict[str, str]:
+    """Make checkout imports explicit for scripts launched outside the repo."""
+
+    package_init = _PROJECT_ROOT / "occam" / "__init__.py"
+    if not package_init.is_file():
+        raise RuntimeError(f"validated project root is missing {package_init}")
+
+    environment = os.environ.copy()
+    existing_path = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        path for path in (str(_PROJECT_ROOT), existing_path) if path
+    )
+    return environment
+
+
 def _log_event(message: str) -> dict[str, object]:
     return {
         "ts": "2026-09-05T00:00:00Z",
@@ -58,11 +76,34 @@ def test_occam_store_imports_in_a_fresh_interpreter_on_this_platform() -> None:
     completed = subprocess.run(
         [sys.executable, "-c", "import occam.store; print(occam.store.EventWriter.__name__)"],
         capture_output=True,
+        env=_subprocess_env(),
         text=True,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "EventWriter"
+
+
+def test_subprocess_appender_imports_checkout_and_appends(tmp_path: Path) -> None:
+    """The appender child must both import the checkout and write an event."""
+
+    run_dir = tmp_path / "subprocess_append"
+    run_dir.mkdir()
+    script = tmp_path / "appender.py"
+    script.write_text(textwrap.dedent(_APPENDER), encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(script), str(run_dir), "subprocess_test", "child", "1"],
+        capture_output=True,
+        env=_subprocess_env(),
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    lines = (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["data"]["message"] == "child-0"
 
 
 def test_concurrent_processes_append_without_interleaving_or_corruption(tmp_path: Path) -> None:
@@ -83,6 +124,7 @@ def test_concurrent_processes_append_without_interleaving_or_corruption(tmp_path
             [sys.executable, str(script), str(run_dir), "concurrent_test", worker, str(per_worker)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=_subprocess_env(),
             text=True,
         )
         for worker in ("alpha", "beta")

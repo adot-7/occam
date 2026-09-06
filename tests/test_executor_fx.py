@@ -1,9 +1,8 @@
 """WP-05 acceptance: a hand-written 3-role FX team over 5 cases, end to end.
 
-The tool is a local stub with WP-04's response shape (`02 §2`); WP-04's real
-registry was not on ``main`` when this was written, so the executor is wired
-through :func:`occam.engine.executor.normalize_registry`, which accepts the
-``name -> (ToolSpec, callable)`` mapping WP-04 will expose.
+The default path uses a real :class:`FXClient` and :class:`ToolRegistry` over a
+deterministic transport, so the test exercises cold and warm disk-cache
+behaviour without making the suite depend on the public network.
 
 Two live variants are opt-in because a default test run must stay hermetic:
 
@@ -17,25 +16,27 @@ from __future__ import annotations
 import json
 import os
 
+import httpx
 import pytest
 
 from occam.core.models import Architecture, Case, Role
 from occam.engine.executor import Executor
 from occam.store.reader import EventReader
 from occam.store.writer import EventWriter
+from occam.tools.fx import FXClient
+from occam.tools.registry import ToolRegistry
 from tests.executor_doubles import (
     CALCULATOR_MARK,
     FETCHER_MARK,
     FX_CASES,
-    FX_RATE_SPEC,
     PARSER_MARK,
     WORKER,
-    RecordingTool,
     ScriptedProvider,
     build_client,
     fx_agent_script,
     grade_fx_total,
     offline_fx_rate,
+    offline_rate,
     sections,
 )
 
@@ -97,15 +98,8 @@ FX_ARCHITECTURE = Architecture(
 )
 
 
-def fx_cases(tool: RecordingTool) -> list[Case]:
-    """Build the 5 cases, referencing them against the live rate source.
-
-    The reference answer is computed with the same tool the team calls, so the
-    live-HTTP variant grades against real ECB rates rather than stub ones.
-    """
-
-    def rate(currency: str, requested: str) -> float:
-        return float(tool(date=requested, base=currency, symbol="INR")["rate"])
+def fx_cases(rate=offline_rate) -> list[Case]:
+    """Build the five cases from a supplied (cold or live) rate source."""
 
     cases = [
         Case(
@@ -116,41 +110,44 @@ def fx_cases(tool: RecordingTool) -> list[Case]:
         )
         for item in FX_CASES
     ]
-    tool.reset()
     return cases
 
 
-def live_fx_rate(date: str, base: str, symbol: str) -> dict[str, object]:
-    """Real Frankfurter HTTP, in the shape WP-04's tool returns (02 §2)."""
+class DeterministicFXTransport(httpx.BaseTransport):
+    """ECB-shaped responses for the cold-cache integration path."""
 
-    import httpx
+    def __init__(self) -> None:
+        self.requests: list[str] = []
 
-    response = httpx.get(
-        f"https://api.frankfurter.dev/v1/{date}",
-        params={"base": base, "symbols": symbol},
-        timeout=30.0,
-        follow_redirects=True,
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(str(request.url))
+        requested = request.url.path.rsplit("/", maxsplit=1)[-1]
+        base = request.url.params["base"]
+        symbol = request.url.params["symbols"]
+        result = offline_fx_rate(requested, base, symbol)
+        return httpx.Response(
+            200,
+            json={
+                "amount": 1.0,
+                "base": base,
+                "date": result["rate_date"],
+                "rates": {symbol: result["rate"]},
+            },
+            request=request,
+        )
+
+
+@pytest.fixture
+def fx_executor(tmp_path):
+    """A fresh executor whose LLM and FX caches survive within one test."""
+
+    live_http = os.environ.get("OCCAM_LIVE_HTTP") == "1"
+    transport = None if live_http else DeterministicFXTransport()
+    fx_client = FXClient(
+        cache_dir=tmp_path / "fx_cache",
+        **({} if transport is None else {"transport": transport}),
     )
-    response.raise_for_status()
-    payload = response.json()
-    return {
-        "requested_date": date,
-        "rate_date": payload["date"],
-        "base": payload["base"],
-        "symbol": symbol,
-        "rate": payload["rates"][symbol],
-    }
-
-
-@pytest.fixture
-def fx_tool() -> RecordingTool:
-    implementation = live_fx_rate if os.environ.get("OCCAM_LIVE_HTTP") == "1" else offline_fx_rate
-    return RecordingTool(FX_RATE_SPEC, implementation)
-
-
-@pytest.fixture
-def fx_executor(tmp_path, fx_tool):
-    """A fresh executor whose LLM cache survives across runs within one test."""
+    registry = ToolRegistry(fx_client=fx_client)
 
     if os.environ.get("OCCAM_LIVE_LLM") == "1":
         from occam.llm.client import LLMClient
@@ -164,23 +161,33 @@ def fx_executor(tmp_path, fx_tool):
     writer = EventWriter(run_dir, run_id="wp05")
     executor = Executor(
         llm=client,
-        tools={"fx_rate": (FX_RATE_SPEC, fx_tool)},
+        tools=registry,
         grader=grade_fx_total,
         writer=writer,
         run_dir=run_dir,
         # Frankfurter publishes no rate limit; stay under the 5 concurrent
         # requests OPEN-QUESTIONS settled on when the live tool is in use.
-        case_concurrency=4 if os.environ.get("OCCAM_LIVE_HTTP") == "1" else 8,
+        case_concurrency=4 if live_http else 8,
     )
-    yield executor, provider, run_dir
+    if live_http:
+        expected_client = FXClient(cache_dir=tmp_path / "expected_fx_cache")
+
+        def expected_rate(currency: str, requested: str) -> float:
+            return float(expected_client.fx_rate(requested, currency, "INR")["rate"])
+
+    else:
+        expected_client = None
+        expected_rate = offline_rate
+    cases = fx_cases(expected_rate)
+    yield executor, provider, registry, cases, run_dir, transport
     writer.close()
+    fx_client.close()
+    if expected_client is not None:
+        expected_client.close()
 
 
-def test_three_role_team_runs_five_cases_then_serves_the_second_run_from_cache(
-    fx_executor, fx_tool
-):
-    executor, provider, run_dir = fx_executor
-    cases = fx_cases(fx_tool)
+def test_three_role_team_runs_five_cases_then_serves_the_second_run_from_cache(fx_executor):
+    executor, provider, registry, cases, run_dir, transport = fx_executor
 
     first = executor.execute(FX_ARCHITECTURE, cases)
 
@@ -188,7 +195,10 @@ def test_three_role_team_runs_five_cases_then_serves_the_second_run_from_cache(
     assert [item.case_id for item in first.results] == [item.id for item in cases]
     assert first.pass_rate == 1.0, [item.answer for item in first.results if not item.passed]
     assert first.cost_usd > 0.0
-    assert fx_tool.count > 0
+    assert registry.fx_client.calls
+    if transport is not None:
+        assert transport.requests
+    network_calls = len(transport.requests) if transport is not None else None
     if provider is not None:
         assert provider.count > 0
     # Every role ran on every case, and every role has its own accounting.
@@ -211,7 +221,6 @@ def test_three_role_team_runs_five_cases_then_serves_the_second_run_from_cache(
 
     if provider is not None:
         provider.reset()
-    fx_tool.reset()
 
     second = executor.execute(FX_ARCHITECTURE, cases, generation=1)
 
@@ -223,6 +232,8 @@ def test_three_role_team_runs_five_cases_then_serves_the_second_run_from_cache(
         assert all(trace.cost_label == "cache-hit" for trace in result.per_role.values())
     if provider is not None:
         assert provider.count == 0, "second run must be served entirely from the LLM cache"
+    if transport is not None:
+        assert len(transport.requests) == network_calls
 
     events = EventReader(run_dir).read()
     assert [event.type for event in events].count("execution.case") == 10
@@ -233,9 +244,8 @@ def test_three_role_team_runs_five_cases_then_serves_the_second_run_from_cache(
     assert (run_dir / "generations" / "g001" / "results.jsonl").exists()
 
 
-def test_knocking_out_role_two_caches_role_one_and_recomputes_role_three(fx_executor, fx_tool):
-    executor, provider, run_dir = fx_executor
-    cases = fx_cases(fx_tool)
+def test_knocking_out_role_two_caches_role_one_and_recomputes_role_three(fx_executor):
+    executor, provider, _registry, cases, run_dir, _transport = fx_executor
 
     full = executor.execute(FX_ARCHITECTURE, cases)
     assert full.pass_rate == 1.0

@@ -31,6 +31,7 @@ class ToolCall:
     latency_s: float
     bytes: int
     cached: bool
+    response: Any = None
     http_status: int | None = None
     error: str | None = None
 
@@ -50,6 +51,7 @@ class ToolCall:
             "latency_s": self.latency_s,
             "bytes": self.bytes,
             "cached": self.cached,
+            "response": self.response,
             "http_status": self.http_status,
             "error": self.error,
         }
