@@ -498,6 +498,8 @@ def test_role_trace_carries_the_displayed_cost_and_its_label() -> None:
     assert RoleTrace().cost_label == "metered"
     assert RoleTrace().billed_cost_usd == 0.0
     with pytest.raises(ValidationError):
+        RoleTrace(cost_label="")
+    with pytest.raises(ValidationError):
         RoleTrace(cost_usd=-1.0)
     with pytest.raises(ValidationError):
         RoleTrace.model_validate({"unexpected": True})
