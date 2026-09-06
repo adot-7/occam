@@ -64,14 +64,14 @@ class ToolSpec(ContractModel):
 class Role(ContractModel):
     """One node in an architecture DAG."""
 
-    id: str
-    name: str
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
     justification: Justification
-    model: str
+    model: str = Field(min_length=1)
     system_prompt: str
     tools: list[str]
     inputs: list[str]
-    output_key: str
+    output_key: str = Field(min_length=1)
     memory: MemoryPolicy = "none"
     max_turns: int = Field(default=6, ge=1)
 
@@ -79,10 +79,10 @@ class Role(ContractModel):
 class Architecture(ContractModel):
     """A versioned, topologically sortable set of roles."""
 
-    id: str
+    id: str = Field(min_length=1)
     parent_id: str | None
     roles: list[Role]
-    final_role: str
+    final_role: str = Field(min_length=1)
     control: ControlMode = "deterministic"
     notes: str = ""
 

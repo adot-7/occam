@@ -104,6 +104,14 @@ def test_prune_rejects_non_prunable_verdicts() -> None:
         )
 
 
+def test_prune_requires_explicit_verdict_evidence() -> None:
+    with pytest.raises(MutationError, match="explicit role verdict evidence"):
+        apply_mutation(
+            architecture(),
+            Mutation(type="prune", target_role="r_rates"),
+        )
+
+
 def test_split_replaces_target_in_downstream_inputs() -> None:
     result = apply_mutation(architecture(), Mutation(type="split", target_role="r_rates"))
     ids = [role.id for role in result.architecture.roles]

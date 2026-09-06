@@ -22,6 +22,7 @@ from occam.core.models import Architecture, Lesson, Task, ToolSpec
 from occam.engine.executor import ArchitectureError, validate_architecture
 from occam.llm.client import LLMClient
 from occam.memory.lessons import LessonStore, LessonStoreError, validate_lesson
+from occam.store.schema import validate_event
 from occam.tools.registry import append_tool_note, build_spec
 
 EventSink = Callable[[str, Mapping[str, Any]], None]
@@ -275,13 +276,12 @@ class Architect:
             completion, generation=generation, parent_id=parent_id
         )
         self._validate_proposal(architecture, tool_names, task)
-        self._emit(
-            "architecture.proposed",
-            {
-                "architecture": architecture.model_dump(mode="json", exclude_none=False),
-                "generation": generation,
-            },
-        )
+        event_data = {
+            "architecture": architecture.model_dump(mode="json", exclude_none=False),
+            "generation": generation,
+        }
+        self._validate_event_compatibility(event_data)
+        self._emit("architecture.proposed", event_data)
         return architecture
 
     def _build_tool_specs(
@@ -473,6 +473,24 @@ class Architect:
         task_tools = set(_tool_names(task))
         if allowed != task_tools:
             raise ArchitectError("task tool manifest changed while validating the proposal")
+
+    @staticmethod
+    def _validate_event_compatibility(data: Mapping[str, Any]) -> None:
+        """Reject proposals the event schema cannot persist before returning them."""
+
+        envelope = {
+            "ts": _now_iso(),
+            "run_id": "architect-validation",
+            "seq": 0,
+            "type": "architecture.proposed",
+            "data": dict(data),
+        }
+        try:
+            validate_event(envelope)
+        except ValueError as exc:
+            raise ArchitectError(
+                f"architect proposal is not compatible with the event schema: {exc}"
+            ) from exc
 
     def _validate_model_keys(self, architecture: Architecture) -> None:
         configs = getattr(self.llm, "configs", None)

@@ -471,16 +471,19 @@ def apply_mutation(
 ) -> MutationApplication:
     """Apply one legal menu operation without mutating its parent.
 
-    ``role_verdicts`` is supplied by ablation when pruning.  If present, a
-    prune is allowed only for ``witness`` or ``harmful``; uncertain and
-    load-bearing roles can never be pruned by this boundary.
+    ``role_verdicts`` is supplied by ablation when pruning.  A prune requires
+    explicit verdict evidence and is allowed only for ``witness`` or
+    ``harmful``; uncertain and load-bearing roles can never be pruned by this
+    boundary.
     """
 
     if not isinstance(mutation, Mutation):
         if not isinstance(mutation, Mapping):
             raise MutationError("mutation must be a Mutation or mapping")
         mutation = Mutation.from_mapping(mutation)
-    if mutation.type == "prune" and role_verdicts is not None:
+    if mutation.type == "prune":
+        if role_verdicts is None:
+            raise MutationError("prune requires explicit role verdict evidence")
         raw_verdict = role_verdicts.get(mutation.target_role)
         verdict = raw_verdict
         if isinstance(raw_verdict, Mapping):

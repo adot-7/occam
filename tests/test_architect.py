@@ -185,6 +185,25 @@ def test_architect_emits_schema_compatible_event(tmp_path: Path) -> None:
     assert proposal.data["architecture"]["id"] == "g000"
 
 
+@pytest.mark.parametrize("field", ("id", "name", "model", "output_key"))
+def test_architect_rejects_empty_schema_constrained_role_fields_without_writer(
+    tmp_path: Path, field: str
+) -> None:
+    payload = architecture_payload()
+    payload["roles"][0][field] = ""
+
+    with pytest.raises(ArchitectError, match="strict validation"):
+        Architect(llm=StubArchitectLLM(payload), memory=tmp_path / "memory").propose(TASK)
+
+
+def test_architect_event_compatibility_guard_rejects_invalid_payload() -> None:
+    payload = architecture_payload()
+    payload["roles"][0]["output_key"] = ""
+
+    with pytest.raises(ArchitectError, match="event schema"):
+        Architect._validate_event_compatibility({"architecture": payload, "generation": 0})
+
+
 def test_architect_rejects_non_strict_or_ambiguous_output(tmp_path: Path) -> None:
     bad_payload = {**architecture_payload(), "unexpected": True}
     with pytest.raises(ArchitectError, match="strict validation"):
