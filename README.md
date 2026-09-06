@@ -30,6 +30,7 @@ So we almost built something the literature had just disproven. Instead, we buil
 - A leak guard rejects any lesson containing a date or a number. It must be a reusable rule, never an answer.
 - FX ground truth has one definition: the [revaluation formula in `prd/02`](prd/02-DATA-AND-TASKS.md#12-the-formula-single-source-of-truth--grader-reference-implementation-and-readme-all-use-this). Book each invoice at its issue-date rate, value open invoices at the valuation-date rate or settled invoices at their settlement proceeds, then sum `value − booked` in INR.
 - Traced end to end in **Neatlogs**; inference on **GLM-4.7-Flash via TensorMux** and **GPT-5 nano via AI Grants India**.
+- Neatlogs org ID: 0cdcf3bf-0efd-4b74-9da9-ebddf5a8520b
 
 ## Challenges we ran into
 
