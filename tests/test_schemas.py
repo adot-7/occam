@@ -282,6 +282,39 @@ def test_full_repeat_matches_the_configured_ablation_subset() -> None:
                 assert disagreements / len(repeat_cases) == 0.10
 
 
+def test_metrics_reliability_matches_noise_for_every_generation() -> None:
+    for fixture in FIXTURES:
+        events = EventReader(fixture).read()
+        generations = {
+            event.data["generation"] for event in events if event.type == "ablation.started"
+        }
+        for generation in generations:
+            full_cases = {
+                event.data["case_id"]: event.data["passed"]
+                for event in events
+                if event.type == "execution.case"
+                and event.data["generation"] == generation
+                and event.data["variant"] == "full"
+            }
+            repeat_cases = {
+                event.data["case_id"]: event.data["passed"]
+                for event in events
+                if event.type == "execution.case"
+                and event.data["generation"] == generation
+                and event.data["variant"] == "full_repeat"
+            }
+            disagreements = sum(
+                full_cases[case_id] != repeat_cases[case_id] for case_id in repeat_cases
+            )
+            noise_rate = disagreements / len(repeat_cases)
+            metrics = next(
+                event.data
+                for event in events
+                if event.type == "metrics.snapshot" and event.data["generation"] == generation
+            )
+            assert metrics["reliability"] == pytest.approx(1 - noise_rate)
+
+
 def test_best_generation_reliability_and_summary_are_cross_event_consistent() -> None:
     events = EventReader(RUN1).read()
     state = reduce(events)
