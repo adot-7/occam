@@ -33,6 +33,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, is_dataclass
@@ -288,7 +289,15 @@ def _cost_label(labels: Sequence[str]) -> str:
     exclusively.
     """
 
-    unique = sorted({label for label in labels if label})
+    unique: set[str] = set()
+    for label in labels:
+        if not label:
+            continue
+        if label.startswith("mixed (") and label.endswith(")"):
+            unique.update(part.strip() for part in label[7:-1].split(",") if part.strip())
+        else:
+            unique.add(label)
+    unique = sorted(unique)
     if not unique:
         return "unavailable"
     if len(unique) == 1:
@@ -641,6 +650,8 @@ class Executor:
 
         started = time.perf_counter()
         loop = asyncio.get_running_loop()
+        nested_traces: list[RoleTrace] = []
+        nested_trace_guard = threading.Lock()
         role_registry = self._role_registry(
             role,
             case,
@@ -648,6 +659,8 @@ class Executor:
             index,
             control,
             loop,
+            nested_traces,
+            nested_trace_guard,
         )
         role_tools = (
             normalize_registry(role_registry.bindings(role.tools))
@@ -712,16 +725,26 @@ class Executor:
             if turn == role.max_turns:
                 error = f"max_turns ({role.max_turns}) reached before a final answer"
 
+        with nested_trace_guard:
+            branches = list(nested_traces)
+        branch_tool_calls = [tool_call for branch in branches for tool_call in branch.tool_calls]
+        branch_labels = [branch.cost_label for branch in branches]
+        branch_cached = all(branch.cached for branch in branches)
         return RoleTrace(
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            cost_usd=cost,
-            billed_cost_usd=billed_cost,
-            cost_label=_cost_label(cost_labels),
-            latency_s=time.perf_counter() - started,
+            tokens_in=tokens_in + sum(branch.tokens_in for branch in branches),
+            tokens_out=tokens_out + sum(branch.tokens_out for branch in branches),
+            cost_usd=cost + sum(branch.cost_usd for branch in branches),
+            billed_cost_usd=billed_cost + sum(branch.billed_cost_usd for branch in branches),
+            cost_label=_cost_label([*cost_labels, *branch_labels]),
+            # ``CaseResult.latency_s`` remains wall-clock latency.  A role
+            # trace is cumulative accounting, so retain branch work as well
+            # as the calling role's elapsed time.
+            latency_s=(
+                time.perf_counter() - started + sum(branch.latency_s for branch in branches)
+            ),
             output=output,
-            tool_calls=tool_calls,
-            cached=cached and error is None,
+            tool_calls=[*tool_calls, *branch_tool_calls],
+            cached=cached and branch_cached and error is None,
             error=error,
         )
 
@@ -733,6 +756,8 @@ class Executor:
         index: Mapping[str, Role],
         control: str,
         loop: asyncio.AbstractEventLoop,
+        nested_traces: list[RoleTrace],
+        nested_trace_guard: threading.Lock,
     ) -> ToolRegistry | None:
         """Create the registry scoped to ``role`` and its prompt runner."""
 
@@ -755,6 +780,8 @@ class Executor:
                 loop,
             )
             trace = future.result()
+            with nested_trace_guard:
+                nested_traces.append(trace)
             if trace.error:
                 raise ExecutorError(trace.error)
             return trace.output

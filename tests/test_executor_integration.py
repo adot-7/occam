@@ -307,6 +307,95 @@ def test_fan_out_uses_the_calling_role_runner_and_scope(tmp_path: Path) -> None:
     }
 
 
+def test_fan_out_aggregates_nested_accounting_once_and_isolates_siblings(
+    tmp_path: Path,
+) -> None:
+    transport = FXTransport()
+    registry = ToolRegistry(
+        fx_client=FXClient(cache_dir=tmp_path / "fx_cache", transport=transport)
+    )
+    branch_requests = {
+        "one": {"date": "2026-04-01", "base": "EUR", "symbol": "INR"},
+        "two": {"date": "2026-04-02", "base": "USD", "symbol": "INR"},
+    }
+
+    def provider_handler(call: ProviderCall):
+        task = call.user.removeprefix("### task\n")
+        has_tool_result = any(message["role"] == "tool" for message in call.messages)
+        if call.system == "ROLE: sibling":
+            return text_response("sibling complete", tokens_in=23, tokens_out=24)
+        if task == "parent":
+            if has_tool_result:
+                return text_response("parent complete", tokens_in=11, tokens_out=12)
+            return tool_call_response(
+                [("fan_out", {"subtasks": ["one", "two"]})],
+                tokens_in=7,
+                tokens_out=8,
+            )
+        if task in branch_requests:
+            if has_tool_result:
+                return text_response(f"branch {task}", tokens_in=15, tokens_out=16)
+            return tool_call_response(
+                [("fx_rate", branch_requests[task])],
+                tokens_in=13,
+                tokens_out=14,
+            )
+        raise AssertionError(f"unexpected task: {task!r}")
+
+    provider = ScriptedProvider(provider_handler)
+    result = Executor(
+        llm=build_client(provider, tmp_path / "llm_cache"),
+        # Use the real registry publication, including the real fan_out runner.
+        tools=registry.bindings(),
+        case_concurrency=1,
+        model_concurrency=4,
+    ).execute(
+        architecture(
+            role("parent", tools=["fan_out", "fx_rate"]),
+            role("sibling"),
+            final="parent",
+        ),
+        [case("parent")],
+    )
+
+    parent = result.results[0].per_role["parent"]
+    sibling = result.results[0].per_role["sibling"]
+    # Parent: two own completions plus two completions per nested branch.
+    assert parent.tokens_in == 74
+    assert parent.tokens_out == 80
+    assert parent.cost_usd == pytest.approx((74 * 0.06 + 80 * 0.40) / 1_000_000)
+    assert parent.billed_cost_usd == 0.0
+    assert parent.cost_label == "list-rate-equivalent"
+    assert parent.cached is False
+    assert parent.latency_s > 0.0
+
+    # The outer call is retained once and each branch's authoritative FX call
+    # is flattened into the same RoleTrace once, without a lossy duplicate log.
+    assert len(parent.tool_calls) == 3
+    assert sum(call["name"] == "fan_out" for call in parent.tool_calls) == 1
+    nested_fx_calls = [call for call in parent.tool_calls if call["name"] == "fx_rate"]
+    assert len(nested_fx_calls) == 2
+    assert sorted(call["arguments"]["date"] for call in nested_fx_calls) == [
+        "2026-04-01",
+        "2026-04-02",
+    ]
+    assert all(call["status"] == "ok" for call in nested_fx_calls)
+    assert all(
+        call["response"]["requested_date"] == call["arguments"]["date"] for call in nested_fx_calls
+    )
+    assert len(transport.requests) == 2
+    assert sum("### task\none" in call.user for call in provider.calls) == 2
+    assert sum("### task\ntwo" in call.user for call in provider.calls) == 2
+
+    # A same-level sibling retains only its own completion and accounting.
+    assert sibling.tokens_in == 23
+    assert sibling.tokens_out == 24
+    assert sibling.tool_calls == []
+    assert sibling.cost_usd == pytest.approx((23 * 0.06 + 24 * 0.40) / 1_000_000)
+    assert sibling.billed_cost_usd == 0.0
+    assert sibling.cost_label == "list-rate-equivalent"
+
+
 def test_duplicate_output_keys_fail_before_provider_or_completion_event(tmp_path: Path) -> None:
     provider = ScriptedProvider(lambda _call: text_response("unreachable"))
     run_dir = tmp_path / "run"
