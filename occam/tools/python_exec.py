@@ -2763,10 +2763,16 @@ def run(
         .strip()
     )
     # -I isolates the child from PYTHON* variables and the user site directory;
-    # the temporary cwd keeps a stray open() away from the repository.
-    argv = [sys.executable, "-I", "-B", "-c", bootstrap]
-
+    # the temporary cwd keeps a stray open() away from the repository.  The
+    # bootstrap is written to a file instead of passed via ``-c``: Windows
+    # caps a child process's command line at 32,767 characters and the
+    # capability evaluator is well past that, while the agent's own code
+    # still only ever travels on stdin.
     with tempfile.TemporaryDirectory(prefix="occam-python-exec-") as workdir:
+        bootstrap_path = os.path.join(workdir, "_bootstrap.py")
+        with open(bootstrap_path, "w", encoding="utf-8") as bootstrap_file:
+            bootstrap_file.write(bootstrap)
+        argv = [sys.executable, "-I", "-B", bootstrap_path]
         try:
             # Fixed argv, no shell: the agent's code travels on stdin.
             completed = subprocess.run(
