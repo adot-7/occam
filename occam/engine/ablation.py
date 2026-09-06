@@ -235,6 +235,16 @@ def _by_case(result: RunResult) -> dict[str, Any]:
     return index
 
 
+def _case_ids(case_ids: Sequence[str]) -> list[str]:
+    """Copy and validate the case IDs that define a paired sample."""
+
+    ids = list(case_ids)
+    if len(set(ids)) != len(ids):
+        duplicates = sorted({case_id for case_id in ids if ids.count(case_id) > 1})
+        raise ValueError(f"duplicate case_id in requested ablation subset: {', '.join(duplicates)}")
+    return ids
+
+
 def pair_outcomes(
     full: RunResult,
     variant: RunResult,
@@ -244,7 +254,9 @@ def pair_outcomes(
 
     full_index = _by_case(full)
     variant_index = _by_case(variant)
-    ids = list(case_ids) if case_ids is not None else [case.case_id for case in variant.results]
+    ids = (
+        _case_ids(case_ids) if case_ids is not None else [case.case_id for case in variant.results]
+    )
     pairs: list[PairedOutcome] = []
     for case_id in ids:
         if case_id not in full_index:
@@ -397,7 +409,7 @@ def build_table(
     which is how "skip unchanged roles" (`03 §3.4`) reaches this layer.
     """
 
-    ids = list(case_ids)
+    ids = _case_ids(case_ids)
     if not ids:
         raise ValueError("ablation needs at least one case")
     roles = [role for role in architecture.roles if role.id in knockouts]
@@ -460,7 +472,7 @@ def ablate(
     if not cases:
         raise ValueError("ablation needs at least one case")
     emit = sink or null_sink
-    case_ids = [case.id for case in cases]
+    case_ids = _case_ids([case.id for case in cases])
 
     requested = None if roles is None else set(roles)
     if requested is not None:
@@ -548,6 +560,7 @@ def select_ablation_subset(cases: Sequence[Case], n: int) -> list[Case]:
 
     if n < 0:
         raise ValueError("n must be >= 0")
+    _case_ids([case.id for case in cases])
     if n >= len(cases):
         return list(cases)
     strata: dict[str, list[Case]] = {}

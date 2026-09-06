@@ -163,6 +163,20 @@ def test_cost_share_requires_positive_displayed_role_trace_costs() -> None:
     assert role_cost_shares(unpriced, []) == {}
 
 
+def test_cost_shares_reject_duplicate_roles_or_result_case_ids() -> None:
+    run = _run([("c1", "a", True)])
+    with pytest.raises(ValueError, match="duplicate role_id"):
+        role_cost_shares(run, ["r_a", "r_a"])
+
+    duplicate_cases = make_run_result(
+        "full",
+        [("c1", "a", True), ("c1", "b", False)],
+        role_costs={"r_a": 1.0},
+    )
+    with pytest.raises(ValueError, match="duplicate case_id"):
+        role_cost_shares(duplicate_cases, ["r_a"])
+
+
 def test_snapshot_reports_every_field_in_the_spec() -> None:
     run = _run(
         [("c1", "a", True), ("c2", "b", False), ("c3", "c", True), ("c4", "d", True)],

@@ -84,12 +84,12 @@ def tool_calls_per_case(result: RunResult) -> float:
 def _case_results(result: RunResult, case_ids: Sequence[str] | None) -> Sequence[CaseResult]:
     """Return the requested cases, rejecting an accidentally incomplete pairing."""
 
-    if case_ids is None:
-        return result.results
-    requested = list(case_ids)
     by_id = {case.case_id: case for case in result.results}
     if len(by_id) != len(result.results):
         raise ValueError(f"duplicate case_id in run variant {result.variant!r}")
+    if case_ids is None:
+        return result.results
+    requested = list(case_ids)
     missing = [case_id for case_id in requested if case_id not in by_id]
     if missing:
         raise ValueError(
@@ -151,6 +151,8 @@ def role_cost_shares(
     )
     if not keys:
         return {}
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate role_id in requested cost-share roles")
     costs = role_cost_totals(result, case_ids=case_ids)
     weights: dict[str, float] = {key: float(costs.get(key, 0.0)) for key in keys}
     total = math.fsum(weights.values())

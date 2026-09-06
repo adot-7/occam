@@ -385,6 +385,13 @@ def test_pairing_rejects_a_variant_that_is_missing_a_case() -> None:
         pair_outcomes(full, knockout, ["c01", "c02"])
 
 
+def test_pairing_rejects_a_duplicate_requested_case() -> None:
+    full = make_run_result("full", [("c01", "x", True)])
+    knockout = make_run_result("ablate:r", [("c01", "x", True)])
+    with pytest.raises(ValueError, match="duplicate case_id"):
+        pair_outcomes(full, knockout, ["c01", "c01"])
+
+
 def test_noise_floor_compares_two_full_runs_and_is_measured_without_the_cache() -> None:
     architecture, _ = _pipeline()
     runner = _prd_runner()
@@ -461,6 +468,17 @@ def test_ablate_can_target_a_subset_of_roles() -> None:
     assert [row.role_id for row in table.rows] == ["r_calc", "r_verify"]
     with pytest.raises(ValueError, match="unknown role ids"):
         ablate(architecture, CASES, runner=runner, generation=2, full=full, roles=["nope"])
+
+
+def test_ablate_rejects_duplicate_subset_ids_before_running_variants() -> None:
+    architecture, _ = _pipeline()
+    runner = _prd_runner()
+    full = runner.full_result(architecture)
+
+    with pytest.raises(ValueError, match="duplicate case_id"):
+        ablate(architecture, [CASES[0], CASES[0]], runner=runner, generation=0, full=full)
+
+    assert runner.calls == [("full", None, True)]
 
 
 # --- events ------------------------------------------------------------------------
