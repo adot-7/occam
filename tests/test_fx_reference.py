@@ -199,15 +199,18 @@ def test_fx_series_normalizes_daily_rows_and_limits_concurrency(tmp_path: Path) 
                 200,
                 json={
                     "base": "EUR",
+                    "start_date": "2026-04-01",
+                    "end_date": "2026-04-02",
                     "rates": {
                         "2026-04-01": {"USD": 1.10},
                         "2026-04-02": {"USD": 1.11},
                     },
                 },
             )
+        requested_date = request.url.path.rsplit("/", 1)[-1]
         return httpx.Response(
             200,
-            json={"base": "EUR", "date": "2026-04-02", "rates": {"USD": 1.11}},
+            json={"base": "EUR", "date": requested_date, "rates": {"USD": 1.11}},
         )
 
     with FXClient(cache_dir=tmp_path, transport=httpx.MockTransport(handler)) as client:

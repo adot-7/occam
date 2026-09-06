@@ -8,9 +8,14 @@ concerns to the later WP-04 integration.
 from __future__ import annotations
 
 import json
+import math
+import os
+import re
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
@@ -20,6 +25,15 @@ import httpx
 FRANKFURTER_BASE_URL = "https://api.frankfurter.dev/v1"
 DEFAULT_CACHE_DIR = Path("data/fx_cache")
 MAX_CONCURRENT_REQUESTS = 5
+_EXACT_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+
+# FX clients are often opened independently by generator workers, role
+# registries, or tests.  These guards therefore live at module scope rather
+# than on one client instance.  The cache-path key includes the cache
+# directory so unrelated caches do not block one another.
+_PROCESS_CACHE_GUARD = threading.Lock()
+_PROCESS_CACHE_KEY_LOCKS: dict[str, threading.Lock] = {}
+_PROCESS_LIVE_REQUESTS = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
 
 # These are intentionally plain.  Tool-registry descriptions and learned
 # lessons are assembled by later work packages, not by this HTTP client.
@@ -52,8 +66,9 @@ class FXClient:
     """Synchronous Frankfurter client with deterministic on-disk caching.
 
     ``max_concurrency`` is capped at five to keep callers polite to the free
-    public API.  The semaphore is shared by all requests made through one
-    client, including calls made by multiple generator worker threads.
+    public API.  A process-global semaphore enforces the same five-request
+    ceiling across independently opened clients; the per-client semaphore is
+    an additional, caller-selected limit.
     """
 
     def __init__(
@@ -83,7 +98,6 @@ class FXClient:
         self._owns_http = http_client is None
         self._semaphore = threading.BoundedSemaphore(self.max_concurrency)
         self._cache_guard = threading.RLock()
-        self._key_locks: dict[str, threading.Lock] = {}
         self._calls: list[FXCall] = []
         self._thread_state = threading.local()
 
@@ -140,8 +154,10 @@ class FXClient:
     def fx_rate(self, date: str, base: str, symbol: str) -> dict[str, Any]:
         """Get one exchange rate and retain the API's returned rate date."""
 
-        requested_base = self._currency(base)
-        requested_symbol = self._currency(symbol)
+        requested_date = self._input_date(date, "date")
+        requested_base = self._currency(base, "base")
+        requested_symbol = self._currency(symbol, "symbol")
+        self._assert_distinct_currencies(requested_base, requested_symbol)
         endpoint = f"/{date}"
         request_path = self.request_path(endpoint, requested_base, requested_symbol)
         data, _ = self._get_json(
@@ -149,10 +165,11 @@ class FXClient:
             requested_base,
             requested_symbol,
             request_path,
+            response_kind="daily",
+            requested_start=requested_date,
+            requested_end=requested_date,
         )
         rate_date = data.get("date")
-        if not isinstance(rate_date, str) or not rate_date:
-            raise FXProtocolError("Frankfurter rate response has no date")
         rate = self._rate_value(data, requested_symbol)
         return {
             "requested_date": date,
@@ -165,8 +182,13 @@ class FXClient:
     def fx_series(self, start: str, end: str, base: str, symbol: str) -> dict[str, Any]:
         """Get all returned daily rates for a date interval."""
 
-        requested_base = self._currency(base)
-        requested_symbol = self._currency(symbol)
+        requested_start = self._input_date(start, "start")
+        requested_end = self._input_date(end, "end")
+        if requested_start > requested_end:
+            raise ValueError("start date must not be after end date")
+        requested_base = self._currency(base, "base")
+        requested_symbol = self._currency(symbol, "symbol")
+        self._assert_distinct_currencies(requested_base, requested_symbol)
         endpoint = f"/{start}..{end}"
         request_path = self.request_path(endpoint, requested_base, requested_symbol)
         data, _ = self._get_json(
@@ -174,22 +196,16 @@ class FXClient:
             requested_base,
             requested_symbol,
             request_path,
+            response_kind="series",
+            requested_start=requested_start,
+            requested_end=requested_end,
         )
         raw_rates = data.get("rates")
-        if not isinstance(raw_rates, dict):
-            raise FXProtocolError("Frankfurter series response has no rates object")
 
         rates: dict[str, float] = {}
         for rate_date in sorted(raw_rates):
             row = raw_rates[rate_date]
-            if isinstance(row, dict):
-                if requested_symbol not in row:
-                    raise FXProtocolError(
-                        f"Frankfurter series response has no {requested_symbol} rate on {rate_date}"
-                    )
-                value = row[requested_symbol]
-            else:
-                value = row
+            value = row[requested_symbol]
             rates[rate_date] = self._as_float(value, requested_symbol)
         return {"base": requested_base, "symbol": requested_symbol, "rates": rates}
 
@@ -199,15 +215,25 @@ class FXClient:
         base: str,
         symbol: str,
         request_path: str,
+        *,
+        response_kind: str,
+        requested_start: date,
+        requested_end: date,
     ) -> tuple[dict[str, Any], bool]:
         cache_path = self.cache_path_for(request_path)
-        key_lock = self._lock_for(request_path)
-        with self._semaphore, key_lock:
-            cached_payload = self._read_cache(cache_path, request_path)
+        key_lock = self._lock_for(cache_path)
+        with key_lock:
+            cached_payload = self._read_cache(
+                cache_path,
+                request_path,
+                base=base,
+                symbol=symbol,
+                response_kind=response_kind,
+                requested_start=requested_start,
+                requested_end=requested_end,
+            )
             if cached_payload is not None:
                 data = cached_payload["response"]
-                self._assert_base(data, base)
-                self._assert_symbol(data, symbol)
                 response_bytes = len(self._json_bytes(data))
                 self._record(
                     FXCall(
@@ -222,7 +248,8 @@ class FXClient:
 
             started = time.perf_counter()
             params = {"base": base, "symbols": symbol}
-            response = self._http.get(f"{self.base_url}{endpoint}", params=params)
+            with self._semaphore, _PROCESS_LIVE_REQUESTS:
+                response = self._http.get(f"{self.base_url}{endpoint}", params=params)
             elapsed = time.perf_counter() - started
             response.raise_for_status()
             try:
@@ -231,8 +258,14 @@ class FXClient:
                 raise FXProtocolError("Frankfurter returned invalid JSON") from exc
             if not isinstance(data, dict):
                 raise FXProtocolError("Frankfurter returned a non-object JSON response")
-            self._assert_base(data, base)
-            self._assert_symbol(data, symbol)
+            self._validate_response(
+                data,
+                base=base,
+                symbol=symbol,
+                response_kind=response_kind,
+                requested_start=requested_start,
+                requested_end=requested_end,
+            )
             self._write_cache(
                 cache_path,
                 request_path,
@@ -250,28 +283,59 @@ class FXClient:
             )
             return data, False
 
-    def _lock_for(self, request_path: str) -> threading.Lock:
-        with self._cache_guard:
-            return self._key_locks.setdefault(request_path, threading.Lock())
+    @staticmethod
+    def _lock_for(cache_path: Path) -> threading.Lock:
+        key = str(cache_path.resolve())
+        with _PROCESS_CACHE_GUARD:
+            return _PROCESS_CACHE_KEY_LOCKS.setdefault(key, threading.Lock())
 
     def _record(self, call: FXCall) -> None:
         with self._cache_guard:
             self._calls.append(call)
         self._thread_state.last_call = call
 
-    def _read_cache(self, path: Path, request_path: str) -> dict[str, Any] | None:
-        if not path.is_file():
+    def _read_cache(
+        self,
+        path: Path,
+        request_path: str,
+        *,
+        base: str,
+        symbol: str,
+        response_kind: str,
+        requested_start: date,
+        requested_end: date,
+    ) -> dict[str, Any] | None:
+        if not path.exists():
             return None
+        if not path.is_file():
+            raise FXProtocolError(f"invalid FX cache {path}: cache path is not a file")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, dict) or payload.get("request_path") != request_path:
-            return None
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise FXProtocolError(f"invalid FX cache {path}: unreadable JSON") from exc
+        if not isinstance(payload, dict):
+            raise FXProtocolError(f"invalid FX cache {path}: cache envelope is not an object")
+        if payload.get("request_path") != request_path:
+            raise FXProtocolError(f"invalid FX cache {path}: request path does not match")
         response = payload.get("response")
-        status = payload.get("status", 200)
-        if not isinstance(response, dict) or not isinstance(status, int):
-            return None
+        status = payload.get("status")
+        if not isinstance(response, dict):
+            raise FXProtocolError(f"invalid FX cache {path}: response is not an object")
+        if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status < 300:
+            raise FXProtocolError(
+                f"invalid FX cache {path}: status is not a successful HTTP status"
+            )
+        try:
+            self._validate_response(
+                response,
+                base=base,
+                symbol=symbol,
+                response_kind=response_kind,
+                requested_start=requested_start,
+                requested_end=requested_end,
+            )
+        except FXProtocolError as exc:
+            raise FXProtocolError(f"invalid FX cache {path}: {exc}") from exc
         return {"response": response, "status": status}
 
     def _write_cache(
@@ -287,9 +351,25 @@ class FXClient:
             "response": response,
             "status": status,
         }
-        temporary = path.with_name(f".{path.name}.tmp")
-        temporary.write_bytes(self._json_bytes(payload))
-        temporary.replace(path)
+        temporary: Path | None = None
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                dir=path.parent,
+            )
+            temporary = Path(temporary_name)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(self._json_bytes(payload))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
 
     @staticmethod
     def _json_bytes(value: Any) -> bytes:
@@ -297,10 +377,37 @@ class FXClient:
         return (encoded + "\n").encode("utf-8")
 
     @staticmethod
-    def _currency(value: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("currency must be a non-empty string")
-        return value.strip().upper()
+    def _input_date(value: Any, field: str) -> date:
+        return FXClient._parse_iso_date(value, field=field, error_type=ValueError)
+
+    @staticmethod
+    def _parse_iso_date(
+        value: Any,
+        *,
+        field: str,
+        error_type: type[ValueError],
+    ) -> date:
+        if not isinstance(value, str) or _EXACT_ISO_DATE.fullmatch(value) is None:
+            raise error_type(f"{field} must be an exact ISO calendar date (YYYY-MM-DD)")
+        try:
+            return date.fromisoformat(value)
+        except ValueError as exc:
+            raise error_type(f"{field} is not a valid ISO calendar date: {value!r}") from exc
+
+    @staticmethod
+    def _currency(value: Any, field: str) -> str:
+        if (
+            not isinstance(value, str)
+            or len(value) != 3
+            or any(character < "A" or character > "Z" for character in value)
+        ):
+            raise ValueError(f"{field} must be an uppercase ASCII 3-letter currency code")
+        return value
+
+    @staticmethod
+    def _assert_distinct_currencies(base: str, symbol: str) -> None:
+        if base == symbol:
+            raise ValueError("base and symbol must be distinct currencies")
 
     @staticmethod
     def _assert_base(data: dict[str, Any], requested_base: str) -> None:
@@ -310,16 +417,112 @@ class FXClient:
                 f"Frankfurter returned base {returned_base!r}, requested {requested_base!r}"
             )
 
-    @staticmethod
-    def _assert_symbol(data: dict[str, Any], symbol: str) -> None:
+    def _validate_response(
+        self,
+        data: dict[str, Any],
+        *,
+        base: str,
+        symbol: str,
+        response_kind: str,
+        requested_start: date,
+        requested_end: date,
+    ) -> None:
+        self._assert_base(data, base)
+        if response_kind == "daily":
+            self._validate_daily_response(data, symbol, requested_end)
+        elif response_kind == "series":
+            self._validate_series_response(
+                data,
+                symbol,
+                requested_start=requested_start,
+                requested_end=requested_end,
+            )
+        else:  # pragma: no cover - private callers only use the two constants.
+            raise ValueError(f"unknown FX response kind: {response_kind}")
+
+    @classmethod
+    def _validate_daily_response(
+        cls,
+        data: dict[str, Any],
+        symbol: str,
+        requested_end: date,
+    ) -> None:
+        actual_date = cls._parse_iso_date(
+            data.get("date"),
+            field="response date",
+            error_type=FXProtocolError,
+        )
+        if actual_date > requested_end:
+            raise FXProtocolError(
+                f"Frankfurter response date {actual_date.isoformat()} is after "
+                f"requested date {requested_end.isoformat()}"
+            )
         rates = data.get("rates")
-        if not isinstance(rates, dict):
-            raise FXProtocolError("Frankfurter response has no rates object")
-        if rates and all(isinstance(value, dict) for value in rates.values()):
-            if any(symbol not in value for value in rates.values()):
-                raise FXProtocolError(f"Frankfurter response has no {symbol} rate")
-        elif symbol not in rates:
+        if not isinstance(rates, dict) or symbol not in rates:
             raise FXProtocolError(f"Frankfurter response has no {symbol} rate")
+        for returned_symbol, value in rates.items():
+            cls._as_float(value, str(returned_symbol))
+
+    @classmethod
+    def _validate_series_response(
+        cls,
+        data: dict[str, Any],
+        symbol: str,
+        *,
+        requested_start: date,
+        requested_end: date,
+    ) -> None:
+        actual_start = cls._parse_iso_date(
+            data.get("start_date"),
+            field="response start_date",
+            error_type=FXProtocolError,
+        )
+        actual_end = cls._parse_iso_date(
+            data.get("end_date"),
+            field="response end_date",
+            error_type=FXProtocolError,
+        )
+        if actual_start > actual_end:
+            raise FXProtocolError("Frankfurter response range is reversed")
+        # Frankfurter may resolve a weekend/holiday start backward to the last
+        # available business day, but it must never invent data after the
+        # requested upper bound or silently omit the requested lower bound.
+        if actual_start > requested_start:
+            raise FXProtocolError(
+                f"Frankfurter response starts at {actual_start.isoformat()}, after "
+                f"requested start {requested_start.isoformat()}"
+            )
+        if actual_end > requested_end:
+            raise FXProtocolError(
+                f"Frankfurter response ends at {actual_end.isoformat()}, after "
+                f"requested end {requested_end.isoformat()}"
+            )
+
+        raw_rates = data.get("rates")
+        if not isinstance(raw_rates, dict) or not raw_rates:
+            raise FXProtocolError("Frankfurter series response has no daily rates")
+        row_dates: list[date] = []
+        for raw_date, row in raw_rates.items():
+            row_date = cls._parse_iso_date(
+                raw_date,
+                field="series rate date",
+                error_type=FXProtocolError,
+            )
+            if row_date < actual_start or row_date > actual_end or row_date > requested_end:
+                raise FXProtocolError(
+                    f"Frankfurter series row {row_date.isoformat()} is outside the "
+                    "requested response range"
+                )
+            if not isinstance(row, dict) or symbol not in row:
+                raise FXProtocolError(
+                    f"Frankfurter series response has no {symbol} rate on {raw_date}"
+                )
+            for returned_symbol, value in row.items():
+                cls._as_float(value, str(returned_symbol))
+            row_dates.append(row_date)
+
+        if min(row_dates) != actual_start or max(row_dates) != actual_end:
+            raise FXProtocolError("Frankfurter series response range does not match its daily rows")
 
     @classmethod
     def _rate_value(cls, data: dict[str, Any], symbol: str) -> float:
@@ -334,8 +537,10 @@ class FXClient:
             number = float(value)
         except (TypeError, ValueError) as exc:
             raise FXProtocolError(f"Frankfurter returned an invalid {symbol} rate") from exc
-        if number != number or number in (float("inf"), float("-inf")):
+        if not math.isfinite(number):
             raise FXProtocolError(f"Frankfurter returned a non-finite {symbol} rate")
+        if number <= 0:
+            raise FXProtocolError(f"Frankfurter returned a non-positive {symbol} rate")
         return number
 
 

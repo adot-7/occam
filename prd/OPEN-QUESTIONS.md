@@ -42,6 +42,17 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 - **Tolerance sanity — answers the standing "Tolerance sanity" item above.** Reviewed on both generated packs: `fx_recon_a` |expected| ₹17,762.30–₹246,238.85, `fx_recon_b` ₹8,930.52–₹309,275.60; the tightest relative tolerance is the 0.1% floor (no case is impossibly tight), and the loosest absolute tolerance is ₹309.28 (no case is trivially passable — a whole invoice's gain is orders of magnitude larger). **The constraint the PRD does not state:** the D1 bank fee must exceed the grader's tolerance, or an agent that ignores the fee still passes the total and the fee cases teach nothing. The first pack draft had fees of ₹125–₹1,250 against tolerances up to ₹637, so 5 of 10 fee cases were undetectable at the total level. Fees are now ₹1,500–₹4,500 and the generator asserts `min_bank_fee_headroom > 1` (currently 6.09x and 10.63x). If `02 §1.2`'s tolerance ever changes, this invariant must be rechecked.
 - **`occam/store/writer.py` imports `fcntl`, so nothing in the repo imports on Windows.** Pre-existing from WP-01 and unrelated to WP-03, but it makes `pytest` uncollectable on a Windows checkout (`tests/test_packaging.py` fails there on `origin/main` too). **Owned by workspaces-4** on `fix/windows-file-locking` (`msvcrt.locking` on win32, `fcntl.flock` elsewhere, plus a regression test); WP-03 deliberately carries no shim. Remove this item once that branch merges.
 
+### 2026-09-06 — WP-03 hardening
+
+- **FX cache coordination scope.** The client now coordinates cache-key locks and
+  the five-request Frankfurter budget across all `FXClient` instances in one
+  process, and uses same-directory atomic replacement so readers never observe a
+  partial file. The PRDs require one engine process and do not say whether
+  multiple processes may share `data/fx_cache`; process-local locks therefore do
+  not claim to enforce a cross-process request budget or deduplicate live calls.
+  Decide whether a cross-process lock/rate limiter is needed before introducing
+  file locking or another platform-specific mechanism.
+
 ### 2026-09-06 — WP-04 (tool registry)
 
 - **`ruff format --check .` fails on 38 pre-existing files in an AO Windows worktree.** The committed blobs are LF and format-clean (verified by running ruff against a `git archive` export), but the worktree checkout has CRLF while `pyproject.toml` sets `line-ending = "lf"`. Not a repo content bug, but it makes the standard verification command unusable in an AO worktree; a `.gitattributes` with `*.py text eol=lf` would settle it.
