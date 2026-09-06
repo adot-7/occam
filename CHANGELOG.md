@@ -18,6 +18,13 @@ All notable changes to Occam are documented here.
   structured outputs and multi-turn tool adaptation, approximate grant labels,
   poisoned-cache rejection, and non-overriding project `.env` loading.
 
+### Fixed
+
+- `EventWriter` now locks with `msvcrt` on Windows and `fcntl` elsewhere. The
+  store imported `fcntl` at module level, so `occam.store` was unimportable on
+  Windows and three test modules failed at collection. Covered by a fresh-
+  interpreter import test and a cross-process concurrent append test.
+
 ## [0.1.0] - 2026-09-05
 
 ### Added
