@@ -7,6 +7,7 @@ without this module importing ``openai`` too early.
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
@@ -212,9 +213,8 @@ class OpenAICompatibleProvider:
             "model": config.model,
             "messages": [dict(message) for message in messages],
             "max_tokens": max_tokens,
+            "temperature": temperature,
         }
-        if temperature != 0.0:
-            request["temperature"] = temperature
         normalized_tools = normalize_openai_tools(tools)
         if normalized_tools:
             request["tools"] = normalized_tools
@@ -283,30 +283,139 @@ def normalize_anthropic_tools(tools: Sequence[Any] | None) -> list[dict[str, Any
 def _anthropic_messages(
     messages: Sequence[Mapping[str, Any]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
+    """Adapt the shared OpenAI-shaped conversation to Anthropic messages.
+
+    OpenAI keeps assistant ``tool_calls`` and following ``tool`` messages as
+    top-level fields/roles.  Anthropic represents the same exchange as
+    ``tool_use`` blocks in the assistant turn followed by correlated
+    ``tool_result`` blocks in a user turn.  Keeping the conversion here makes
+    the provider boundary explicit and preserves multi-call turns.
+    """
+
+    def content_blocks(content: Any) -> list[dict[str, Any]]:
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content else []
+        if isinstance(content, Sequence) and not isinstance(content, (bytes, bytearray)):
+            blocks: list[dict[str, Any]] = []
+            for part in content:
+                if isinstance(part, Mapping):
+                    blocks.append(dict(part))
+                else:
+                    mapped = _mapping(part)
+                    blocks.append(dict(mapped))
+            return blocks
+        if content is None:
+            return []
+        return [{"type": "text", "text": _text(content)}]
+
+    def tool_use_block(raw_tool_call: Any) -> dict[str, Any]:
+        tool_call = dict(_mapping(raw_tool_call))
+        function = tool_call.get("function", {})
+        function_mapping = dict(_mapping(function)) if function else {}
+        call_id = tool_call.get("id")
+        name = function_mapping.get("name", tool_call.get("name"))
+        if call_id in (None, ""):
+            raise ProviderResponseError("assistant native tool call is missing its id")
+        if not name:
+            raise ProviderResponseError("assistant native tool call is missing its function name")
+        arguments = function_mapping.get("arguments", tool_call.get("arguments", {}))
+        if arguments in (None, ""):
+            parsed_input: Any = {}
+        elif isinstance(arguments, str):
+            try:
+                parsed_input = json.loads(arguments)
+            except json.JSONDecodeError as exc:
+                raise ProviderResponseError(
+                    f"tool call {call_id!r} has invalid JSON arguments"
+                ) from exc
+        else:
+            parsed_input = arguments
+        return {
+            "type": "tool_use",
+            "id": str(call_id),
+            "name": str(name),
+            "input": parsed_input,
+        }
+
+    def tool_result_block(raw_message: Mapping[str, Any]) -> dict[str, Any]:
+        tool_call_id = raw_message.get("tool_call_id", raw_message.get("tool_use_id"))
+        if tool_call_id in (None, ""):
+            raise ProviderResponseError("tool result is missing its tool_call_id")
+        content = raw_message.get("content", "")
+        if isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
+            result_content: Any = [
+                dict(part) if isinstance(part, Mapping) else dict(_mapping(part))
+                for part in content
+            ]
+        else:
+            result_content = _text(content)
+        return {
+            "type": "tool_result",
+            "tool_use_id": str(tool_call_id),
+            "content": result_content,
+        }
+
     systems: list[str] = []
     converted: list[dict[str, Any]] = []
-    for raw_message in messages:
+    index = 0
+    while index < len(messages):
+        raw_message = messages[index]
         message = dict(raw_message)
         role = message.get("role", "user")
         content = message.get("content", "")
         if role == "system":
             systems.append(_text(content))
         elif role == "tool":
+            # Consecutive OpenAI tool results are one Anthropic user turn.
+            results: list[dict[str, Any]] = []
+            while index < len(messages) and messages[index].get("role") == "tool":
+                results.append(tool_result_block(dict(messages[index])))
+                index += 1
             converted.append(
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": message.get("tool_call_id", ""),
-                            "content": _text(content),
-                        }
-                    ],
+                    "content": results,
                 }
             )
+            continue
+        elif role == "assistant" and message.get("tool_calls"):
+            blocks = content_blocks(content)
+            blocks.extend(tool_use_block(tool_call) for tool_call in message["tool_calls"])
+            converted.append({"role": "assistant", "content": blocks})
         else:
             converted.append({"role": role, "content": content})
+        index += 1
     return ("\n\n".join(systems) or None), converted
+
+
+def _anthropic_json_schema(response_schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract the raw JSON Schema expected by Anthropic ``output_config``."""
+
+    if "json_schema" in response_schema:
+        nested = response_schema["json_schema"]
+        if not isinstance(nested, Mapping):
+            raise ConfigurationError("Anthropic response_schema.json_schema must be a mapping")
+        response_schema = nested
+    if "name" in response_schema and isinstance(response_schema.get("schema"), Mapping):
+        return dict(response_schema["schema"])
+    if response_schema.get("type") == "json_schema" and isinstance(
+        response_schema.get("schema"), Mapping
+    ):
+        return dict(response_schema["schema"])
+    return dict(response_schema)
+
+
+def _supports_output_config(create: Any) -> bool:
+    """Check whether the installed Anthropic SDK exposes native structured output."""
+
+    try:
+        parameters = inspect.signature(create).parameters.values()
+    except (TypeError, ValueError):
+        # Dynamic test doubles and wrappers are assumed to forward keyword args.
+        return True
+    return "output_config" in {parameter.name for parameter in parameters} or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+    )
 
 
 class AnthropicProvider:
@@ -346,20 +455,35 @@ class AnthropicProvider:
             "model": config.model,
             "max_tokens": max_tokens,
             "messages": converted_messages,
+            "temperature": temperature,
         }
-        if temperature != 0.0:
-            request["temperature"] = temperature
         if system:
             request["system"] = system
         normalized_tools = normalize_anthropic_tools(tools)
         if normalized_tools:
             request["tools"] = normalized_tools
             request["tool_choice"] = {"type": "auto"}
-        # Anthropic's Messages API has no OpenAI response_format parameter.
-        # The shared response_schema remains provider-neutral and is handled by
-        # the caller's prompt/checker when using this provider.
-        del response_schema
-        response = self._client_for(config).messages.create(**request)
+        client: Any | None = None
+        if response_schema is not None:
+            if not config.supports_json_schema:
+                raise ConfigurationError(
+                    f"{config.key} is configured without Anthropic JSON-schema support"
+                )
+            client = self._client_for(config)
+            create = client.messages.create
+            if not _supports_output_config(create):
+                raise ConfigurationError(
+                    "installed Anthropic SDK does not support native output_config JSON schemas"
+                )
+            request["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": _anthropic_json_schema(response_schema),
+                }
+            }
+        if client is None:
+            client = self._client_for(config)
+        response = client.messages.create(**request)
         blocks = _get(response, "content", []) or []
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []

@@ -20,6 +20,7 @@ from occam.llm import (
     RetryPolicy,
     TokenBucket,
     TruncatedCompletionError,
+    load_environment,
     load_model_configs,
 )
 from occam.llm.config import ConfigurationError, MissingCredentialsError, interpolate_env
@@ -138,6 +139,7 @@ def test_openai_provider_sends_native_tools_and_never_json_schema_for_worker_fas
     )
 
     assert completions.request is not None
+    assert completions.request["temperature"] == 0.0
     assert completions.request["tool_choice"] == "auto"
     assert completions.request["tools"][0]["type"] == "function"
     assert "json_schema" not in json.dumps(completions.request)
@@ -180,6 +182,7 @@ def test_client_accounts_grant_equivalent_cost_and_cache_hit_is_free(tmp_path: P
     first = client.complete("worker_fast", [{"role": "user", "content": "hello"}])
     second = client.complete("worker_fast", [{"role": "user", "content": "hello"}])
 
+    assert provider.calls[0]["temperature"] == 0.0
     assert first.cost_usd == pytest.approx(0.00086)
     assert first.billed_cost_usd == 0
     assert first.cost_label == "list-rate-equivalent"
@@ -290,6 +293,7 @@ def test_reasoning_only_length_response_fails_after_the_single_retry(tmp_path: P
     with pytest.raises(TruncatedCompletionError, match="truncated completion"):
         client.complete("worker_fast", [{"role": "user", "content": "think"}])
     assert [call["max_tokens"] for call in provider.calls] == [2048, 4096]
+    assert list(tmp_path.glob("*.json")) == []
 
 
 def test_missing_usage_is_approximate_and_empty_answer_is_a_failure(tmp_path: Path) -> None:
@@ -311,12 +315,91 @@ def test_missing_usage_is_approximate_and_empty_answer_is_a_failure(tmp_path: Pa
     assert result.cost_label == "approximate"
     assert result.tokens_in > 0 and result.tokens_out > 0
 
+    granted_estimated = FakeProvider([ProviderResponse(text="hello")])
+    granted_client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": granted_estimated},
+        cache_dir=tmp_path / "granted",
+    )
+    granted_result = granted_client.complete("worker_fast", [{"role": "user", "content": "hello"}])
+    assert granted_result.usage_estimated is True
+    assert granted_result.cost_label == "list-rate-equivalent (approximate)"
+    assert granted_result.list_rate_equivalent is True
+    assert "approximate" in granted_result.cost_display_label
+
     empty = FakeProvider([ProviderResponse(text="")])
     empty_client = LLMClient(
         {"empty": _config()}, providers={"empty": empty}, cache_dir=tmp_path / "empty"
     )
     with pytest.raises(CompletionError, match="empty content"):
         empty_client.complete("empty", [{"role": "user", "content": "hello"}])
+
+
+def test_truncated_cache_entry_is_a_miss_and_is_replaced(tmp_path: Path) -> None:
+    provider = FakeProvider([ProviderResponse(text="fresh", tokens_in=2, tokens_out=3)])
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+    )
+    messages = [{"role": "user", "content": "cached truncation"}]
+    request = client._request_payload(
+        client.configs["worker_fast"], messages, None, None, 2048, 0.0
+    )
+    address = client.cache.address(request)
+    client.cache.put(
+        address,
+        {
+            "text": "",
+            "tool_calls": [],
+            "tokens_in": 2,
+            "tokens_out": 2,
+            "finish_reason": "length",
+            "reasoning": "hidden reasoning only",
+        },
+    )
+
+    result = client.complete("worker_fast", messages)
+
+    assert result.cached is False
+    assert result.text == "fresh"
+    assert len(provider.calls) == 1
+    assert client.cache.get(address)["text"] == "fresh"
+
+
+def test_dotenv_values_are_optional_and_process_environment_wins(tmp_path: Path) -> None:
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "TEST_API_KEY=from-file\nFILE_ONLY=file-value\n",
+        encoding="utf-8",
+    )
+
+    merged = load_environment(
+        dotenv_path,
+        {"TEST_API_KEY": "from-process", "PROCESS_ONLY": "process-value"},
+    )
+    assert merged["TEST_API_KEY"] == "from-process"
+    assert merged["FILE_ONLY"] == "file-value"
+    assert merged["PROCESS_ONLY"] == "process-value"
+    assert load_environment(tmp_path / "missing.env", {}) == {}
+
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        "test:\n  provider: openai_compat\n  model: test-model\n  api_key: ${TEST_API_KEY}\n",
+        encoding="utf-8",
+    )
+    configs = load_model_configs(
+        config_path,
+        {"TEST_API_KEY": "from-process"},
+        dotenv_path=dotenv_path,
+    )
+    assert configs["test"].api_key == "from-process"
+    missing_file_configs = load_model_configs(
+        config_path,
+        {"TEST_API_KEY": "from-process"},
+        dotenv_path=tmp_path / "missing.env",
+    )
+    assert missing_file_configs["test"].api_key == "from-process"
 
 
 def test_anthropic_adapter_maps_system_tools_and_native_tool_use() -> None:
@@ -346,10 +429,151 @@ def test_anthropic_adapter_maps_system_tools_and_native_tool_use() -> None:
     )
 
     assert requests[0]["system"] == "system"
+    assert requests[0]["temperature"] == 0.0
     assert requests[0]["tools"][0]["input_schema"] == {"type": "object"}
     assert requests[0]["tool_choice"] == {"type": "auto"}
     assert result.tool_calls[0]["function"]["name"] == "fx_rate"
     assert result.tokens_out == 4
+
+
+def test_anthropic_adapter_preserves_multi_turn_text_and_correlated_tool_blocks() -> None:
+    requests: list[dict[str, Any]] = []
+
+    class Messages:
+        def create(self, **request: Any) -> Any:
+            requests.append(request)
+            return {
+                "content": [{"type": "text", "text": "continued"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 5, "output_tokens": 6},
+            }
+
+    provider = AnthropicProvider(client=SimpleNamespace(messages=Messages()))
+    provider.complete(
+        _config(provider="anthropic", supports_json_schema=True),
+        [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "fetch both"},
+            {
+                "role": "assistant",
+                "content": "I will check both sources.",
+                "tool_calls": [
+                    {
+                        "id": "call_first",
+                        "type": "function",
+                        "function": {
+                            "name": "fx_rate",
+                            "arguments": '{"date":"2024-01-02","base":"USD"}',
+                        },
+                    },
+                    {
+                        "id": "call_second",
+                        "type": "function",
+                        "function": {
+                            "name": "fx_series",
+                            "arguments": '{"start":"2024-01-01","end":"2024-01-02"}',
+                        },
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_second", "content": "second result"},
+            {"role": "tool", "tool_call_id": "call_first", "content": "first result"},
+            {"role": "assistant", "content": "I received both results."},
+            {"role": "user", "content": "now summarize"},
+        ],
+        tools=None,
+        response_schema=None,
+        max_tokens=2048,
+    )
+
+    converted = requests[0]["messages"]
+    assert converted == [
+        {"role": "user", "content": "fetch both"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I will check both sources."},
+                {
+                    "type": "tool_use",
+                    "id": "call_first",
+                    "name": "fx_rate",
+                    "input": {"date": "2024-01-02", "base": "USD"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_second",
+                    "name": "fx_series",
+                    "input": {"start": "2024-01-01", "end": "2024-01-02"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_second",
+                    "content": "second result",
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_first",
+                    "content": "first result",
+                },
+            ],
+        },
+        {"role": "assistant", "content": "I received both results."},
+        {"role": "user", "content": "now summarize"},
+    ]
+
+
+def test_anthropic_provider_sends_native_json_schema_payload() -> None:
+    requests: list[dict[str, Any]] = []
+
+    class Messages:
+        def create(self, **request: Any) -> Any:
+            requests.append(request)
+            return {
+                "content": [{"type": "text", "text": '{"answer":"ok"}'}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            }
+
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    provider = AnthropicProvider(client=SimpleNamespace(messages=Messages()))
+    provider.complete(
+        _config(provider="anthropic", supports_json_schema=True),
+        [{"role": "user", "content": "answer"}],
+        tools=None,
+        response_schema=schema,
+        max_tokens=2048,
+    )
+
+    assert requests[0]["temperature"] == 0.0
+    assert requests[0]["output_config"] == {"format": {"type": "json_schema", "schema": schema}}
+    assert "response_format" not in requests[0]
+
+
+def test_anthropic_provider_fails_explicitly_without_native_schema_sdk_support() -> None:
+    class OldMessages:
+        def create(self, model: str, max_tokens: int, messages: Any, temperature: float) -> Any:
+            del model, max_tokens, messages, temperature
+            return {}
+
+    provider = AnthropicProvider(client=SimpleNamespace(messages=OldMessages()))
+    with pytest.raises(ConfigurationError, match="output_config"):
+        provider.complete(
+            _config(provider="anthropic", supports_json_schema=True),
+            [{"role": "user", "content": "answer"}],
+            tools=None,
+            response_schema={"type": "object"},
+            max_tokens=2048,
+        )
 
 
 def test_token_bucket_refills_deterministically() -> None:

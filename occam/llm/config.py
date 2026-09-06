@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import dotenv_values
 
 from occam.config.settings import project_root
 
@@ -217,13 +218,39 @@ def default_models_path() -> Path:
     return project_root() / "occam" / "config" / "models.yaml"
 
 
+def load_environment(
+    dotenv_path: str | Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Read project ``.env`` values, with explicit process values winning.
+
+    Parsing is intentionally non-mutating: loading a model table never changes
+    the host process environment or leaks a credential into command output.
+    Passing ``environ`` supplies the complete environment for deterministic
+    callers; an explicit ``dotenv_path`` can still be layered underneath it.
+    """
+
+    path = None
+    if dotenv_path is not None:
+        path = Path(dotenv_path)
+    elif environ is None:
+        path = project_root() / ".env"
+
+    file_values = dotenv_values(path) if path is not None else {}
+    merged = {str(name): str(value) for name, value in file_values.items() if value is not None}
+    process_values = os.environ if environ is None else environ
+    merged.update({str(name): str(value) for name, value in process_values.items()})
+    return merged
+
+
 def load_model_configs(
     path: str | Path | None = None,
     environ: Mapping[str, str] | None = None,
     *,
     strict_env: bool = False,
+    dotenv_path: str | Path | None = None,
 ) -> dict[str, ModelConfig]:
-    """Load and validate all model lanes from a YAML file."""
+    """Load and validate all model lanes from YAML plus the project ``.env``."""
 
     config_path = default_models_path() if path is None else Path(path)
     try:
@@ -233,7 +260,11 @@ def load_model_configs(
     except yaml.YAMLError as exc:
         raise ConfigurationError(f"invalid YAML in model config {config_path}") from exc
 
-    expanded = interpolate_env(raw, environ, strict=strict_env)
+    expanded = interpolate_env(
+        raw,
+        load_environment(dotenv_path, environ),
+        strict=strict_env,
+    )
     if not isinstance(expanded, Mapping) or not expanded:
         raise ConfigurationError("model config must contain at least one model")
     return {
@@ -246,10 +277,11 @@ def load_models(
     environ: Mapping[str, str] | None = None,
     *,
     strict_env: bool = False,
+    dotenv_path: str | Path | None = None,
 ) -> dict[str, ModelConfig]:
     """Backward-compatible short alias for :func:`load_model_configs`."""
 
-    return load_model_configs(path, environ, strict_env=strict_env)
+    return load_model_configs(path, environ, strict_env=strict_env, dotenv_path=dotenv_path)
 
 
 load_config = load_model_configs
@@ -261,6 +293,7 @@ __all__ = [
     "ModelConfig",
     "default_models_path",
     "interpolate_env",
+    "load_environment",
     "load_config",
     "load_model_configs",
     "load_models",

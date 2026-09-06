@@ -14,6 +14,9 @@ All notable changes to Occam are documented here.
 - WP-02 LLM layer with OpenAI-compatible and Anthropic providers, model config
   interpolation, bounded retries, per-model rate limiting, content-addressed cache,
   native tools, and labelled list-rate-equivalent grant accounting.
+- WP-02 review hardening: explicit zero-temperature forwarding, Anthropic native
+  structured outputs and multi-turn tool adaptation, approximate grant labels,
+  poisoned-cache rejection, and non-overriding project `.env` loading.
 
 ## [0.1.0] - 2026-09-05
 

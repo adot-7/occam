@@ -74,14 +74,15 @@ class Completion:
 
     @property
     def list_rate_equivalent(self) -> bool:
-        return self.cost_label == "list-rate-equivalent"
+        return self.cost_label.startswith("list-rate-equivalent")
 
     @property
     def cost_display_label(self) -> str:
         """Human-facing label used by the eventual TUI cost strip."""
 
         if self.list_rate_equivalent:
-            return "cost (list-rate eq.)"
+            suffix = "; approximate" if self.usage_estimated else ""
+            return f"cost (list-rate eq.{suffix})"
         return self.cost_label
 
     @property
@@ -223,6 +224,8 @@ def _valid_cache_payload(value: Mapping[str, Any]) -> bool:
     required = {"text", "tool_calls", "tokens_in", "tokens_out"}
     if not required <= value.keys() or not isinstance(value["tool_calls"], list):
         return False
+    if not str(value.get("text") or "").strip() and not value["tool_calls"]:
+        return False
     try:
         int(value["tokens_in"])
         int(value["tokens_out"])
@@ -353,8 +356,7 @@ class LLMClient:
                     "response_schema": response_schema,
                     "max_tokens": current_budget,
                 }
-                if temperature != 0.0:
-                    provider_kwargs["temperature"] = temperature
+                provider_kwargs["temperature"] = temperature
                 response = _coerce_response(provider.complete(config, messages, **provider_kwargs))
             except Exception as exc:
                 if not _retryable(exc) or attempt >= self.retry_policy.max_attempts:

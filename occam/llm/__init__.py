@@ -23,6 +23,7 @@ from occam.llm.config import (
     ModelConfig,
     interpolate_env,
     load_config,
+    load_environment,
     load_model_configs,
     load_models,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "calculate_cost",
     "get_default_client",
     "interpolate_env",
+    "load_environment",
     "load_model_configs",
     "load_models",
     "load_config",

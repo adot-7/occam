@@ -32,6 +32,8 @@ def calculate_cost(
     ) / 1_000_000
     if config.is_granted:
         label = "list-rate-equivalent"
+        if approximate:
+            label += " (approximate)"
     else:
         label = "approximate" if approximate else "metered"
     return CostBreakdown(
