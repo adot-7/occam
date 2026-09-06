@@ -50,6 +50,16 @@ class GenerationView:
         return list(self.architecture.get("roles", []))
 
     @property
+    def role_map(self) -> dict[str, dict[str, Any]]:
+        """Roles keyed by id for panels that join architecture and ablation data."""
+
+        return {
+            str(role.get("id")): role
+            for role in self.roles
+            if isinstance(role, dict) and role.get("id")
+        }
+
+    @property
     def n_roles(self) -> int:
         return len(self.roles)
 
@@ -72,6 +82,30 @@ class GenerationView:
     @property
     def cases_passed(self) -> int:
         return sum(1 for case in self.cases if case.get("passed"))
+
+    @property
+    def selected_case(self) -> dict[str, Any] | None:
+        """The first failed case, or the first case when the generation is clean."""
+
+        return next((case for case in self.cases if not case.get("passed")), None) or (
+            self.cases[0] if self.cases else None
+        )
+
+    @property
+    def ablation_progress(self) -> tuple[int, int]:
+        """Rows observed and roles expected while the ablation table streams."""
+
+        return len(self.ablation_rows), len(self.ablation_roles)
+
+    @property
+    def reliability_pass3(self) -> float | None:
+        """The final-generation pass³ value, regardless of event arrival order."""
+
+        if self.metrics is not None and self.metrics.get("reliability_pass3") is not None:
+            return float(self.metrics["reliability_pass3"])
+        if self.reliability is not None and self.reliability.get("reliability_pass3") is not None:
+            return float(self.reliability["reliability_pass3"])
+        return None
 
     @property
     def pass_rate(self) -> float | None:
@@ -161,6 +195,7 @@ class RunView:
         state: State | None,
         *,
         selected_generation: int | None = None,
+        selected_case_id: str | None = None,
         mode: str = "live",
         speed: float = 1.0,
         paused: bool = False,
@@ -193,6 +228,7 @@ class RunView:
             for snapshot in (state.generations.values() if state else ())
         }
         self.selected_generation = self._resolve_selection(selected_generation)
+        self.selected_case_id = self._resolve_case_selection(selected_case_id)
 
     def _resolve_selection(self, requested: int | None) -> int | None:
         if requested is not None and requested in self._generations:
@@ -202,6 +238,17 @@ class RunView:
         if self._generations:
             return max(self._generations)
         return None
+
+    def _resolve_case_selection(self, requested: str | None) -> str | None:
+        generation = self.selected
+        if generation is None:
+            return None
+        if requested is not None and any(
+            str(case.get("case_id")) == requested for case in generation.cases
+        ):
+            return requested
+        selected = generation.selected_case
+        return str(selected.get("case_id")) if selected else None
 
     # -- generations ---------------------------------------------------
 
@@ -221,6 +268,26 @@ class RunView:
     @property
     def selected(self) -> GenerationView | None:
         return self.generation(self.selected_generation)
+
+    @property
+    def selected_case(self) -> dict[str, Any] | None:
+        """The case highlighted by the shared case cursor."""
+
+        if self.selected_case_id is not None:
+            selected = self.case(self.selected_case_id)
+            if selected is not None:
+                return selected
+        return self.selected.selected_case if self.selected is not None else None
+
+    def case(self, case_id: str | None) -> dict[str, Any] | None:
+        """Return a selected case without making panels know execution storage."""
+
+        if case_id is None or self.selected is None:
+            return None
+        return next(
+            (case for case in self.selected.cases if case.get("case_id") == case_id),
+            None,
+        )
 
     @property
     def max_generations(self) -> int | None:

@@ -1,13 +1,9 @@
-"""Shell panels and the seam WP-09's detailed panels plug into.
+"""Dense, read-only WP-09 panels for the Occam run viewer.
 
-Every region of the screen is a widget that implements ``update_view(view)``.
-The app calls it on each state change and never touches panel internals, so
-WP-09 can replace a placeholder body — or a whole widget class, via
-:data:`PANEL_TYPES` — without touching the app, the reducer or the replay driver.
-
-WP-07 owns the header, the lineage tree, the diagnosis feed and the footer in
-full.  The remaining panels render a summary derived from the same
-:class:`~occam.tui.viewmodel.RunView` and are the WP-09 seams.
+The widgets in this module are deliberately projections of ``RunView``. They
+do not load task packs, call tools, or reach into the engine. That keeps the
+TUI and replay on the same event/state contract while allowing the screen to
+be substantially richer than the WP-07 shell.
 """
 
 from __future__ import annotations
@@ -17,11 +13,31 @@ from typing import Any, Protocol, runtime_checkable
 
 from rich.console import RenderableType
 from rich.text import Text
-from textual.widgets import RichLog, Static, Tree
+from textual.events import Key
+from textual.message import Message
+from textual.widgets import Button, DataTable, ProgressBar, RichLog, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from occam.core.models import Event
-from occam.tui.palette import ACCENT, AMBER, CYAN, DIM, FG, GREEN, MAGENTA, RED
+from occam.tui.palette import (
+    ACCENT,
+    AMBER,
+    AMBER_BG,
+    AMBER_HI,
+    CYAN,
+    DIM,
+    FG,
+    FG_BRIGHT,
+    GREEN,
+    GREEN_BG,
+    MAGENTA,
+    PURPLE,
+    RED,
+    RED_BG,
+    RED_DIM,
+    SELECTED,
+    WIRE,
+)
 from occam.tui.viewmodel import GenerationView, RunView
 
 GAP = "   "
@@ -34,6 +50,22 @@ class ViewPanel(Protocol):
     def update_view(self, view: RunView) -> None: ...
 
 
+class CaseSelectionChanged(Message):
+    """The case cursor moved and the app should rebuild its shared view."""
+
+    def __init__(self, case_id: str | None) -> None:
+        super().__init__()
+        self.case_id = case_id
+
+
+class LessonEvidenceRequested(Message):
+    """Open the selected lesson's evidence in the read-only inspector."""
+
+    def __init__(self, lesson_id: str) -> None:
+        super().__init__()
+        self.lesson_id = lesson_id
+
+
 def _money(value: float | None) -> str:
     return "—" if value is None else f"${value:,.4f}"
 
@@ -42,13 +74,61 @@ def _ratio(value: float | None) -> str:
     return "—" if value is None else f"{value:.2f}"
 
 
-class Panel(Static):
-    """A titled region of the shell.
+def _percent(value: float | None) -> str:
+    return "—" if value is None else f"{value:.0%}"
 
-    Subclasses override :meth:`render_view`, and may override
-    :meth:`panel_title`.  ``update_view`` is deliberately the only entry point
-    the app uses.
-    """
+
+def _bar(value: float | None, width: int = 6, *, full: str = "▓", empty: str = "░") -> str:
+    """Return a tiny token-sized bar for a normalized value."""
+
+    if value is None:
+        return empty * width
+    filled = max(0, min(width, round(value * width)))
+    return full * filled + empty * (width - filled)
+
+
+def _cell(value: str, colour: str = FG, *, background: str | None = None) -> Text:
+    style = colour
+    if background:
+        style = f"{style} on {background}"
+    return Text(value, style=style)
+
+
+def _justification_colour(justification: str) -> str:
+    return {
+        "parallel": CYAN,
+        "context_isolation": PURPLE,
+        "verification": AMBER,
+        "control": GREEN,
+        "ensemble": MAGENTA,
+    }.get(justification, DIM)
+
+
+def _verdict_label(verdict: str) -> str:
+    return {
+        "load_bearing": "● LOAD-BEARING",
+        "witness": "✗ WITNESS",
+        "harmful": "⚠ HARMFUL",
+        "uncertain": "? UNCERTAIN",
+    }.get(verdict, verdict.upper() or "PENDING")
+
+
+def _verdict_colour(verdict: str) -> tuple[str, str | None]:
+    return {
+        "load_bearing": (GREEN, GREEN_BG),
+        "witness": (RED, RED_BG),
+        "harmful": (RED, "#1a0000"),
+        "uncertain": (AMBER, AMBER_BG),
+    }.get(verdict, (DIM, None))
+
+
+def _clip(value: Any, width: int) -> str:
+    text = str(value)
+    return text if len(text) <= width else text[: max(1, width - 1)] + "…"
+
+
+class Panel(Static):
+    """A titled region whose only input is a :class:`RunView`."""
 
     DEFAULT_CLASSES = "view-panel"
     can_focus = True
@@ -62,7 +142,7 @@ class Panel(Static):
         self.update(self.render_view(view))
 
     def panel_title(self, view: RunView) -> str:
-        del view  # stable seam: WP-09 titles may depend on the view
+        del view
         return self.title_text
 
     def render_view(self, view: RunView) -> RenderableType:
@@ -71,7 +151,7 @@ class Panel(Static):
 
 
 class HeaderBar(Static):
-    """``OCCAM  fx_recon_b · FX revaluation  run 2/2  lessons loaded 3``."""
+    """The compact product header from the Figma frame."""
 
     DEFAULT_CLASSES = "view-panel"
 
@@ -80,36 +160,28 @@ class HeaderBar(Static):
         text.append("OCCAM", style=f"bold {ACCENT}")
         if view.task_label:
             text.append("  ")
-            text.append(view.task_label, style=FG)
-        text.append(GAP)
-        loaded = len(view.lessons_loaded)
-        if loaded:
-            text.append(f"run {view.run_index}/{view.run_index}", style=DIM)
-            text.append(GAP)
-            text.append(f"lessons loaded {loaded}", style=GREEN)
-        else:
-            text.append(f"run {view.run_index}", style=DIM)
-            text.append(GAP)
-            text.append("lessons 0", style=DIM)
-        text.append(GAP)
+            text.append(view.task_label, style=FG_BRIGHT)
+        text.append("  │  ", style=DIM)
+        text.append(view.run_label, style=GREEN if view.lessons_loaded else DIM)
+        text.append("  │  ", style=DIM)
         text.append(view.generation_label, style=DIM)
-        text.append(GAP)
+        text.append("  │  ", style=DIM)
         badge = AMBER if view.mode == "replay" else GREEN
         text.append(view.mode_badge, style=f"bold {badge}")
-        text.append(GAP)
-        elapsed = "elapsed ?" if view.elapsed_s is None else f"{view.elapsed_s:,.0f}s"
+        text.append("  ", style=DIM)
+        elapsed = "elapsed —" if view.elapsed_s is None else f"elapsed {view.elapsed_s:,.0f}s"
         text.append(elapsed, style=DIM)
+        text.append("  ", style=DIM)
+        text.append(_money(view.spend_usd), style=FG)
         if view.status:
-            text.append(GAP)
+            text.append("  ", style=DIM)
             status_style = RED if "error" in view.status or "incomplete" in view.status else AMBER
             text.append(view.status, style=status_style)
-        text.append(GAP)
-        text.append(_money(view.spend_usd), style=DIM)
         self.update(text)
 
 
 class LineagePanel(Tree[int]):
-    """One node per generation (04 §3.2). Selecting a node moves the screen."""
+    """Compact generation lineage with current and best markers."""
 
     DEFAULT_CLASSES = "view-panel"
 
@@ -122,7 +194,7 @@ class LineagePanel(Tree[int]):
 
     def update_view(self, view: RunView) -> None:
         generations = view.generations
-        self.border_title = f"LINEAGE · {len(generations)} gen"
+        self.border_title = f"LINEAGE · {len(generations)} GEN"
         signature = tuple(
             (
                 generation.generation,
@@ -132,6 +204,7 @@ class LineagePanel(Tree[int]):
                 generation.reverted,
                 generation.generation == view.best_generation,
                 generation.generation == view.selected_generation,
+                generation.mutation.get("type") if generation.mutation else None,
             )
             for generation in generations
         )
@@ -143,14 +216,10 @@ class LineagePanel(Tree[int]):
         for generation in generations:
             node = node.add(self._label(generation, view), data=generation.generation, expand=True)
             if generation.generation == view.selected_generation:
-                # Move the highlight without selecting: a repaint must not
-                # look like a user selection, which would pin the screen to
-                # this generation.  ``move_cursor`` was added after Textual
-                # 0.70; setting the reactive cursor line is its equivalent.
                 move_cursor = getattr(self, "move_cursor", None)
                 if move_cursor is not None:
                     move_cursor(node)
-                else:  # Textual 0.70 compatibility
+                else:  # Textual 0.70 compatibility.
                     self.cursor_line = node.line
 
     @staticmethod
@@ -158,103 +227,495 @@ class LineagePanel(Tree[int]):
         if generation.reverted:
             marker, style = "○", DIM
         elif generation.generation == view.selected_generation:
-            marker, style = "◉", f"bold {CYAN}"
+            marker, style = "●", f"bold {CYAN}"
         else:
-            marker, style = "●", FG
+            marker, style = "·", FG
         label = Text(f"{marker} {generation.label}", style=style)
         if generation.generation == view.best_generation:
             label.append(" ★", style=AMBER)
         label.append(f"  {generation.n_roles} roles", style=DIM)
-        label.append(f"  {_ratio(generation.pass_rate)}", style=DIM)
+        label.append(f"  {_percent(generation.pass_rate)}", style=GREEN)
         label.append(f"  {_money(generation.cost_usd)}", style=DIM)
         if generation.reverted:
             label.append("  reverted", style=DIM)
+        if generation.mutation and generation.mutation.get("type") == "prune":
+            label.append(f"  ✗ {generation.mutation.get('target_role', '')}", style=RED)
         return label
 
 
+class StructuralFidelityPanel(Panel):
+    """Small left-column summary that keeps SF visible while the table is busy."""
+
+    title_text = "STRUCT. FIDELITY"
+
+    def render_view(self, view: RunView) -> RenderableType:
+        generation = view.selected
+        if generation is None:
+            return Text("SF  —", style=DIM)
+        fidelity = generation.structural_fidelity
+        text = Text("SF  ", style=DIM)
+        text.append(_ratio(fidelity), style=f"bold {CYAN}")
+        text.append(f"  {_bar(fidelity, 8)}\n", style=CYAN)
+        witnesses = len(generation.witnesses)
+        waste = 1.0 - (fidelity or 0.0)
+        text.append(f"{witnesses} witness", style=RED if witnesses else GREEN)
+        text.append(f"  ·  {waste:.0%} spend at risk", style=DIM)
+        return text
+
+
 class AblationPanel(Panel):
-    """WP-09 seam: replace the body with the hero ``DataTable`` (04 §3.4)."""
+    """The DataTable hero: role influence, cost and verdict in one scan."""
 
     title_text = "ABLATION TABLE"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._table_signature: tuple[Any, ...] | None = None
+
+    def compose(self):
+        yield DataTable(
+            show_row_labels=False,
+            show_cursor=False,
+            cursor_type="row",
+            zebra_stripes=False,
+            id="ablation-table",
+        )
+        yield Static(id="ablation-callout")
+        yield Static(id="ablation-progress-label")
+        yield ProgressBar(total=1, show_eta=False, show_percentage=False, id="ablation-progress")
+        yield Static(id="ablation-footer")
 
     def panel_title(self, view: RunView) -> str:
         generation = view.selected
         if generation is None:
             return self.title_text
-        return f"{self.title_text} · {generation.label} · {generation.n_roles} roles · LOO approx."
+        return (
+            f"{self.title_text}  ·  {generation.label}  ·  {generation.n_roles} ROLES"
+            "  ·  LOO APPROX."
+        )
 
     def render_view(self, view: RunView) -> RenderableType:
         generation = view.selected
         if generation is None or generation.ablation is None:
-            return Text("no ablation for this generation yet", style=DIM)
+            return Text("ablated —/— roles", style=DIM)
         rows = generation.ablation_rows
-        roles = generation.ablation_roles or [row["role_id"] for row in rows]
-        text = Text()
-        text.append(f"ablated {len(rows)}/{len(roles)} roles", style=FG)
-        noise_rate = generation.noise_rate
-        if noise_rate is not None:
+        roles = generation.ablation_roles or [row.get("role_id", "?") for row in rows]
+        text = Text(f"ablated {len(rows)}/{len(roles)} roles", style=FG)
+        if generation.noise_rate is not None:
             text.append("  ·  noise floor ", style=DIM)
-            text.append(_ratio(noise_rate), style=FG)
-        fidelity = generation.structural_fidelity
-        if fidelity is not None:
+            text.append(_ratio(generation.noise_rate), style=FG)
+        if generation.structural_fidelity is not None:
             text.append("  ·  SF ", style=DIM)
-            text.append(_ratio(fidelity), style=FG)
+            text.append(_ratio(generation.structural_fidelity), style=CYAN)
         witnesses = generation.witnesses
         if witnesses:
             text.append(f"  ·  {len(witnesses)} witness", style=RED)
         return text
 
+    def update_view(self, view: RunView) -> None:
+        self.border_title = self.panel_title(view)
+        self.update(self.render_view(view))
+        try:
+            table = self.query_one("#ablation-table", DataTable)
+            callout = self.query_one("#ablation-callout", Static)
+            progress_label = self.query_one("#ablation-progress-label", Static)
+            progress = self.query_one("#ablation-progress", ProgressBar)
+            footer = self.query_one("#ablation-footer", Static)
+        except Exception:  # pragma: no cover - only possible before child mount.
+            return
+
+        generation = view.selected
+        rows = generation.ablation_rows if generation is not None else []
+        roles = generation.role_map if generation is not None else {}
+        signature = tuple(
+            (
+                row.get("role_id"),
+                row.get("influence"),
+                row.get("influence_ci", {}).get("lo"),
+                row.get("influence_ci", {}).get("hi"),
+                row.get("divergence"),
+                row.get("cost_share"),
+                row.get("verdict"),
+            )
+            for row in rows
+        )
+        if signature != self._table_signature:
+            self._table_signature = signature
+            table.clear(columns=True)
+            table.add_column("ROLE", width=18, key="role")
+            table.add_column("JUSTIFICATION", width=15, key="justification")
+            table.add_column("INFLUENCE", width=15, key="influence")
+            table.add_column("95% CI", width=15, key="ci")
+            table.add_column("COST", width=11, key="cost")
+            table.add_column("DIVERGENCE", width=12, key="divergence")
+            table.add_column("VERDICT", width=18, key="verdict")
+            for row in rows:
+                role_id = str(row.get("role_id", "?"))
+                role = roles.get(role_id, {})
+                name = str(role.get("name", role_id))
+                justification = str(role.get("justification", "unspecified"))
+                verdict = str(row.get("verdict", "pending"))
+                verdict_colour, verdict_bg = _verdict_colour(verdict)
+                ci = row.get("influence_ci") or {}
+                influence = _safe_float(row.get("influence"))
+                divergence = _safe_float(row.get("divergence"))
+                cost_share = _safe_float(row.get("cost_share"))
+                table.add_row(
+                    _cell(_clip(name, 17), verdict_colour, background=verdict_bg),
+                    _cell(
+                        _clip(justification, 14),
+                        _justification_colour(justification),
+                        background=verdict_bg,
+                    ),
+                    _cell(
+                        f"{_bar(abs(influence), 5)} {influence:+.2f}",
+                        GREEN if influence >= 0 else RED,
+                        background=verdict_bg,
+                    ),
+                    _cell(
+                        f"[{_safe_float(ci.get('lo')):+.2f},{_safe_float(ci.get('hi')):+.2f}]",
+                        FG,
+                        background=verdict_bg,
+                    ),
+                    _cell(
+                        f"{_bar(cost_share, 4)} {_percent(cost_share)}",
+                        FG_BRIGHT if cost_share >= 0.2 else FG,
+                        background=verdict_bg,
+                    ),
+                    _cell(f"{_bar(divergence, 4)} {divergence:.2f}", FG, background=verdict_bg),
+                    _cell(_verdict_label(verdict), verdict_colour, background=verdict_bg),
+                    key=role_id,
+                )
+
+        expected = len(generation.ablation_roles) if generation is not None else 0
+        observed = len(rows)
+        progress.total = max(1, expected)
+        progress.progress = min(expected, observed)
+        progress_label.update(
+            Text(
+                "ablation complete"
+                if expected and observed >= expected
+                else f"ablating role {observed + 1}/{expected}",
+                style=GREEN if expected and observed >= expected else AMBER,
+            )
+        )
+        footer.update(self._footer(generation, observed, expected))
+        callout.update(self._callout(generation))
+
+    @staticmethod
+    def _footer(generation: GenerationView | None, observed: int, expected: int) -> Text:
+        text = Text(f"ablated {observed}/{expected} roles", style=DIM)
+        if generation is None:
+            return text
+        if generation.noise_rate is not None:
+            text.append(f"   ·   noise {generation.noise_rate:.2f}", style=DIM)
+        if generation.structural_fidelity is not None:
+            text.append(f"   ·   SF {generation.structural_fidelity:.2f}", style=CYAN)
+        if generation.witnesses:
+            text.append(f"   ·   {len(generation.witnesses)} witness", style=RED)
+        return text
+
+    @staticmethod
+    def _callout(generation: GenerationView | None) -> Text:
+        if generation is None or not generation.ablation_rows:
+            return Text("", style=DIM)
+        witness = next(
+            (row for row in generation.ablation_rows if row.get("verdict") == "witness"), None
+        )
+        if witness is None:
+            return Text("", style=DIM)
+        cases = int(
+            round(_safe_float(generation.ablation.get("n_cases")) if generation.ablation else 0)
+        )
+        changed = int(round(_safe_float(witness.get("divergence")) * cases))
+        role = witness.get("role_id", "role")
+        return Text(
+            f"✗ {role} changed {changed}/{cases} answers beyond noise floor — "
+            "near-zero causal influence at full inference cost",
+            style=f"{RED} on {RED_BG}",
+        )
+
 
 class CasesPanel(Panel):
-    """WP-09 seam: replace with the ✓/✗ grid and per-invoice sub-results."""
+    """The case row, with a keyboard-selectable cell and sub-result summary."""
 
     title_text = "EVAL CASES"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._case_ids: list[str] = []
+        self._cursor = 0
+        self._view: RunView | None = None
+
+    def compose(self):
+        yield Static(id="cases-grid")
+        yield Static(id="cases-detail")
+
+    @property
+    def selected_case_id(self) -> str | None:
+        if not self._case_ids:
+            return None
+        return self._case_ids[max(0, min(self._cursor, len(self._case_ids) - 1))]
 
     def panel_title(self, view: RunView) -> str:
         generation = view.selected
         if generation is None or not generation.cases:
             return self.title_text
-        return f"{self.title_text} · {generation.cases_passed}/{len(generation.cases)} pass"
+        return f"{self.title_text}  ·  {generation.cases_passed}/{len(generation.cases)} PASS"
 
     def render_view(self, view: RunView) -> RenderableType:
         generation = view.selected
         if generation is None or not generation.cases:
             return Text("no cases executed yet", style=DIM)
+        selected = self.selected_case_id
         text = Text()
-        for case in generation.cases:
+        for index, case in enumerate(generation.cases):
+            case_id = str(case.get("case_id", "?"))
             passed = bool(case.get("passed"))
-            text.append("✓ " if passed else "✗ ", style=GREEN if passed else RED)
+            marker = "✓" if passed else "✗"
+            colour = GREEN if passed else RED
+            if case_id == selected:
+                text.append(f"[{marker}]", style=f"bold {colour} on {SELECTED}")
+            else:
+                text.append(f" {marker} ", style=colour)
+            if index != len(generation.cases) - 1:
+                text.append(" ", style=DIM)
+        case = next((item for item in generation.cases if item.get("case_id") == selected), None)
+        if case is not None:
+            text.append("\n")
+            text.append(self._case_detail(case))
         return text
+
+    def update_view(self, view: RunView) -> None:
+        self._view = view
+        self.border_title = self.panel_title(view)
+        generation = view.selected
+        cases = generation.cases if generation is not None else []
+        old_id = self.selected_case_id
+        self._case_ids = [str(case.get("case_id", "?")) for case in cases]
+        shared_id = view.selected_case_id
+        if shared_id in self._case_ids:
+            self._cursor = self._case_ids.index(shared_id)
+        elif old_id in self._case_ids:
+            self._cursor = self._case_ids.index(old_id)
+        else:
+            failed = next((index for index, case in enumerate(cases) if not case.get("passed")), 0)
+            self._cursor = failed
+        self.update(self.render_view(view))
+        try:
+            self.query_one("#cases-grid", Static).update(self._grid(view))
+            selected = next(
+                (case for case in cases if case.get("case_id") == self.selected_case_id), None
+            )
+            self.query_one("#cases-detail", Static).update(
+                self._case_detail(selected) if selected else ""
+            )
+        except Exception:  # pragma: no cover - only possible before child mount.
+            pass
+
+    def _grid(self, view: RunView) -> Text:
+        generation = view.selected
+        if generation is None:
+            return Text("", style=DIM)
+        selected = self.selected_case_id
+        text = Text()
+        for index, case in enumerate(generation.cases):
+            case_id = str(case.get("case_id", "?"))
+            passed = bool(case.get("passed"))
+            colour = GREEN if passed else RED
+            marker = "✓" if passed else "✗"
+            text.append(
+                f"[{marker}]" if case_id == selected else f" {marker} ",
+                style=(f"bold {colour} on {SELECTED}" if case_id == selected else colour),
+            )
+            if index != len(generation.cases) - 1:
+                text.append(" ", style=DIM)
+        return text
+
+    @staticmethod
+    def _case_detail(case: dict[str, Any] | None) -> Text:
+        if not case:
+            return Text("no case selected", style=DIM)
+        case_id = str(case.get("case_id", "?"))
+        passed = bool(case.get("passed"))
+        state = "PASS" if passed else "FAIL"
+        text = Text(f"{case_id} · {state}", style=GREEN if passed else RED)
+        sub_results = case.get("sub_results") or {}
+        if isinstance(sub_results, dict) and sub_results:
+            sub_passed = sum(bool(value) for value in sub_results.values())
+            failed = [str(key) for key, value in sub_results.items() if not value]
+            text.append(f" · {sub_passed}/{len(sub_results)} invoices ✓", style=FG)
+            if failed:
+                text.append(f" · {', '.join(failed[:2])} ✗", style=RED)
+        else:
+            text.append(" · per-invoice results in case trace", style=DIM)
+        text.append(" · inspect ↗", style=f"underline {AMBER_HI}")
+        return text
+
+    def on_key(self, event: Key) -> None:
+        if not self._case_ids:
+            return
+        if event.key in {"up", "left"}:
+            self._cursor = max(0, self._cursor - 1)
+            event.stop()
+            self._selection_changed()
+        elif event.key in {"down", "right"}:
+            self._cursor = min(len(self._case_ids) - 1, self._cursor + 1)
+            event.stop()
+            self._selection_changed()
+        elif event.key == "enter":
+            event.stop()
+            self._selection_changed()
+            action = getattr(self.app, "open_case_inspector", None)
+            if action is not None:
+                action(self.selected_case_id)
+
+    def move_cursor(self, delta: int) -> None:
+        """Move the case cursor for app-level arrow bindings."""
+
+        if not self._case_ids:
+            return
+        self._cursor = max(0, min(len(self._case_ids) - 1, self._cursor + delta))
+        self._selection_changed()
+
+    def _selection_changed(self) -> None:
+        if self._view is None:
+            return
+        self.update(self.render_view(self._view))
+        try:
+            cases = self._view.selected.cases if self._view.selected is not None else []
+            selected = next(
+                (case for case in cases if case.get("case_id") == self.selected_case_id), None
+            )
+            self.query_one("#cases-grid", Static).update(self._grid(self._view))
+            self.query_one("#cases-detail", Static).update(
+                self._case_detail(selected) if selected else ""
+            )
+        except Exception:  # pragma: no cover - only possible before child mount.
+            pass
+        self.post_message(CaseSelectionChanged(self.selected_case_id))
+
+
+class CaseEvidencePanel(Panel):
+    """Selected-case trace summary below the case row.
+
+    The compact ``execution.case`` event deliberately carries verdict, cost,
+    and latency only.  This panel keeps the trace affordance visible without
+    pretending those omitted fields are available in a fixture; richer
+    projections are rendered when a producer supplies them.
+    """
+
+    title_text = "CASE TRACE"
+
+    def render_view(self, view: RunView) -> RenderableType:
+        generation = view.selected
+        case = view.selected_case
+        if generation is None or case is None:
+            return Text("select a case to inspect", style=DIM)
+
+        case_id = str(case.get("case_id", "?"))
+        passed = bool(case.get("passed"))
+        text = Text(f"{case_id}  ·  {'PASS' if passed else 'FAIL'}", style=GREEN if passed else RED)
+        text.append(
+            f"   cost {_money(case.get('cost_usd'))}   latency {case.get('latency_s', '—')}s\n",
+            style=FG,
+        )
+        self._append_sub_results(text, case)
+        text.append("TOOL RESPONSE HIGHLIGHT\n", style=f"bold {AMBER}")
+        calls = _trace_calls(case)
+        if not calls:
+            text.append(
+                "requested_date  →  rate_date   ",
+                style=f"bold {AMBER_HI} on {AMBER_BG}",
+            )
+            text.append(
+                "raw response fields are not present in this compact fixture; "
+                "press i for the read-only inspector",
+                style=DIM,
+            )
+            return text
+        for call in calls[:2]:
+            tool = str(call.get("tool") or call.get("name") or "tool")
+            requested = _first_nested(call, "requested_date")
+            response = call.get("response") or call.get("raw_response") or call
+            rate_date = _first_nested(response, "rate_date")
+            text.append(f"{tool}  ", style=f"bold {CYAN}")
+            text.append(
+                f"{requested or '—'} → {rate_date or '—'}",
+                style=f"bold {AMBER_HI} on {AMBER_BG}",
+            )
+            text.append("\n", style=FG)
+        return text
+
+    @staticmethod
+    def _append_sub_results(text: Text, case: dict[str, Any]) -> None:
+        sub_results = case.get("sub_results") or {}
+        if not isinstance(sub_results, dict) or not sub_results:
+            text.append("per-invoice breakdown is available in the full case trace\n", style=DIM)
+            return
+        passed = sum(bool(value) for value in sub_results.values())
+        text.append(f"invoices  {passed}/{len(sub_results)} pass", style=FG)
+        failed = [str(key) for key, value in sub_results.items() if not value]
+        if failed:
+            text.append(f"  ·  failed {', '.join(failed[:3])}", style=RED)
+        text.append("\n", style=FG)
 
 
 class ArchitecturePanel(Panel):
-    """WP-09 seam: replace with the box-drawn DAG and prune strikethrough."""
+    """A compact box-drawn DAG with the pruned role called out."""
 
     title_text = "ARCHITECTURE DAG"
 
     def panel_title(self, view: RunView) -> str:
         generation = view.selected
-        return self.title_text if generation is None else f"{self.title_text} · {generation.label}"
+        return (
+            self.title_text if generation is None else f"{self.title_text}  ·  {generation.label}"
+        )
 
     def render_view(self, view: RunView) -> RenderableType:
         generation = view.selected
         if generation is None or not generation.roles:
             return Text("no architecture proposed yet", style=DIM)
         text = Text()
-        for role in generation.roles:
-            text.append(f"{role.get('name', role.get('id', '?'))}\n", style=FG)
-            text.append(f"  {role.get('justification', 'unspecified')}\n", style=DIM)
+        task_name = view.task_name or "task"
+        text.append(f"{task_name}\n", style=f"bold {ACCENT}")
+        text.append("│\n", style=WIRE)
+        role_ids = {str(role.get("id")) for role in generation.roles}
+        for index, role in enumerate(generation.roles):
+            role_id = str(role.get("id", "?"))
+            name = str(role.get("name", role_id))
+            justification = str(role.get("justification", "unspecified"))
+            prefix = "├─" if index < len(generation.roles) - 1 else "└─"
+            text.append(f"{prefix} ", style=WIRE)
+            text.append(_clip(name, 18), style=FG_BRIGHT)
+            text.append(
+                f"  [{_clip(justification, 11)}]\n",
+                style=_justification_colour(justification),
+            )
+            inputs = [str(value) for value in role.get("inputs", []) if value != "task"]
+            if inputs:
+                text.append(f"│  ← {', '.join(_clip(value, 10) for value in inputs)}\n", style=DIM)
+        mutation = generation.mutation or {}
+        if mutation.get("type") == "prune":
+            target = str(mutation.get("target_role", "role"))
+            text.append(f"✗ {_clip(target, 18)}  (pruned)\n", style=f"strike {RED_DIM}")
+        elif generation.generation > 0:
+            previous = view.generation(generation.generation - 1)
+            if previous is not None:
+                previous_ids = {str(role.get("id")) for role in previous.roles}
+                for removed in sorted(previous_ids - role_ids):
+                    text.append(f"✗ {_clip(removed, 18)}  (pruned)\n", style=f"strike {RED_DIM}")
         return text
 
 
 class GenerationMetricsPanel(Panel):
-    """WP-09 seam: adds ``calls/case`` and ``rel³`` per 04 §1b."""
+    """Selected-generation metrics in the right rail."""
 
-    title_text = "GENERATION"
+    title_text = "GENERATION METRICS"
 
     def panel_title(self, view: RunView) -> str:
         generation = view.selected
-        return self.title_text if generation is None else generation.label.upper()
+        return self.title_text if generation is None else f"{generation.label.upper()}  METRICS"
 
     def render_view(self, view: RunView) -> RenderableType:
         generation = view.selected
@@ -262,67 +723,170 @@ class GenerationMetricsPanel(Panel):
             return Text("no metrics yet", style=DIM)
         metrics = generation.metrics
         text = Text()
-        text.append(f"accuracy   {metrics['pass_rate'] * 100:,.1f}%\n", style=GREEN)
-        text.append(f"cost       {_money(metrics['cost_usd'])}\n", style=FG)
-        text.append(f"latency    {metrics['latency_s_mean']:,.1f}s\n", style=FG)
+        text.append("ACCURACY  ", style=DIM)
+        text.append(f"{metrics['pass_rate']:.1%}\n", style=f"bold {GREEN}")
+        text.append("COST (L-R EQ.)  ", style=DIM)
+        text.append(f"{_money(metrics['cost_usd'])}\n", style=AMBER)
+        text.append("LATENCY  ", style=DIM)
+        text.append(f"{metrics['latency_s_mean']:.1f}s\n", style=FG)
+        text.append("CALLS/CASE  ", style=DIM)
+        text.append(f"{metrics['tool_calls_per_case']:.1f}\n", style=CYAN)
+        text.append("REL³  ", style=DIM)
+        reliability = generation.reliability_pass3
+        text.append("—\n" if reliability is None else f"{reliability:.2f}\n", style=PURPLE)
+        text.append("SF  ", style=DIM)
+        text.append(
+            f"{_ratio(generation.structural_fidelity)} {_bar(generation.structural_fidelity, 5)}\n",
+            style=CYAN,
+        )
+        baseline = generation.baseline
+        if baseline is not None:
+            comparison = metrics.get("vs_baseline", {})
+            text.append("VS COT-SC  ", style=MAGENTA)
+            text.append(
+                f"k={baseline.get('k', '?')}  Δpass {comparison.get('pass_delta', 0):+.2f}\n",
+                style=MAGENTA,
+            )
         return text
 
 
 class LessonsPanel(Panel):
-    """WP-09 seam: replace with lesson rows, ``● loaded`` badges and evidence."""
+    """Loaded/written lessons with their evidence pointers visible."""
 
     title_text = "LESSONS"
+    MAX_LESSON_ROWS = 8
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._view: RunView | None = None
+        self._cursor = 0
+
+    def compose(self):
+        for index in range(self.MAX_LESSON_ROWS):
+            yield Button(
+                "",
+                id=f"lesson-evidence-{index}",
+                classes="lesson-evidence",
+                variant="default",
+            )
 
     def panel_title(self, view: RunView) -> str:
         loaded = len(view.lessons_loaded)
         written = len(view.lessons_written)
-        return f"{self.title_text} · {loaded} loaded · {written} written"
+        return f"{self.title_text}  ·  {loaded} loaded  ·  {written} written"
 
     def render_view(self, view: RunView) -> RenderableType:
         if not view.lessons:
             return Text("no lessons yet", style=DIM)
         loaded_ids = {lesson.id for lesson in view.lessons_loaded}
         text = Text()
-        for lesson in view.lessons:
-            kind = "tool" if lesson.kind == "tool_note" else "rule"
-            text.append(f"[{kind}] ", style=CYAN)
-            text.append(
-                "● loaded\n" if lesson.id in loaded_ids else "＋ written\n",
-                style=DIM if lesson.id in loaded_ids else GREEN,
-            )
+        for index, lesson in enumerate(view.lessons):
+            text.append(self._lesson_row(lesson, lesson.id in loaded_ids))
+            if index != len(view.lessons) - 1:
+                text.append("\n", style=WIRE)
         return text
+
+    def update_view(self, view: RunView) -> None:
+        self._view = view
+        self._cursor = min(self._cursor, max(0, len(view.lessons) - 1))
+        self.border_title = self.panel_title(view)
+        self.update(self.render_view(view))
+        for index in range(self.MAX_LESSON_ROWS):
+            try:
+                button = self.query_one(f"#lesson-evidence-{index}", Button)
+            except Exception:  # pragma: no cover - only possible before child mount.
+                return
+            if index >= len(view.lessons):
+                button.display = False
+                continue
+            button.display = True
+            lesson = view.lessons[index]
+            button.label = self._evidence_row(lesson)
+
+    @staticmethod
+    def _lesson_row(lesson: Any, loaded: bool) -> Text:
+        badge = "tool" if lesson.kind == "tool_note" else "rule"
+        badge_colour = CYAN if badge == "tool" else AMBER
+        text = Text()
+        text.append(f"[{badge}] ", style=badge_colour)
+        if lesson.tool:
+            text.append(f"{lesson.tool}  ", style=f"bold {badge_colour}")
+        text.append("● loaded" if loaded else "+ written", style=GREEN if loaded else DIM)
+        text.append("\n", style=DIM)
+        text.append(f"  {lesson.text}\n", style=FG)
+        born = lesson.born
+        evidence = lesson.evidence.get("case_ids", [])
+        refs = lesson.evidence.get("trace_refs", [])
+        evidence_text = ", ".join(str(item) for item in evidence[:3]) if evidence else "unavailable"
+        text.append(
+            f"  born {born.get('run_id', '—')}·g{born.get('generation', '—')}  ·  "
+            f"evidence ▸ {evidence_text}",
+            style=DIM if evidence else RED,
+        )
+        if refs:
+            text.append(f"  ·  trace ▸ {', '.join(str(item) for item in refs[:2])}", style=DIM)
+        return text
+
+    @staticmethod
+    def _evidence_row(lesson: Any) -> Text:
+        evidence = lesson.evidence.get("case_ids", [])
+        available = bool(evidence)
+        label = ", ".join(str(item) for item in evidence[:3]) if available else "unavailable"
+        text = Text("↗ evidence ▸ ", style=f"bold {CYAN}" if available else DIM)
+        text.append(label, style=FG if available else RED)
+        return text
+
+    def on_key(self, event: Key) -> None:
+        if self._view is None or not self._view.lessons:
+            return
+        if event.key == "up":
+            self._cursor = max(0, self._cursor - 1)
+            event.stop()
+        elif event.key == "down":
+            self._cursor = min(len(self._view.lessons) - 1, self._cursor + 1)
+            event.stop()
+        elif event.key == "enter":
+            event.stop()
+            self._emit_lesson()
+
+    def _emit_lesson(self) -> None:
+        if self._view is None or not self._view.lessons:
+            return
+        self.post_message(LessonEvidenceRequested(self._view.lessons[self._cursor].id))
 
 
 class ComparePanel(Panel):
-    """WP-09 seam: run-over-run strip, fed from ``compare.json`` (run 2 only)."""
+    """Run-over-run strip populated from the committed ``compare.json``."""
 
     title_text = "COMPARE"
 
     def render_view(self, view: RunView) -> RenderableType:
         if not view.compare:
-            return Text("single run — no comparison recorded", style=DIM)
+            return Text("single run  ·  no comparison recorded", style=DIM)
         run1 = view.compare.get("run1", {})
         run2 = view.compare.get("run2", {})
         text = Text()
+        text.append(f"run1 g0 {float(run1.get('g0_pass_rate', 0)):.2f}", style=RED)
+        text.append("  →  ", style=DIM)
+        text.append(f"run2 g0 {float(run2.get('g0_pass_rate', 0)):.2f}", style=GREEN)
+        text.append("   │   calls/case ", style=DIM)
         text.append(
-            f"run1 g0 {run1.get('g0_pass_rate', '—')} · run2 g0 {run2.get('g0_pass_rate', '—')}",
-            style=FG,
+            f"{run1.get('g0_tool_calls_per_case', '—')} → "
+            f"{run2.get('g0_tool_calls_per_case', '—')}",
+            style=CYAN,
         )
+        text.append("   │   gens to plateau ", style=DIM)
         text.append(
-            f"   │   calls/case {run1.get('g0_tool_calls_per_case', '—')}"
-            f" → {run2.get('g0_tool_calls_per_case', '—')}",
-            style=DIM,
+            f"{run1.get('generations_to_plateau', '—')} → "
+            f"{run2.get('generations_to_plateau', '—')}",
+            style=AMBER,
         )
-        text.append(
-            f"   │   gens to plateau {run1.get('generations_to_plateau', '—')}"
-            f" → {run2.get('generations_to_plateau', '—')}",
-            style=DIM,
-        )
+        text.append("   │   ↑ lessons loaded from run 1", style=GREEN)
         return text
 
 
 class MetricsStrip(Panel):
-    """WP-09 seam: sparklines per 04 §3.7 plus the magenta baseline line."""
+    """Bottom evidence strip: pass, cost, latency, calls/case and rel³."""
 
     title_text = "METRICS"
 
@@ -331,29 +895,35 @@ class MetricsStrip(Panel):
         if generation is None or generation.metrics is None:
             return Text("no metrics yet", style=DIM)
         metrics = generation.metrics
+        reliability = generation.reliability_pass3
         text = Text()
-        text.append(f"pass {metrics['pass_rate']:.2f}", style=GREEN)
-        text.append(f"   cost {_money(metrics['cost_usd'])}", style=FG)
-        text.append(f"   lat {metrics['latency_s_mean']:,.1f}s", style=FG)
-        text.append(f"   calls/case {metrics['tool_calls_per_case']:,.1f}", style=FG)
-        text.append(f"   SF {_ratio(metrics['structural_fidelity'])}", style=FG)
-        reliability = metrics.get("reliability_pass3")
-        if reliability is not None:
-            text.append(f"   rel³ {reliability:.2f}", style=CYAN)
+        text.append("ACCURACY  ", style=DIM)
+        text.append(f"{metrics['pass_rate']:.1%}  {_bar(metrics['pass_rate'])}", style=GREEN)
+        text.append("    COST (L-R EQ.)  ", style=DIM)
+        text.append(f"{_money(metrics['cost_usd'])}", style=AMBER)
+        text.append("    LATENCY  ", style=DIM)
+        text.append(f"{metrics['latency_s_mean']:.1f}s", style=FG)
+        text.append("    CALLS/CASE  ", style=DIM)
+        text.append(f"{metrics['tool_calls_per_case']:.1f}", style=CYAN)
+        text.append("    REL³  ", style=DIM)
+        text.append("—" if reliability is None else f"{reliability:.2f}", style=PURPLE)
+        text.append("\nVS COT-SC  ", style=MAGENTA)
         baseline = generation.baseline
-        if baseline is not None:
-            comparison = metrics["vs_baseline"]
+        if baseline is None:
+            text.append("not recorded", style=DIM)
+        else:
+            comparison = metrics.get("vs_baseline", {})
             text.append(
-                f"\nvs CoT-SC(k={baseline.get('k', '?')}) pass {baseline.get('pass_rate', 0):.2f}"
-                f" · Δpass {comparison['pass_delta']:+.2f}"
-                f" · cost ×{comparison['cost_ratio']:.2f}",
+                f"k={baseline.get('k', '?')}  pass {baseline.get('pass_rate', 0):.2f}"
+                f"  ·  Δpass {comparison.get('pass_delta', 0):+.2f}"
+                f"  ·  cost ×{comparison.get('cost_ratio', 0):.2f}",
                 style=MAGENTA,
             )
         return text
 
 
 class BaselinePanel(Panel):
-    """Cost-matched CoT-SC runs per generation (04 §3.9); toggled with ``b``."""
+    """Cost-matched CoT-SC runs, toggled with ``b``."""
 
     title_text = "BASELINE"
 
@@ -378,7 +948,7 @@ class BaselinePanel(Panel):
 
 
 class DiagnosisFeed(RichLog):
-    """Streams diagnosis, mutation and log events with a ``▸`` prefix (04 §3.8)."""
+    """Streaming diagnosis, mutation and log feed."""
 
     DEFAULT_CLASSES = "view-panel"
     FEED_TYPES = frozenset({"diagnosis.emitted", "mutation.applied", "mutation.reverted", "log"})
@@ -389,16 +959,14 @@ class DiagnosisFeed(RichLog):
 
     def update_view(self, view: RunView) -> None:
         generation = view.selected
-        self.border_title = "DIAGNOSIS" if generation is None else f"DIAGNOSIS · {generation.label}"
+        self.border_title = (
+            "DIAGNOSIS" if generation is None else f"DIAGNOSIS  ·  {generation.label}"
+        )
 
     def prime(self, events: Sequence[Event]) -> None:
-        """Hydrate historical narration without replaying it through the reducer."""
-
         self.ingest(events)
 
     def ingest(self, events: Sequence[Event]) -> None:
-        """Append feed lines for the events that just arrived."""
-
         for event in events:
             if event.type in self.FEED_TYPES:
                 self.write(self._line(event))
@@ -431,27 +999,35 @@ class DiagnosisFeed(RichLog):
 
 
 class FooterBar(Static):
-    """The keymap line, and the standing reminder that this view is read-only."""
+    """Keyboard map and the read-only boundary."""
 
     KEYS = (
-        "←/→ gen · a ablation · c cases · d diagnosis · l lessons · b baseline"
-        " · i inspect · space pause · . step · +/- speed · ? help · q quit"
+        "←/→ gen   a ablation   c cases   d diagnosis   l lessons   b baseline"
+        "   i inspect   space pause   . step   +/- speed   ? help   q quit"
     )
 
     def on_mount(self) -> None:
         self.update(Text(self.KEYS, style=DIM, no_wrap=True, overflow="ellipsis"))
 
 
-#: WP-09 swaps concrete classes in here; the app only knows the widget ids.
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 PANEL_TYPES: dict[str, type[Panel]] = {
     "ablation": AblationPanel,
     "architecture": ArchitecturePanel,
     "baseline": BaselinePanel,
     "cases": CasesPanel,
+    "evidence": CaseEvidencePanel,
     "compare": ComparePanel,
     "generation-metrics": GenerationMetricsPanel,
     "lessons": LessonsPanel,
     "metrics": MetricsStrip,
+    "structural": StructuralFidelityPanel,
 }
 
 
@@ -460,7 +1036,9 @@ __all__ = [
     "AblationPanel",
     "ArchitecturePanel",
     "BaselinePanel",
+    "CaseSelectionChanged",
     "CasesPanel",
+    "CaseEvidencePanel",
     "ComparePanel",
     "DiagnosisFeed",
     "FooterBar",
@@ -468,7 +1046,32 @@ __all__ = [
     "HeaderBar",
     "LessonsPanel",
     "LineagePanel",
+    "LessonEvidenceRequested",
     "MetricsStrip",
     "Panel",
+    "StructuralFidelityPanel",
     "ViewPanel",
 ]
+
+
+def _first_nested(payload: Any, key: str) -> Any:
+    if isinstance(payload, dict):
+        if key in payload:
+            return payload[key]
+        for value in payload.values():
+            found = _first_nested(value, key)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _first_nested(value, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _trace_calls(case: dict[str, Any]) -> list[dict[str, Any]]:
+    direct = case.get("tool_calls") or case.get("raw_tool_responses")
+    if isinstance(direct, list):
+        return [item for item in direct if isinstance(item, dict)]
+    return []

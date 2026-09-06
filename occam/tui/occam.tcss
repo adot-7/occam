@@ -1,129 +1,282 @@
-/* Occam shell styling.
+/* Occam WP-09 stylesheet.
  *
- * The palette lives in these ten lines and in occam/tui/palette.py; the Figma
- * reference (design/figma.png) is applied by editing both.  Colour carries
- * meaning consistently (04 §1): green = load-bearing / pass, red = witness /
- * fail, amber = uncertain, dim = pruned, cyan = current generation,
- * magenta = baseline.
+ * Values are translated from design/tokens.css. Textual has no CSS custom
+ * properties, so the names below are kept together as the single palette
+ * boundary. The screen uses rules and dividers instead of rounded cards: the
+ * table is the visual hero and the side rails stay compact.
  */
-$occam-bg: #0d1011;
-$occam-surface: #121617;
-$occam-border: #1f2624;
-$occam-fg: #c8d3d0;
-$occam-dim: #6b7a77;
-$occam-accent: #3ddc84;
-$occam-green: #3ddc84;
-$occam-red: #ff5f5f;
-$occam-amber: #ffb454;
-$occam-cyan: #56c9e8;
-$occam-magenta: #c792ea;
+$bg-base: #0c0c0c;
+$bg-panel: #111111;
+$bg-selected: #1a1a1a;
+$border: #272727;
+$border-hi: #3c3c3c;
+$wire: #383838;
+$text-bright: #ebebeb;
+$text: #cacaca;
+$text-muted: #8c8c8c;
+$green: #3fb950;
+$green-bg: #0d2018;
+$red: #f85149;
+$red-bg: #2d0e0e;
+$red-dim: #581414;
+$amber: #d29922;
+$amber-hi: #fbbf24;
+$amber-bg: #231908;
+$cyan: #58a6ff;
+$cyan-bg: #0d1e2d;
+$purple: #bc8cff;
 
 Screen {
-    background: $occam-bg;
-    color: $occam-fg;
+    background: $bg-base;
+    color: $text;
     layout: vertical;
 }
 
 #header {
-    height: 1;
+    height: 2;
     padding: 0 1;
-    background: $occam-surface;
-}
-
-#footer {
-    height: 1;
-    padding: 0 1;
-    background: $occam-surface;
+    background: $bg-panel;
+    border-bottom: solid $border;
 }
 
 #body {
     height: 1fr;
+    layout: horizontal;
 }
 
 #col-left {
-    width: 30;
-    min-width: 24;
+    width: 23;
+    min-width: 20;
+    border-right: solid $border;
+    background: $bg-panel;
 }
 
 #col-centre {
     width: 1fr;
+    min-width: 70;
+    background: $bg-base;
 }
 
 #col-right {
-    width: 34;
-    min-width: 26;
+    width: 29;
+    min-width: 25;
+    border-left: solid $border;
+    background: $bg-panel;
 }
 
 .view-panel {
-    background: $occam-bg;
-    border: round $occam-border;
-    border-title-color: $occam-dim;
-    border-title-style: bold;
+    background: $bg-base;
+    color: $text;
+    border: none;
+    border-bottom: solid $border;
     padding: 0 1;
+    scrollbar-size: 1 1;
+}
+
+.view-panel:focus {
+    background: $bg-selected;
+    border-bottom: solid $border-hi;
+}
+
+Tree.view-panel {
+    background: $bg-panel;
 }
 
 #lineage {
     height: 1fr;
-    min-height: 6;
+    min-height: 8;
+    padding: 0 1;
+}
+
+#structural {
+    height: 6;
+    min-height: 5;
+    background: $bg-panel;
+    border-bottom: none;
+}
+
+#ablation {
+    height: 20;
+    min-height: 15;
+    max-height: 24;
+    padding: 0 1;
+}
+
+#ablation-table {
+    height: auto;
+    min-height: 5;
+    max-height: 11;
+    width: 1fr;
+    background: $bg-base;
+    color: $text;
+    border: none;
+    scrollbar-size: 1 1;
+}
+
+#ablation-table > .datatable--header {
+    color: $text-muted;
+    background: $bg-panel;
+    text-style: bold;
+}
+
+#ablation-callout {
+    height: 2;
+    min-height: 1;
+    padding: 0 1;
+    background: $red-bg;
+    color: $red;
+}
+
+#ablation-progress-label {
+    height: 1;
+    color: $amber;
+    padding: 0 1;
+}
+
+#ablation-progress {
+    height: 1;
+    padding: 0 1;
+    background: $bg-base;
+    color: $cyan;
+}
+
+#ablation-footer {
+    height: 2;
+    min-height: 1;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+#cases {
+    height: 7;
+    min-height: 5;
+    max-height: 9;
+    background: $bg-base;
+}
+
+#evidence {
+    height: 1fr;
+    min-height: 7;
+    background: $bg-base;
+}
+
+#cases-grid {
+    height: 2;
+    color: $green;
+    padding: 0 1;
+}
+
+#cases-detail {
+    height: 2;
+    color: $text;
+    padding: 0 1;
 }
 
 #architecture {
     height: 1fr;
-    min-height: 6;
-}
-
-#ablation {
-    height: 1fr;
-    min-height: 6;
-}
-
-#cases {
-    height: auto;
-    min-height: 3;
-    max-height: 8;
-}
-
-#diagnosis {
-    height: 1fr;
-    min-height: 5;
+    min-height: 8;
+    background: $bg-panel;
 }
 
 #generation-metrics {
-    height: auto;
-    min-height: 5;
+    height: 10;
+    min-height: 8;
+    background: $bg-panel;
 }
 
 #lessons {
     height: 1fr;
-    min-height: 5;
+    min-height: 8;
+    background: $bg-panel;
+    overflow-y: auto;
+}
+
+Button.lesson-evidence {
+    width: 1fr;
+    height: 2;
+    min-height: 1;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    background: $bg-panel;
+    color: $text;
+    border: none;
+    content-align: left top;
+    text-align: left;
+}
+
+Button.lesson-evidence:focus {
+    background: $bg-selected;
+    color: $text-bright;
+    text-style: bold;
 }
 
 #baseline {
-    height: auto;
+    height: 7;
     min-height: 4;
+    background: $bg-panel;
 }
 
 #compare {
     height: 3;
+    min-height: 2;
+    background: $bg-panel;
+    border-top: solid $border;
+    border-bottom: solid $border;
+    padding: 0 1;
+}
+
+#diagnosis {
+    height: 6;
+    min-height: 4;
+    background: $bg-base;
+    color: $text;
+    border-bottom: solid $border;
+    padding: 0 1;
 }
 
 #metrics {
     height: 4;
+    min-height: 3;
+    background: $bg-panel;
+    border-bottom: solid $border;
+    padding: 0 1;
 }
 
-.view-panel:focus {
-    border: round $occam-accent;
+#footer {
+    height: 2;
+    min-height: 1;
+    background: $bg-panel;
+    color: $text-muted;
+    padding: 0 1;
 }
 
 HelpScreen {
     align: center middle;
+    background: $bg-base 92%;
 }
 
 #help-body {
-    width: 52;
+    width: 56;
     height: auto;
     padding: 1 2;
-    background: $occam-surface;
-    color: $occam-fg;
-    border: round $occam-accent;
+    background: $bg-panel;
+    color: $text;
+    border: solid $cyan;
+}
+
+CaseInspector {
+    align: center middle;
+    background: $bg-base 88%;
+}
+
+#inspector-body {
+    width: 82;
+    max-width: 92%;
+    height: 32;
+    max-height: 86%;
+    overflow-y: auto;
+    padding: 1 2;
+    background: $bg-panel;
+    color: $text;
+    border: solid $amber;
 }
