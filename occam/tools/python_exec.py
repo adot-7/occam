@@ -1,16 +1,31 @@
 """``python_exec`` — run agent-written Python in a throwaway subprocess.
 
-Three properties matter, in this order: the call always terminates (wall-clock
-timeout), it cannot reach the network, and it can only import from a small
-allow-list.  The child is a fresh isolated interpreter, so nothing an agent does
-can touch the engine's own state.
+Four properties matter, in this order: the call always terminates (wall-clock
+timeout), it cannot reach the network, it inherits none of the engine's
+environment, and it can only import from a small allow-list.  The child is a
+fresh isolated interpreter, so nothing an agent does can touch the engine's own
+state.
 
 The guards are for a confused LLM, not a hostile one: they turn "the model tried
-to `pip install requests`" into a legible error instead of a hung run.
+to `pip install requests`" into a legible error instead of a hung run.  The
+environment scrub is the exception — it is a hard boundary rather than a
+courtesy, because whatever agent code prints lands in ``RoleTrace.tool_calls``,
+then ``events.jsonl``, then the committed demo fixtures.  A model debugging
+itself by dumping ``os.environ`` would otherwise commit the API keys to the
+repository, which ``AGENTS.md`` forbids outright.
+
+**Not airtight, and deliberately so.** The temporary working directory only
+defends relative paths: an absolute-path ``open()`` can still read the
+repository, and the import guards are reachable around via introspection on
+``__builtins__``.  Real isolation needs OS-level sandboxing (a container, a
+seccomp profile, a separate user) and is out of scope here.  What is closed
+properly is the leak that would outlive the run: the child has no secrets to
+print in the first place.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,6 +33,11 @@ from dataclasses import dataclass
 
 DEFAULT_TIMEOUT_S = 10.0
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
+
+#: The only variables the child inherits: what a Python interpreter needs to
+#: start, and nothing else.  ``-I`` ignores ``PYTHON*`` variables but does not
+#: scrub the environment generally, so the allow-list does it explicitly.
+ENV_PASSTHROUGH: tuple[str, ...] = ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR")
 
 #: Top-level modules agent code may import.  Deliberately arithmetic- and
 #: text-shaped: everything needed to add up a ledger, nothing that opens a
@@ -201,6 +221,7 @@ def run(
                 argv,
                 input=code,
                 cwd=workdir,
+                env=child_env(),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -236,6 +257,16 @@ def python_exec(
     return run(code, timeout_s=timeout_s, max_output_chars=max_output_chars).as_text()
 
 
+def child_env() -> dict[str, str]:
+    """Build the child's environment: interpreter essentials, no secrets.
+
+    Every API key the engine loads from ``.env`` is absent by construction, so
+    no introspection escape inside the child can surface one.
+    """
+
+    return {name: os.environ[name] for name in ENV_PASSTHROUGH if name in os.environ}
+
+
 def _join(stdout: str, stderr: str) -> str:
     parts = [part for part in (stdout.rstrip("\n"), stderr.rstrip("\n")) if part]
     return "\n".join(parts)
@@ -259,7 +290,9 @@ __all__ = [
     "ALLOWED_IMPORTS",
     "DEFAULT_MAX_OUTPUT_CHARS",
     "DEFAULT_TIMEOUT_S",
+    "ENV_PASSTHROUGH",
     "NETWORK_BLOCKED_MESSAGE",
+    "child_env",
     "PythonExecError",
     "PythonExecResult",
     "python_exec",

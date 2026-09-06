@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import time
 
 import pytest
 
 from occam.tools.python_exec import (
     ALLOWED_IMPORTS,
+    ENV_PASSTHROUGH,
     NETWORK_BLOCKED_MESSAGE,
     PythonExecResult,
     python_exec,
@@ -49,6 +51,36 @@ def test_a_socket_reached_around_the_import_guard_still_cannot_connect() -> None
         "    print(exc)\n"
     )
     assert python_exec(code).strip() == NETWORK_BLOCKED_MESSAGE
+
+
+def test_the_child_inherits_none_of_the_engines_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # os is blocked by both import guards but sits in sys.modules regardless
+    # (random pulls in urandom during the allow-list preload), so introspection
+    # can still reach os.environ. Anything printed there would land in
+    # RoleTrace.tool_calls, events.jsonl and the committed fixtures.
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TENSORMUX_API_KEY"):
+        monkeypatch.setenv(name, "sk-must-not-leak")
+
+    code = (
+        "environ = __builtins__['__import__'].__globals__['sys'].modules['os'].environ\n"
+        "print(sorted(environ))\n"
+    )
+    text = python_exec(code)
+
+    assert "sk-must-not-leak" not in text
+    inherited = ast.literal_eval(text.strip())
+    leaked = sorted(set(inherited) - set(ENV_PASSTHROUGH))
+    assert leaked == [], f"child inherited unexpected variables: {leaked}"
+
+
+def test_the_environment_allow_list_carries_no_credentials() -> None:
+    assert not any(
+        marker in name
+        for name in ENV_PASSTHROUGH
+        for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
+    )
 
 
 def test_process_and_filesystem_escapes_are_blocked() -> None:
