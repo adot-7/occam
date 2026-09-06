@@ -8,6 +8,7 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 
 - **Run-2 lesson count:** WP-01b acceptance says `fixtures/demo_run2` should show `lessons loaded 2`, while `prd/08-END-TO-END-WALKTHROUGH.md` says `run.started.lessons_loaded` is 3 and the run-2 comparison reports `3 / 0`. Which count should the canonical fixture and acceptance tests use?
 - **Design reference filename:** the task request names `design/figma-v2.png`, but `main` contains `design/figma.png`. Should the existing filename remain authoritative, or is a rename/addition expected? This WP will not modify design files.
+- **Benchmark citation discrepancy:** the v3 instructions say SMFR/BFCL/MGSM/Dodo benchmark references are gone, but `prd/07-CITATIONS.md` still contains SMFR, BFCL, and MGSM references. Should the v3 instruction or the existing citations file be treated as authoritative? This WP will not alter `prd/07`.
 
 - **TensorMux rate limit** — still unpublished. Start at rpm 60, raise if no 429s.
 - **List-rate equivalent for GLM-4.7-Flash.** TensorMux publishes no rate card (`/pricing` 404). Using Cloudflare Workers AI's resale price ($0.06/$0.40 per MTok) as the labelled equivalent. If TensorMux gives a number, replace it in one place (`models.yaml`).
