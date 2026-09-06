@@ -195,6 +195,32 @@ def test_wp09_case_cursor_updates_trace_and_inspector() -> None:
     assert "fxa_004  FAIL" in inspector
 
 
+def test_wp09_case_summary_and_dense_layout_stay_readable() -> None:
+    async def scenario() -> tuple[str, bool, int, int, int]:
+        source = _replay(RUN1, at="run.completed", paused=True)
+        app = OccamApp(RUN1, source=source)
+
+        async def body(pilot: Any) -> tuple[str, bool, int, int, int]:
+            await pilot.pause()
+            return (
+                app.query_one("#cases-summary").renderable.plain,
+                app.query_one("#ablation-callout").display,
+                app.query_one("#col-left").region.width,
+                app.query_one("#col-centre").region.width,
+                app.query_one("#col-right").region.width,
+            )
+
+        return await _run_app(app, body, size=(192, 64))
+
+    summary, callout_visible, left_width, centre_width, right_width = _drive(scenario)
+    assert "18/20 PASS" in summary
+    assert "2 FAIL" in summary
+    assert not callout_visible
+    assert left_width >= 26
+    assert centre_width >= 120
+    assert right_width >= 34
+
+
 def test_wp09_lesson_evidence_button_opens_linked_case_inspector() -> None:
     async def scenario() -> str:
         source = _replay(RUN1, to_gen=0, at="lesson.written", paused=True)
@@ -203,7 +229,7 @@ def test_wp09_lesson_evidence_button_opens_linked_case_inspector() -> None:
         async def body(pilot: Any) -> str:
             await pilot.pause()
             await asyncio.sleep(0)
-            assert await pilot.click("#lesson-evidence-0", offset=(1, 1))
+            assert await pilot.click("#lesson-evidence-0", offset=(1, 0))
             await pilot.pause()
             await asyncio.sleep(0)
             assert isinstance(app.screen, CaseInspector)
@@ -226,7 +252,7 @@ def test_wp09_loaded_lesson_without_local_case_is_explicitly_unavailable() -> No
         async def body(pilot: Any) -> str:
             await pilot.pause()
             await asyncio.sleep(0)
-            assert await pilot.click("#lesson-evidence-0", offset=(1, 1))
+            assert await pilot.click("#lesson-evidence-0", offset=(1, 0))
             await pilot.pause()
             await asyncio.sleep(0)
             return app.screen.query_one("#inspector-body").renderable.plain

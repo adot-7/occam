@@ -278,6 +278,7 @@ class AblationPanel(Panel):
             show_cursor=False,
             cursor_type="row",
             zebra_stripes=False,
+            cell_padding=2,
             id="ablation-table",
         )
         yield Static(id="ablation-callout")
@@ -342,13 +343,13 @@ class AblationPanel(Panel):
         if signature != self._table_signature:
             self._table_signature = signature
             table.clear(columns=True)
-            table.add_column("ROLE", width=18, key="role")
+            table.add_column("ROLE", width=17, key="role")
             table.add_column("JUSTIFICATION", width=15, key="justification")
             table.add_column("INFLUENCE", width=15, key="influence")
-            table.add_column("95% CI", width=15, key="ci")
+            table.add_column("95% CI", width=17, key="ci")
             table.add_column("COST", width=11, key="cost")
             table.add_column("DIVERGENCE", width=12, key="divergence")
-            table.add_column("VERDICT", width=18, key="verdict")
+            table.add_column("VERDICT", width=17, key="verdict")
             for row in rows:
                 role_id = str(row.get("role_id", "?"))
                 role = roles.get(role_id, {})
@@ -400,7 +401,9 @@ class AblationPanel(Panel):
             )
         )
         footer.update(self._footer(generation, observed, expected))
-        callout.update(self._callout(generation))
+        callout_text = self._callout(generation)
+        callout.update(callout_text)
+        callout.display = bool(callout_text.plain.strip())
 
     @staticmethod
     def _footer(generation: GenerationView | None, observed: int, expected: int) -> Text:
@@ -448,6 +451,7 @@ class CasesPanel(Panel):
         self._view: RunView | None = None
 
     def compose(self):
+        yield Static(id="cases-summary")
         yield Static(id="cases-grid")
         yield Static(id="cases-detail")
 
@@ -503,6 +507,7 @@ class CasesPanel(Panel):
             self._cursor = failed
         self.update(self.render_view(view))
         try:
+            self.query_one("#cases-summary", Static).update(self._summary(view))
             self.query_one("#cases-grid", Static).update(self._grid(view))
             selected = next(
                 (case for case in cases if case.get("case_id") == self.selected_case_id), None
@@ -524,12 +529,28 @@ class CasesPanel(Panel):
             passed = bool(case.get("passed"))
             colour = GREEN if passed else RED
             marker = "✓" if passed else "✗"
+            text.append(f"{index + 1:02d}", style=DIM)
             text.append(
-                f"[{marker}]" if case_id == selected else f" {marker} ",
+                marker,
                 style=(f"bold {colour} on {SELECTED}" if case_id == selected else colour),
             )
             if index != len(generation.cases) - 1:
                 text.append(" ", style=DIM)
+        return text
+
+    @staticmethod
+    def _summary(view: RunView) -> Text:
+        generation = view.selected
+        if generation is None or not generation.cases:
+            return Text("EVAL CASES  —", style=DIM)
+        total = len(generation.cases)
+        passed = generation.cases_passed
+        failed = total - passed
+        text = Text("EVAL CASES  ", style=f"bold {FG_BRIGHT}")
+        text.append(f"{passed}/{total} PASS", style=GREEN)
+        if failed:
+            text.append(f"  ·  {failed} FAIL", style=RED)
+        text.append(f"  ·  selected {view.selected_case_id or '—'}", style=DIM)
         return text
 
     @staticmethod
@@ -587,6 +608,7 @@ class CasesPanel(Panel):
             selected = next(
                 (case for case in cases if case.get("case_id") == self.selected_case_id), None
             )
+            self.query_one("#cases-summary", Static).update(self._summary(self._view))
             self.query_one("#cases-grid", Static).update(self._grid(self._view))
             self.query_one("#cases-detail", Static).update(
                 self._case_detail(selected) if selected else ""
@@ -779,7 +801,10 @@ class LessonsPanel(Panel):
         if not view.lessons:
             return Text("no lessons yet", style=DIM)
         loaded_ids = {lesson.id for lesson in view.lessons_loaded}
-        text = Text()
+        text = Text(
+            f"LESSONS  {len(view.lessons_loaded)} loaded  ·  {len(view.lessons_written)} written\n",
+            style=f"bold {FG_BRIGHT}",
+        )
         for index, lesson in enumerate(view.lessons):
             text.append(self._lesson_row(lesson, lesson.id in loaded_ids))
             if index != len(view.lessons) - 1:
@@ -813,18 +838,7 @@ class LessonsPanel(Panel):
             text.append(f"{lesson.tool}  ", style=f"bold {badge_colour}")
         text.append("● loaded" if loaded else "+ written", style=GREEN if loaded else DIM)
         text.append("\n", style=DIM)
-        text.append(f"  {lesson.text}\n", style=FG)
-        born = lesson.born
-        evidence = lesson.evidence.get("case_ids", [])
-        refs = lesson.evidence.get("trace_refs", [])
-        evidence_text = ", ".join(str(item) for item in evidence[:3]) if evidence else "unavailable"
-        text.append(
-            f"  born {born.get('run_id', '—')}·g{born.get('generation', '—')}  ·  "
-            f"evidence ▸ {evidence_text}",
-            style=DIM if evidence else RED,
-        )
-        if refs:
-            text.append(f"  ·  trace ▸ {', '.join(str(item) for item in refs[:2])}", style=DIM)
+        text.append(f"  {_clip(lesson.text, 62)}", style=FG)
         return text
 
     @staticmethod
