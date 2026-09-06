@@ -1,0 +1,129 @@
+/* Occam shell styling.
+ *
+ * The palette lives in these ten lines and in occam/tui/palette.py; the Figma
+ * reference (design/figma.png) is applied by editing both.  Colour carries
+ * meaning consistently (04 §1): green = load-bearing / pass, red = witness /
+ * fail, amber = uncertain, dim = pruned, cyan = current generation,
+ * magenta = baseline.
+ */
+$occam-bg: #0d1011;
+$occam-surface: #121617;
+$occam-border: #1f2624;
+$occam-fg: #c8d3d0;
+$occam-dim: #6b7a77;
+$occam-accent: #3ddc84;
+$occam-green: #3ddc84;
+$occam-red: #ff5f5f;
+$occam-amber: #ffb454;
+$occam-cyan: #56c9e8;
+$occam-magenta: #c792ea;
+
+Screen {
+    background: $occam-bg;
+    color: $occam-fg;
+    layout: vertical;
+}
+
+#header {
+    height: 1;
+    padding: 0 1;
+    background: $occam-surface;
+}
+
+#footer {
+    height: 1;
+    padding: 0 1;
+    background: $occam-surface;
+}
+
+#body {
+    height: 1fr;
+}
+
+#col-left {
+    width: 30;
+    min-width: 24;
+}
+
+#col-centre {
+    width: 1fr;
+}
+
+#col-right {
+    width: 34;
+    min-width: 26;
+}
+
+.view-panel {
+    background: $occam-bg;
+    border: round $occam-border;
+    border-title-color: $occam-dim;
+    border-title-style: bold;
+    padding: 0 1;
+}
+
+#lineage {
+    height: 1fr;
+    min-height: 6;
+}
+
+#architecture {
+    height: 1fr;
+    min-height: 6;
+}
+
+#ablation {
+    height: 1fr;
+    min-height: 6;
+}
+
+#cases {
+    height: auto;
+    min-height: 3;
+    max-height: 8;
+}
+
+#diagnosis {
+    height: 1fr;
+    min-height: 5;
+}
+
+#generation-metrics {
+    height: auto;
+    min-height: 5;
+}
+
+#lessons {
+    height: 1fr;
+    min-height: 5;
+}
+
+#baseline {
+    height: auto;
+    min-height: 4;
+}
+
+#compare {
+    height: 3;
+}
+
+#metrics {
+    height: 4;
+}
+
+.view-panel:focus {
+    border: round $occam-accent;
+}
+
+HelpScreen {
+    align: center middle;
+}
+
+#help-body {
+    width: 52;
+    height: auto;
+    padding: 1 2;
+    background: $occam-surface;
+    color: $occam-fg;
+    border: round $occam-accent;
+}
