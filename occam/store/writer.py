@@ -31,7 +31,6 @@ if sys.platform == "win32":  # pragma: no cover - platform specific
             except OSError:
                 # LK_LOCK gives up after ~10s; keep waiting like flock does.
                 time.sleep(0.05)
-
     def _unlock(handle: IO[str]) -> None:
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
