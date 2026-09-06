@@ -59,29 +59,26 @@ Two PRD notes, neither blocking:
   `fx_recon_a · Month-end FX revaluation`. If the exact wording matters, `run.started`'s `task`
   needs a `label` field (a schema change, so not taken here).
 
-### 2026-09-06 — WP-08 (ablation + metrics)
-
-- **The executor result paths are confirmed.** A full run writes
-  `generations/gNNN/results.jsonl`; `full_repeat` and knockouts write
-  `results.<slugged variant>.jsonl`, including the raw per-role traces needed by
-  ablation. `tests/test_ablation_executor_integration.py` validates these paths
-  through `Executor` and `EventReader`.
-- **`full_repeat` cache bypass is implemented.** The executor passes
-  `use_cache=False` through the LLM client; fresh responses are neither read
-  from nor written to the content cache, and the integration test verifies the
-  canonical full cache remains unchanged.
-- **Noise-floor and cost contracts are settled by WP-01c.** `noise_rate` is
-  required on `ablation.started`; `RoleTrace.cost_usd` is the displayed cost,
-  while `billed_cost_usd` and `cost_label` preserve the nominal billing basis.
-  Cost shares now reject a zero displayed-cost denominator rather than invent
-  token or uniform shares. The pending WP-01c commit is carried temporarily in
-  the WP-08 branch until PR #8 lands and is inherited by `main`.
-
 ## Resolved
 - **2026-09-06 — WP-03 answer format: the canonical answer is the LAST FENCED JSON BLOCK.** `02` contradicted itself — §1.2 extracted the answer from the last fenced JSON block while the `task.yaml` template in §3 instructed `answer_format: 'Final line: a JSON object {...}'`, so an agent obeying the pack's own instruction was ungradeable. **§1.2 wins and §3 was changed**, because §1.2 is the grading contract and `AGENTS.md` treats `02` as authoritative for the task; because a fenced block survives trailing prose whereas "final line" breaks the moment a model adds a closing sentence, and GLM-4.7-Flash emits reasoning and prose freely; and because the grader already implemented fence extraction. Both packs' `task.yaml` were regenerated to match. `fx_total` keeps a bare-JSON-line fallback when no fence is present — defensive salvage so a dropped fence cannot crash or fail a run, explicitly **not** part of the contract.
 - **2026-09-06 — `wasted_calls` is dropped, not defined.** `02 §2` named it but nothing ever specified the aggregation. Ruling: remove the phrase; `02 §2` now reads "Feeds `n_tool_calls`." Reasoning: the disk cache is committed and permanent, so a repeat call costs approximately nothing and "wasted" is close to meaningless as a cost signal; and the metric appears in no success criterion (`00 §6`), no field in `events.schema.json`, and no TUI panel. `tool_calls_per_case` is already in `metrics.snapshot` and carries the whole cost/speed story, including the L2 range-endpoint halving. Defining a new metric under this deadline is scope we do not need. WP-04 keeps its raw per-call fields unchanged (`name`, `arguments`, `status`, `latency_s`, `bytes`, `cached`, `http_status`, `error`), so the metric can be reconstructed later if it ever earns its place.
 - **2026-09-06 — WP-03 tolerance sanity is complete.** Both generated packs were checked; the 0.1% floor is the tightest relative tolerance, no case is impossibly tight or trivially passable, and bank-fee headroom exceeds the tolerance in every fee case. See the WP-03 evidence above.
 - **2026-09-06 — Windows event locking is complete on `main`.** PR #7 is merged at `fde72e3`; `EventWriter` now selects `msvcrt` on Windows and `fcntl` elsewhere, with import and concurrent-append regression coverage. The duplicate WP-03/WP-04 blockers are removed from Unresolved.
+- **2026-09-06 — WP-08 executor result paths are confirmed.** A full run writes
+  `generations/gNNN/results.jsonl`; `full_repeat` and knockouts write
+  `results.<slugged variant>.jsonl`, including the raw per-role traces needed by
+  ablation. `tests/test_ablation_executor_integration.py` validates these paths
+  through `Executor` and `EventReader`.
+- **2026-09-06 — WP-08 full-repeat cache bypass is confirmed.** The executor
+  passes `use_cache=False` through the LLM client; fresh responses are neither
+  read from nor written to the content cache, and the integration test verifies
+  the canonical full cache remains unchanged.
+- **2026-09-06 — WP-01c noise-floor and cost contracts are adopted by WP-08.**
+  `noise_rate` is required on `ablation.started`; `RoleTrace.cost_usd` is the
+  displayed cost, while `billed_cost_usd` and `cost_label` preserve the nominal
+  billing basis. Cost shares reject a zero displayed-cost denominator rather
+  than invent token or uniform shares. The pending WP-01c commit is carried
+  temporarily in the WP-08 branch until PR #8 lands and is inherited by `main`.
 - **2026-09-06 — WP-01b fixture and design-reference decisions:**
   - **Run-2 lesson count:** resolved to 3, matching `prd/08-END-TO-END-WALKTHROUGH.md` and lessons L1, D1, and L2. The WP-01b acceptance wording of 2 is corrected; the canonical fixture and acceptance evidence use 3.
   - **Design reference filename:** resolved to `design/figma.png`; it is the intended visual target and there is no missing `figma-v2` asset. No design file was changed.
