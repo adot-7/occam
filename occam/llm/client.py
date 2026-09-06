@@ -25,6 +25,7 @@ from occam.llm.providers import (
     ProviderResponse,
 )
 from occam.llm.rate_limit import PerModelRateLimiter
+from occam.llm.tracing import is_enabled, set_span_attributes, span
 
 
 class LLMError(RuntimeError):
@@ -312,6 +313,7 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float = 0.0,
         use_cache: bool = True,
+        trace_attributes: Mapping[str, Any] | None = None,
     ) -> Completion:
         """Complete one request, applying cache, limiter, retry and cost rules.
 
@@ -325,6 +327,55 @@ class LLMClient:
             config = self.configs[model_key]
         except KeyError as exc:
             raise ConfigurationError(f"unknown model key {model_key!r}") from exc
+        if not is_enabled():
+            return self._complete_impl(
+                config,
+                model_key,
+                messages,
+                tools,
+                response_schema,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                use_cache=use_cache,
+                span_object=None,
+            )
+        attributes = dict(trace_attributes or {})
+        # ``model`` is the provider model id shown in the dashboard; the key is
+        # useful when comparing Occam's configured lanes.
+        attributes.update(model=config.model, model_key=model_key)
+        with span("llm.complete", kind="CHAIN", attributes=attributes) as span_object:
+            try:
+                completion = self._complete_impl(
+                    config,
+                    model_key,
+                    messages,
+                    tools,
+                    response_schema,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    use_cache=use_cache,
+                    span_object=span_object,
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve provider errors
+                set_span_attributes(span_object, {"error": type(exc).__name__, "cached": False})
+                raise
+            return completion
+
+    def _complete_impl(
+        self,
+        config: ModelConfig,
+        model_key: str,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Any] | None,
+        response_schema: Mapping[str, Any] | None,
+        *,
+        max_tokens: int | None,
+        temperature: float,
+        use_cache: bool,
+        span_object: Any | None,
+    ) -> Completion:
+        """Run the cache/provider path, optionally updating one completion span."""
+
         budget = config.max_tokens if max_tokens is None else max(1024, int(max_tokens))
         request = self._request_payload(
             config, messages, tools, response_schema, budget, temperature
@@ -333,7 +384,7 @@ class LLMClient:
         if use_cache:
             cached_payload = self.cache.get(address)
             if cached_payload is not None and _valid_cache_payload(cached_payload):
-                return Completion(
+                completion = Completion(
                     text=str(cached_payload.get("text") or ""),
                     tool_calls=list(cached_payload.get("tool_calls") or []),
                     tokens_in=int(cached_payload.get("tokens_in", 0)),
@@ -348,6 +399,18 @@ class LLMClient:
                     usage_estimated=bool(cached_payload.get("usage_estimated", False)),
                     model_key=model_key,
                 )
+                if span_object is not None:
+                    set_span_attributes(
+                        span_object,
+                        {
+                            "tokens_in": completion.tokens_in,
+                            "tokens_out": completion.tokens_out,
+                            "cost_usd": completion.cost_usd,
+                            "cached": completion.cached,
+                            "latency_s": completion.latency_s,
+                        },
+                    )
+                return completion
 
         provider = self._provider_for(config)
         response: ProviderResponse | None = None
@@ -418,6 +481,17 @@ class LLMClient:
         )
         if use_cache:
             self.cache.put(address, completion.cache_payload())
+        if span_object is not None:
+            set_span_attributes(
+                span_object,
+                {
+                    "tokens_in": completion.tokens_in,
+                    "tokens_out": completion.tokens_out,
+                    "cost_usd": completion.cost_usd,
+                    "cached": completion.cached,
+                    "latency_s": completion.latency_s,
+                },
+            )
         return completion
 
 
@@ -442,6 +516,7 @@ def complete(
     max_tokens: int | None = None,
     temperature: float = 0.0,
     use_cache: bool = True,
+    trace_attributes: Mapping[str, Any] | None = None,
 ) -> Completion:
     """Module-level convenience wrapper for the shared completion interface."""
 
@@ -453,6 +528,7 @@ def complete(
         max_tokens=max_tokens,
         temperature=temperature,
         use_cache=use_cache,
+        trace_attributes=trace_attributes,
     )
 
 

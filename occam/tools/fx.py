@@ -22,6 +22,8 @@ from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 
+from occam.llm.tracing import is_enabled, set_span_attributes, span
+
 FRANKFURTER_BASE_URL = "https://api.frankfurter.dev/v1"
 DEFAULT_CACHE_DIR = Path("data/fx_cache")
 MAX_CONCURRENT_REQUESTS = 5
@@ -168,6 +170,8 @@ class FXClient:
             response_kind="daily",
             requested_start=requested_date,
             requested_end=requested_date,
+            tool="fx_rate",
+            requested_date=date,
         )
         rate_date = data.get("date")
         rate = self._rate_value(data, requested_symbol)
@@ -199,6 +203,8 @@ class FXClient:
             response_kind="series",
             requested_start=requested_start,
             requested_end=requested_end,
+            tool="fx_series",
+            requested_date=f"{start}..{end}",
         )
         raw_rates = data.get("rates")
 
@@ -219,6 +225,8 @@ class FXClient:
         response_kind: str,
         requested_start: date,
         requested_end: date,
+        tool: str,
+        requested_date: str,
     ) -> tuple[dict[str, Any], bool]:
         cache_path = self.cache_path_for(request_path)
         key_lock = self._lock_for(cache_path)
@@ -246,11 +254,75 @@ class FXClient:
                 )
                 return data, True
 
-            started = time.perf_counter()
-            params = {"base": base, "symbols": symbol}
+            if is_enabled():
+                span_attributes = {
+                    "tool": tool,
+                    "requested_date": requested_date,
+                    "cached": False,
+                }
+                if tool == "fx_series":
+                    span_attributes.update(
+                        requested_start=requested_start.isoformat(),
+                        requested_end=requested_end.isoformat(),
+                    )
+                with span(f"tool.{tool}", kind="TOOL", attributes=span_attributes) as span_object:
+                    return self._request_json(
+                        endpoint,
+                        base,
+                        symbol,
+                        request_path,
+                        cache_path,
+                        response_kind=response_kind,
+                        requested_start=requested_start,
+                        requested_end=requested_end,
+                        tool=tool,
+                        span_object=span_object,
+                    )
+            return self._request_json(
+                endpoint,
+                base,
+                symbol,
+                request_path,
+                cache_path,
+                response_kind=response_kind,
+                requested_start=requested_start,
+                requested_end=requested_end,
+                tool=tool,
+                span_object=None,
+            )
+
+    def _request_json(
+        self,
+        endpoint: str,
+        base: str,
+        symbol: str,
+        request_path: str,
+        cache_path: Path,
+        *,
+        response_kind: str,
+        requested_start: date,
+        requested_end: date,
+        tool: str,
+        span_object: Any | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Fetch one uncached response and finish its optional manual span."""
+
+        started = time.perf_counter()
+        params = {"base": base, "symbols": symbol}
+        response: httpx.Response | None = None
+        response_bytes = 0
+        status: int | None = None
+        try:
             with self._semaphore, _PROCESS_LIVE_REQUESTS:
                 response = self._http.get(f"{self.base_url}{endpoint}", params=params)
             elapsed = time.perf_counter() - started
+            status = response.status_code
+            response_bytes = len(response.content)
+            if span_object is not None:
+                set_span_attributes(
+                    span_object,
+                    {"status": status, "bytes": response_bytes},
+                )
             response.raise_for_status()
             try:
                 data = response.json()
@@ -258,6 +330,21 @@ class FXClient:
                 raise FXProtocolError("Frankfurter returned invalid JSON") from exc
             if not isinstance(data, dict):
                 raise FXProtocolError("Frankfurter returned a non-object JSON response")
+            rate_date: str | None = None
+            if tool == "fx_rate":
+                value = data.get("date")
+                rate_date = value if isinstance(value, str) else None
+            elif tool == "fx_series":
+                response_start = data.get("start_date")
+                response_end = data.get("end_date")
+                if isinstance(response_start, str) and isinstance(response_end, str):
+                    rate_date = (
+                        response_start
+                        if response_start == response_end
+                        else f"{response_start}..{response_end}"
+                    )
+            if span_object is not None:
+                set_span_attributes(span_object, {"rate_date": rate_date})
             self._validate_response(
                 data,
                 base=base,
@@ -276,12 +363,23 @@ class FXClient:
                 FXCall(
                     request_path=request_path,
                     latency_s=elapsed,
-                    response_bytes=len(response.content),
+                    response_bytes=response_bytes,
                     status=response.status_code,
                     cached=False,
                 )
             )
             return data, False
+        except Exception as exc:
+            if span_object is not None:
+                set_span_attributes(
+                    span_object,
+                    {
+                        "status": status,
+                        "bytes": response_bytes,
+                        "error": type(exc).__name__,
+                    },
+                )
+            raise
 
     @staticmethod
     def _lock_for(cache_path: Path) -> threading.Lock:

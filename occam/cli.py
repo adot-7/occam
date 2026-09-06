@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 
 from occam.memory.lessons import LessonStore, LessonStoreError
+# Initialize before importing any command implementation that could construct
+# an OpenAI provider.  The provider itself remains lazy for library users.
+from occam.llm.tracing import initialize as initialize_tracing
+from occam.llm.tracing import shutdown as shutdown_tracing
 from occam.store.reader import EventReader
 from occam.store.reducer import reduce, state_json_bytes
 from occam.store.schema import validate_state
@@ -21,6 +25,8 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance for type checkers
 #: an automated check drive the real command without a terminal.
 HEADLESS_ENV = "OCCAM_TUI_HEADLESS"
 EXIT_AFTER_ENV = "OCCAM_TUI_EXIT_AFTER"
+
+initialize_tracing()
 
 app = typer.Typer(
     add_completion=False,
@@ -231,7 +237,12 @@ def llm_ping(
 def main() -> None:
     """Invoke Typer's application."""
 
-    app()
+    try:
+        app()
+    finally:
+        # ``occam`` commands are short-lived processes; make the final case's
+        # spans visible before the interpreter exits.
+        shutdown_tracing()
 
 
 if __name__ == "__main__":

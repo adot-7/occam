@@ -52,6 +52,7 @@ from occam.core.models import (
 )
 from occam.llm.client import LLMClient, LLMError
 from occam.llm.config import ConfigurationError
+from occam.llm.tracing import is_enabled, set_span_attributes, span, trace_context
 from occam.tools.accounting import STATUS_ERROR, STATUS_OK, ToolCall
 from occam.tools.registry import ToolBinding, ToolRegistry
 
@@ -405,6 +406,7 @@ class Executor:
         grader: Callable[..., Any] | None = None,
         writer: Any = None,
         run_dir: str | Path | None = None,
+        run_name: str | None = None,
         temperature: float = 0.0,
         max_tokens: int | None = None,
         case_concurrency: int = DEFAULT_CASE_CONCURRENCY,
@@ -420,6 +422,7 @@ class Executor:
         self.grader = grader
         self.writer = writer
         self.run_dir = None if run_dir is None else Path(run_dir)
+        self.run_name = run_name
         # temperature 0 is determinism hygiene (03 §4.5); the baseline samples
         # at 0.7 through its own path, not through here.
         self.temperature = temperature
@@ -565,7 +568,15 @@ class Executor:
         async def run_one(position: int, case: Case) -> int:
             async with limiter:
                 results[position] = await self._run_case(
-                    architecture, index, levels, excluded, case, active_grader, use_cache
+                    architecture,
+                    index,
+                    levels,
+                    excluded,
+                    case,
+                    active_grader,
+                    use_cache=use_cache,
+                    generation=generation,
+                    variant=variant,
                 )
             return position
 
@@ -626,6 +637,73 @@ class Executor:
         case: Case,
         grader: Callable[..., Any] | None,
         use_cache: bool,
+        *,
+        generation: int = 0,
+        variant: str = "full",
+    ) -> CaseResult:
+        if not is_enabled():
+            return await self._run_case_impl(
+                architecture,
+                index,
+                levels,
+                excluded,
+                case,
+                grader,
+                use_cache=use_cache,
+                generation=generation,
+                variant=variant,
+                trace_attributes={},
+            )
+        trace_attributes: dict[str, Any] = {
+            "generation": generation,
+            "variant": variant,
+            "case_id": case.id,
+        }
+        for name, value in (
+            ("run_id", getattr(self.writer, "run_id", None)),
+            ("run_name", self.run_name or getattr(self.writer, "run_name", None)),
+        ):
+            if value:
+                trace_attributes[name] = value
+
+        with span(f"case.{case.id}", kind="WORKFLOW", attributes=trace_attributes) as span_object:
+            result = await self._run_case_impl(
+                architecture,
+                index,
+                levels,
+                excluded,
+                case,
+                grader,
+                use_cache=use_cache,
+                generation=generation,
+                variant=variant,
+                trace_attributes=trace_attributes,
+            )
+            set_span_attributes(
+                span_object,
+                {
+                    "passed": result.passed,
+                    "cost_usd": result.cost_usd,
+                    "latency_s": result.latency_s,
+                    "tokens_in": result.tokens_in,
+                    "tokens_out": result.tokens_out,
+                },
+            )
+            return result
+
+    async def _run_case_impl(
+        self,
+        architecture: Architecture,
+        index: Mapping[str, Role],
+        levels: Sequence[Sequence[Role]],
+        excluded: set[str],
+        case: Case,
+        grader: Callable[..., Any] | None,
+        *,
+        use_cache: bool,
+        generation: int,
+        variant: str,
+        trace_attributes: Mapping[str, Any],
     ) -> CaseResult:
         started = time.perf_counter()
         context: dict[str, str] = {
@@ -637,7 +715,15 @@ class Executor:
             level_traces = await asyncio.gather(
                 *(
                     self._run_role(
-                        role, case, context, index, architecture.control, use_cache=use_cache
+                        role,
+                        case,
+                        context,
+                        index,
+                        architecture.control,
+                        use_cache=use_cache,
+                        generation=generation,
+                        variant=variant,
+                        trace_attributes=trace_attributes,
                     )
                     for role in level
                 )
@@ -681,9 +767,53 @@ class Executor:
         index: Mapping[str, Role],
         control: str,
         *,
-        use_cache: bool,
+        use_cache: bool = True,
+        generation: int = 0,
+        variant: str = "full",
+        trace_attributes: Mapping[str, Any] | None = None,
     ) -> RoleTrace:
         """Run one role's bounded tool-call loop and return its trace."""
+
+        if not is_enabled():
+            return await self._run_role_impl(
+                role,
+                case,
+                context,
+                index,
+                control,
+                use_cache=use_cache,
+            )
+        role_attributes = dict(trace_attributes or {})
+        role_attributes.update(
+            role_id=role.id,
+            role_name=role.name,
+            justification=role.justification,
+            model=role.model,
+            generation=generation,
+            variant=variant,
+            case_id=case.id,
+        )
+        with trace_context(role_attributes):
+            return await self._run_role_impl(
+                role,
+                case,
+                context,
+                index,
+                control,
+                use_cache=use_cache,
+            )
+
+    async def _run_role_impl(
+        self,
+        role: Role,
+        case: Case,
+        context: Mapping[str, str],
+        index: Mapping[str, Role],
+        control: str,
+        *,
+        use_cache: bool = True,
+    ) -> RoleTrace:
+        """Run one role's bounded tool-call loop without changing its context."""
 
         started = time.perf_counter()
         loop = asyncio.get_running_loop()

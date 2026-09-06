@@ -39,6 +39,8 @@ All notable changes to Occam are documented here.
 - `store.reducer.Reduction`, the incremental form of `reduce()`, so a follower can
   fold new events without re-reducing the whole log. Both paths run the same
   transition function; `reduce()` is now defined in terms of it.
+- WP-15 optional Neatlogs tracing: import-order-safe OpenAI initialization, contextual
+  completion/case/tool spans, honest cache attributes, and run-end flush/shutdown.
 
 - WP-01c contract patch: `ablation.started` now carries the generation's
   `noise_rate` (required), so the ablation table's noise floor is readable while
