@@ -8,6 +8,17 @@ from occam.engine.architect import (
     ArchitectError,
     propose_architecture,
 )
+from occam.engine.baseline import BASELINE_MODEL, BaselineResult, run_baseline
+from occam.engine.compare import compare_runs, format_compare
+from occam.engine.diagnose import (
+    DIAGNOSE_MODEL_KEY,
+    DiagnosisPayload,
+    DiagnosisResult,
+    LessonProposal,
+    LessonWriter,
+    diagnose,
+    lesson_passes_leak_guard,
+)
 from occam.engine.executor import (
     ArchitectureError,
     CycleError,
@@ -22,6 +33,7 @@ from occam.engine.executor import (
     validate_architecture,
     wilson_ci,
 )
+from occam.engine.loop import RunConfig, RunEngine, RunOutcome, run, run_task
 from occam.engine.mutate import (
     PRUNABLE_VERDICTS,
     Mutation,
@@ -33,6 +45,7 @@ from occam.engine.mutate import (
     mutate,
     revert_mutation,
 )
+from occam.engine.pass3 import Pass3Result, run_pass3
 
 __all__ = [
     "ARCHITECT_MODEL_KEY",
@@ -62,4 +75,23 @@ __all__ = [
     "topological_levels",
     "validate_architecture",
     "wilson_ci",
+    "BASELINE_MODEL",
+    "BaselineResult",
+    "run_baseline",
+    "compare_runs",
+    "format_compare",
+    "DIAGNOSE_MODEL_KEY",
+    "DiagnosisPayload",
+    "DiagnosisResult",
+    "LessonProposal",
+    "LessonWriter",
+    "diagnose",
+    "lesson_passes_leak_guard",
+    "RunConfig",
+    "RunEngine",
+    "RunOutcome",
+    "run",
+    "run_task",
+    "Pass3Result",
+    "run_pass3",
 ]

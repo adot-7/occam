@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass, replace
@@ -269,6 +270,39 @@ class LLMClient:
         self.retry_policy = retry_policy or RetryPolicy()
         self._sleeper = sleeper
         self._provider_instances: dict[str, Provider] = {}
+        self._stats_lock = threading.Lock()
+        self._provider_call_count = 0
+        self._cache_hit_count = 0
+        self._displayed_cost_usd = 0.0
+        self._billed_cost_usd = 0.0
+
+    @property
+    def provider_call_count(self) -> int:
+        """Number of provider requests made, including retry attempts."""
+
+        with self._stats_lock:
+            return self._provider_call_count
+
+    @property
+    def cache_hit_count(self) -> int:
+        """Number of completions served from the content cache."""
+
+        with self._stats_lock:
+            return self._cache_hit_count
+
+    @property
+    def displayed_cost_usd(self) -> float:
+        """Sum of display/list-rate-equivalent costs for this client's calls."""
+
+        with self._stats_lock:
+            return self._displayed_cost_usd
+
+    @property
+    def billed_cost_usd(self) -> float:
+        """Sum of nominal provider-billed costs for this client's calls."""
+
+        with self._stats_lock:
+            return self._billed_cost_usd
 
     def _provider_for(self, config: ModelConfig) -> Provider:
         provider = self.providers.get(config.key) or self.providers.get(config.provider)
@@ -384,6 +418,8 @@ class LLMClient:
         if use_cache:
             cached_payload = self.cache.get(address)
             if cached_payload is not None and _valid_cache_payload(cached_payload):
+                with self._stats_lock:
+                    self._cache_hit_count += 1
                 completion = Completion(
                     text=str(cached_payload.get("text") or ""),
                     tool_calls=list(cached_payload.get("tool_calls") or []),
@@ -428,6 +464,8 @@ class LLMClient:
                     "max_tokens": current_budget,
                 }
                 provider_kwargs["temperature"] = temperature
+                with self._stats_lock:
+                    self._provider_call_count += 1
                 response = _coerce_response(provider.complete(config, messages, **provider_kwargs))
             except Exception as exc:
                 if not _retryable(exc) or attempt >= self.retry_policy.max_attempts:
@@ -479,6 +517,9 @@ class LLMClient:
             usage_estimated=usage_estimated,
             model_key=model_key,
         )
+        with self._stats_lock:
+            self._displayed_cost_usd += completion.cost_usd
+            self._billed_cost_usd += completion.billed_cost_usd
         if use_cache:
             self.cache.put(address, completion.cache_payload())
         if span_object is not None:

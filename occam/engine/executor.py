@@ -435,6 +435,7 @@ class Executor:
         self._semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._writer_lock: asyncio.Lock | None = None
+        self.results_history: list[RunResult] = []
 
     @property
     def llm(self) -> LLMClient:
@@ -616,7 +617,7 @@ class Executor:
                 "ci": {"lo": lo, "hi": hi},
             },
         )
-        return RunResult(
+        run_result = RunResult(
             architecture_id=architecture.id,
             variant=variant,
             results=final,
@@ -625,6 +626,8 @@ class Executor:
             latency_s_mean=latency_mean,
             tokens=tokens,
         )
+        self.results_history.append(run_result)
+        return run_result
 
     # -- case and role execution ----------------------------------------
 
