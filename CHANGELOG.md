@@ -19,6 +19,14 @@ All notable changes to Occam are documented here.
   poisoned-cache rejection, and non-overriding project `.env` loading.
 - WP-03 FX packs, Frankfurter cache-backed client, formula reference implementation,
   and tolerance-aware `fx_total` grader.
+- WP-04 tool registry mapping `fx_rate`, `fx_series`, `python_exec` and `fan_out` to
+  `(ToolSpec, callable)` pairs, with deliberately plain base descriptions, the
+  architect-time `tool_note` append hook, and per-call latency/bytes/status/cached
+  accounting for successful and failed calls alike.
+- WP-04 `python_exec` sandbox: isolated subprocess, wall-clock timeout, neutered
+  sockets, and an allow-list import guard.
+- WP-04 `fan_out`, the in-role multi-agent primitive: bounded concurrency, results in
+  subtask order, one failing branch does not fail the batch.
 
 ## [0.1.0] - 2026-09-05
 

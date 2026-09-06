@@ -85,6 +85,7 @@ class FXClient:
         self._cache_guard = threading.RLock()
         self._key_locks: dict[str, threading.Lock] = {}
         self._calls: list[FXCall] = []
+        self._thread_state = threading.local()
 
     @property
     def calls(self) -> tuple[FXCall, ...]:
@@ -99,6 +100,17 @@ class FXClient:
 
         with self._cache_guard:
             return self._calls[-1] if self._calls else None
+
+    @property
+    def thread_last_call(self) -> FXCall | None:
+        """Return this thread's most recent accounting record.
+
+        The tool registry attributes latency, bytes, status and ``cached`` to the
+        call it just made.  ``last_call`` cannot do that once roles run
+        concurrently, because another thread may have recorded in between.
+        """
+
+        return getattr(self._thread_state, "last_call", None)
 
     def close(self) -> None:
         """Close the underlying HTTP client when this instance owns it."""
@@ -245,6 +257,7 @@ class FXClient:
     def _record(self, call: FXCall) -> None:
         with self._cache_guard:
             self._calls.append(call)
+        self._thread_state.last_call = call
 
     def _read_cache(self, path: Path, request_path: str) -> dict[str, Any] | None:
         if not path.is_file():
