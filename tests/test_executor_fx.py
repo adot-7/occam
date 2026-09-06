@@ -219,6 +219,8 @@ def test_three_role_team_runs_five_cases_then_serves_the_second_run_from_cache(
     assert second.cost_usd == 0.0
     for result in second.results:
         assert all(trace.cached is True for trace in result.per_role.values())
+        assert all(trace.billed_cost_usd == 0.0 for trace in result.per_role.values())
+        assert all(trace.cost_label == "cache-hit" for trace in result.per_role.values())
     if provider is not None:
         assert provider.count == 0, "second run must be served entirely from the LLM cache"
 

@@ -29,6 +29,14 @@ All notable changes to Occam are documented here.
 - WP-04 `fan_out`, the in-role multi-agent primitive: bounded concurrency, results in
   subtask order, one failing branch does not fail the batch.
 
+- WP-01c contract patch: `ablation.started` now carries the generation's
+  `noise_rate` (required), so the ablation table's noise floor is readable while
+  the table fills instead of only after `metrics.snapshot`; `RoleTrace` gains
+  `billed_cost_usd` and `cost_label` so granted spend is shown at its list-rate
+  equivalent and labelled as such. WP-05 now carries both cost bases from each
+  completion into the role trace, including cache-hit labels. Both fixtures
+  updated; tests cover reducer retention and schema-copy parity.
+
 ### Fixed
 
 - `EventWriter` now locks with `msvcrt` on Windows and `fcntl` elsewhere. The

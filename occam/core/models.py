@@ -109,11 +109,21 @@ class Lesson(ContractModel):
 
 
 class RoleTrace(ContractModel):
-    """Per-role accounting and output for one evaluated case."""
+    """Per-role accounting and output for one evaluated case.
+
+    ``cost_usd`` is the **displayed** cost and is what ablation's ``cost_share``
+    and the metrics strip read: for a granted model it is the list-rate
+    equivalent, never the $0 bill (`00 §7`, `01 §5`). Executors must copy it
+    from ``CostBreakdown.cost_usd``, the nominal bill from
+    ``CostBreakdown.billed_cost_usd``, and the label verbatim from
+    ``CostBreakdown.label`` so the TUI can say which one it is showing.
+    """
 
     tokens_in: int = Field(default=0, ge=0)
     tokens_out: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0.0)
+    billed_cost_usd: float = Field(default=0.0, ge=0.0)
+    cost_label: str = Field(default="metered", min_length=1)
     latency_s: float = Field(default=0.0, ge=0.0)
     output: str = ""
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)

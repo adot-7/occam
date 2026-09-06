@@ -76,7 +76,7 @@ class CaseResult(BaseModel):
     tokens_in: int; tokens_out: int
     cost_usd: float
     latency_s: float
-    per_role: dict[str, RoleTrace]     # role_id -> {tokens_in, tokens_out, cost_usd, latency_s, output, tool_calls}
+    per_role: dict[str, RoleTrace]     # role_id -> {tokens_in, tokens_out, cost_usd, billed_cost_usd, cost_label, latency_s, output, tool_calls}
 
 class RunResult(BaseModel):
     architecture_id: str
@@ -100,7 +100,7 @@ Every line: `{"ts": ISO8601, "run_id": str, "seq": int, "type": str, "data": {..
 | `execution.started` | `generation`, `variant`, `n_cases` |
 | `execution.case` | `generation`, `variant`, `case_id`, `passed`, `cost_usd`, `latency_s` |
 | `execution.completed` | `generation`, `variant`, `pass_rate`, `cost_usd`, `latency_s_mean`, `tokens`, `ci{lo,hi}` |
-| `ablation.started` | `generation`, `roles: [role_id]`, `n_cases` |
+| `ablation.started` | `generation`, `roles: [role_id]`, `n_cases`, `case_ids: [case_id]`, `noise_rate` |
 | `ablation.role` | `generation`, `role_id`, `influence`, `influence_ci{lo,hi}`, `divergence`, `cost_share`, `verdict: "load_bearing"|"witness"|"harmful"|"uncertain"` |
 | `ablation.completed` | `generation`, `structural_fidelity`, `witnesses: [role_id]` |
 | `baseline.completed` | `generation`, `method:"cot_sc"`, `k`, `pass_rate`, `cost_usd`, `latency_s_mean`, `matched_to_cost_usd` |

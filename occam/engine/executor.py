@@ -18,7 +18,8 @@ prompt:
 * Every role keeps a :class:`RoleTrace` holding **raw tool responses**.  That is
   what lets ``diagnose.py`` see ``requested_date`` differing from ``rate_date``,
   so traces are persisted to ``generations/gNNN/results.jsonl`` verbatim.
-* Cost is accounted **per role**; ablation's ``cost_share`` reads it.
+* Cost is accounted **per role**; ablation's ``cost_share`` reads the displayed
+  equivalent, while each trace also keeps nominal billed cost and its label.
 * Any LLM failure that survives the client's retries fails that one case with
   the error recorded in its trace.  A run is never crashed by a single case.
 """
@@ -265,6 +266,23 @@ def _jsonable(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
         return _jsonable(asdict(value))
     return str(value)
+
+
+def _cost_label(labels: Sequence[str]) -> str:
+    """Describe the cost basis of all completions contributing to one role.
+
+    A role normally uses one model/rate basis for every turn. Cache hits are
+    also labelled by the client, so a multi-turn trace that mixes a cache hit
+    and a live completion must not pretend the whole trace used either basis
+    exclusively.
+    """
+
+    unique = sorted({label for label in labels if label})
+    if not unique:
+        return "metered"
+    if len(unique) == 1:
+        return unique[0]
+    return "mixed (" + ", ".join(unique) + ")"
 
 
 def _now_iso() -> str:
@@ -566,6 +584,8 @@ class Executor:
         tool_calls: list[dict[str, Any]] = []
         tokens_in = tokens_out = 0
         cost = 0.0
+        billed_cost = 0.0
+        cost_labels: list[str] = []
         cached = True
         output = ""
         error: str | None = None
@@ -579,6 +599,8 @@ class Executor:
             tokens_in += completion.tokens_in
             tokens_out += completion.tokens_out
             cost += completion.cost_usd
+            billed_cost += float(getattr(completion, "billed_cost_usd", 0.0))
+            cost_labels.append(str(getattr(completion, "cost_label", "metered")))
             cached = cached and completion.cached
             text = (completion.text or "").strip()
             if not completion.tool_calls:
@@ -609,6 +631,8 @@ class Executor:
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             cost_usd=cost,
+            billed_cost_usd=billed_cost,
+            cost_label=_cost_label(cost_labels),
             latency_s=time.perf_counter() - started,
             output=output,
             tool_calls=tool_calls,
