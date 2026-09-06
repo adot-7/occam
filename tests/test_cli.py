@@ -9,17 +9,25 @@ from typer.testing import CliRunner
 from occam.cli import app
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "fixtures" / "demo_run"
+FIXTURES = (ROOT / "fixtures" / "demo_run1", ROOT / "fixtures" / "demo_run2")
 RUNNER = CliRunner()
 
 
 def test_validate_validates_derived_state_when_snapshot_is_absent() -> None:
-    result = RUNNER.invoke(app, ["validate", str(FIXTURE)])
+    fixture = FIXTURES[0]
+    result = RUNNER.invoke(app, ["validate", str(fixture)])
 
     assert result.exit_code == 0
-    assert "valid: 127 events" in result.output
+    assert "valid: 231 events" in result.output
     assert "derived state schema validated" in result.output
     assert "state.json absent" in result.output
+
+
+def test_validate_accepts_both_canonical_replay_fixtures() -> None:
+    for fixture in FIXTURES:
+        result = RUNNER.invoke(app, ["validate", str(fixture)])
+        assert result.exit_code == 0
+        assert "deterministic: yes" in result.output
 
 
 def test_validate_rejects_an_empty_event_log(tmp_path: Path) -> None:

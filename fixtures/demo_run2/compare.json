@@ -1,0 +1,34 @@
+{
+  "run1": {
+    "g0_pass_rate": 0.55,
+    "final_pass_rate": 0.9,
+    "g0_tool_calls_per_case": 17.4,
+    "g0_cost_per_case": 0.0032,
+    "generations_to_plateau": 3,
+    "roles_at_g0": 5,
+    "roles_final": 4,
+    "reliability_pass3": 0.85,
+    "lessons_loaded": 0,
+    "lessons_written": 3
+  },
+  "run2": {
+    "g0_pass_rate": 0.85,
+    "final_pass_rate": 0.9,
+    "g0_tool_calls_per_case": 4.9,
+    "g0_cost_per_case": 0.0019,
+    "generations_to_plateau": 1,
+    "roles_at_g0": 4,
+    "roles_final": 4,
+    "reliability_pass3": 0.9,
+    "lessons_loaded": 3,
+    "lessons_written": 0
+  },
+  "delta": {
+    "g0_pass_rate": 0.3,
+    "final_pass_rate": 0,
+    "g0_tool_calls_per_case": -12.5,
+    "g0_cost_per_case": -0.0013,
+    "generations_to_plateau": -2,
+    "reliability_pass3": 0.05
+  }
+}

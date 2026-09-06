@@ -7,9 +7,9 @@ Two humans (H1 engine, H2 data + TUI) plus AO workers. One WP = one AO session =
 ---
 
 ### WP-01b — Schema patch for v3  **[H1, ≤1h, first]**
-Add `Lesson` model; events `lesson.written`, `reliability.completed`; fields `run.started.{run_name,memory_ns,lessons_loaded}`, `metrics.snapshot.{tool_calls_per_case,reliability_pass3}`, `CaseResult.sub_results`. Extend `fixtures/demo_run` → **two fixtures**: `fixtures/demo_run1` (5 gens, holiday failures at g0, witness prune, 2 lessons written, pass³) and `fixtures/demo_run2` (lessons loaded, g0 mostly passing, plateau at g1, compare.json). Hand-authored; realistic numbers from `08`.
+Add `Lesson` model; events `lesson.written`, `reliability.completed`; fields `run.started.{run_name,memory_ns,lessons_loaded}`, `metrics.snapshot.{tool_calls_per_case,reliability_pass3}`, `CaseResult.sub_results`. Extend `fixtures/demo_run` → **two fixtures**: `fixtures/demo_run1` (5 gens, holiday failures at g0, witness prune, 3 lessons written, pass³) and `fixtures/demo_run2` (lessons loaded, g0 mostly passing, plateau at g1, compare.json). Hand-authored; realistic numbers from `08`.
 - [ ] Both fixtures validate; reducer deterministic
-- [ ] `occam replay fixtures/demo_run2` header shows `lessons loaded 2`
+- [ ] `occam replay fixtures/demo_run2` header shows `lessons loaded 3`
 
 ### WP-02 — LLM layer  **[H1, ≤1.5h]** (unchanged from v1)
 `models.yaml` with `worker_fast` (TensorMux GLM-4.7-Flash), `worker_alt` (GPT-5 nano), `architect` (Sonnet 5). Cache, rate limiter, cost accounting incl. list-rate-equivalent.
@@ -46,7 +46,7 @@ Architect reads `memory/<ns>/lessons.jsonl`, appends `tool_note`s to tool descri
 ### WP-09 — TUI panels  **[H2, ≤3.5h, after WP-07]**
 Ablation table, architecture DAG w/ prune strikethrough, cases grid with sub-results, Inspector with **tool-response highlight**, Lessons pane, compare strip, metrics incl. `calls/case`, `rel³`.
 - [ ] Replay `demo_run1` to g0 ablation: verdicts render; Inspector on a holiday case highlights `requested_date → rate_date`
-- [ ] Replay `demo_run2`: lessons pane shows 2 loaded; compare strip populated
+- [ ] Replay `demo_run2`: lessons pane shows 3 loaded; compare strip populated
 
 ### WP-10 — Diagnose (with lesson writer + leak guard) + Baseline + pass³ + Loop + compare  **[H1, ≤3h, after WP-06, WP-08]**
 - [ ] Leak guard unit tests: rejects ISO dates, ≥4-digit numbers, invoice ids, near-expected values; accepts the two canonical lessons L1/D1

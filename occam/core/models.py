@@ -21,6 +21,8 @@ Verdict = Literal["load_bearing", "witness", "harmful", "uncertain"]
 CheckerName = Literal["json_set_equal", "numeric_exact", "bfcl_ast", "exact", "llm_judge"]
 EventType = Literal[
     "run.started",
+    "lesson.written",
+    "reliability.completed",
     "architecture.proposed",
     "execution.started",
     "execution.case",
@@ -87,6 +89,18 @@ class Case(ContractModel):
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
+class Lesson(ContractModel):
+    """A reusable, evidence-backed rule learned during a run."""
+
+    id: str = Field(min_length=1)
+    kind: Literal["tool_note", "domain_rule"]
+    text: str = Field(min_length=1)
+    tool: str | None
+    evidence: dict[str, Any]
+    born: dict[str, Any]
+    status: Literal["active", "retired"] = "active"
+
+
 class RoleTrace(ContractModel):
     """Per-role accounting and output for one evaluated case."""
 
@@ -106,6 +120,7 @@ class CaseResult(ContractModel):
     case_id: str
     answer: str = ""
     passed: bool
+    sub_results: dict[str, bool] = Field(default_factory=dict)
     tokens_in: int = Field(default=0, ge=0)
     tokens_out: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0.0)
@@ -150,7 +165,9 @@ class MetricsSnapshot(ContractModel):
     latency_s_p50: float = Field(ge=0.0)
     latency_s_p90: float = Field(ge=0.0)
     tokens: int = Field(ge=0)
+    tool_calls_per_case: float = Field(ge=0.0)
     reliability: float = Field(ge=0.0, le=1.0)
+    reliability_pass3: float | None = Field(default=None, ge=0.0, le=1.0)
     speed: float = Field(ge=0.0)
     structural_fidelity: float = Field(ge=0.0, le=1.0)
     vs_baseline: BaselineComparison
@@ -192,6 +209,7 @@ class GenerationState(BaseModel):
     ablation: dict[str, Any] | None = None
     baseline: dict[str, Any] | None = None
     metrics: MetricsSnapshot | None = None
+    reliability: dict[str, Any] | None = None
     diagnosis: dict[str, Any] | None = None
     mutation: dict[str, Any] | None = None
     revert: dict[str, Any] | None = None
@@ -205,6 +223,10 @@ class State(BaseModel):
 
     run_id: str = Field(min_length=1)
     last_seq: int = Field(default=-1, ge=-1)
+    run_name: str = ""
+    memory_ns: str = ""
+    lessons_loaded: list[Lesson] = Field(default_factory=list)
+    lessons: list[Lesson] = Field(default_factory=list)
     task: dict[str, Any] | None = None
     config: dict[str, Any] = Field(default_factory=dict)
     generations: dict[str, GenerationState] = Field(default_factory=dict)
@@ -267,6 +289,7 @@ __all__ = [
     "EventType",
     "GenerationState",
     "Justification",
+    "Lesson",
     "MemoryPolicy",
     "Role",
     "RoleTrace",

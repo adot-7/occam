@@ -14,6 +14,8 @@
       "type": "string",
       "enum": [
         "run.started",
+        "lesson.written",
+        "reliability.completed",
         "architecture.proposed",
         "execution.started",
         "execution.case",
@@ -33,6 +35,8 @@
     "data": {
       "oneOf": [
         {"$ref": "#/$defs/runStarted"},
+        {"$ref": "#/$defs/lessonWritten"},
+        {"$ref": "#/$defs/reliabilityCompleted"},
         {"$ref": "#/$defs/architectureProposed"},
         {"$ref": "#/$defs/executionStarted"},
         {"$ref": "#/$defs/executionCase"},
@@ -93,6 +97,20 @@
         "hi": {"type": "number"}
       }
     },
+    "lesson": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "text", "tool", "evidence", "born", "status"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "enum": ["tool_note", "domain_rule"]},
+        "text": {"type": "string", "minLength": 1},
+        "tool": {"type": ["string", "null"]},
+        "evidence": {"type": "object"},
+        "born": {"type": "object"},
+        "status": {"type": "string", "enum": ["active", "retired"]}
+      }
+    },
     "influenceCi": {
       "type": "object",
       "additionalProperties": false,
@@ -105,7 +123,7 @@
     "runStarted": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["task", "config"],
+      "required": ["task", "config", "run_name", "memory_ns", "lessons_loaded"],
       "properties": {
         "task": {
           "type": "object",
@@ -118,7 +136,31 @@
             "goal": {"type": "string"}
           }
         },
-        "config": {"type": "object"}
+        "config": {"type": "object"},
+        "run_name": {"type": "string", "minLength": 1},
+        "memory_ns": {"type": "string", "minLength": 1},
+        "lessons_loaded": {"type": "array", "items": {"$ref": "#/$defs/lesson"}}
+      }
+    },
+    "lessonWritten": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "lesson"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "lesson": {"$ref": "#/$defs/lesson"}
+      }
+    },
+    "reliabilityCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "method", "reliable_cases", "n_cases", "reliability_pass3"],
+      "properties": {
+        "generation": {"type": "integer", "minimum": 0},
+        "method": {"const": "pass3"},
+        "reliable_cases": {"type": "integer", "minimum": 0},
+        "n_cases": {"type": "integer", "minimum": 0},
+        "reliability_pass3": {"type": "number", "minimum": 0, "maximum": 1}
       }
     },
     "architectureProposed": {
@@ -170,11 +212,12 @@
     "ablationStarted": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generation", "roles", "n_cases"],
+      "required": ["generation", "roles", "n_cases", "case_ids"],
       "properties": {
         "generation": {"type": "integer", "minimum": 0},
         "roles": {"type": "array", "items": {"type": "string"}},
-        "n_cases": {"type": "integer", "minimum": 0}
+        "n_cases": {"type": "integer", "minimum": 0},
+        "case_ids": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
     "ablationRole": {
@@ -270,6 +313,7 @@
         "latency_s_p50",
         "latency_s_p90",
         "tokens",
+        "tool_calls_per_case",
         "reliability",
         "speed",
         "structural_fidelity",
@@ -284,7 +328,9 @@
         "latency_s_p50": {"type": "number", "minimum": 0},
         "latency_s_p90": {"type": "number", "minimum": 0},
         "tokens": {"type": "integer", "minimum": 0},
+        "tool_calls_per_case": {"type": "number", "minimum": 0},
         "reliability": {"type": "number", "minimum": 0, "maximum": 1},
+        "reliability_pass3": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "speed": {"type": "number", "minimum": 0},
         "structural_fidelity": {"type": "number", "minimum": 0, "maximum": 1},
         "vs_baseline": {
@@ -321,6 +367,14 @@
     {
       "if": {"properties": {"type": {"const": "run.started"}}},
       "then": {"properties": {"data": {"$ref": "#/$defs/runStarted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "lesson.written"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/lessonWritten"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "reliability.completed"}}},
+      "then": {"properties": {"data": {"$ref": "#/$defs/reliabilityCompleted"}}}
     },
     {
       "if": {"properties": {"type": {"const": "architecture.proposed"}}},

@@ -2,6 +2,16 @@
 
 All notable changes to Occam are documented here.
 
+## [Unreleased]
+
+### Added
+
+- WP-01b v3 contract fields: lessons, lesson-written and pass³ reliability events,
+  run memory metadata, per-case sub-results, and tool-call/reliability metrics.
+- Hand-authored FX revaluation replay fixtures for run 1 and run 2.
+- Replay fixtures now record the explicit 10-case stratified ablation subset,
+  measure repeat noise on that subset, and attach run 1 pass³ to best generation g3.
+
 ## [0.1.0] - 2026-09-05
 
 ### Added
