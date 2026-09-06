@@ -478,6 +478,9 @@ def test_llm_failure_fails_one_case_and_the_run_continues(tmp_path):
     failed = result.results[1]
     assert failed.passed is False
     assert "CompletionError" in failed.per_role["a"].error
+    # No completion produced a billing basis; the trace must not claim the
+    # default metered basis for a pre-completion failure.
+    assert failed.per_role["a"].cost_label == "unavailable"
     # The downstream role never ran: no point spending tokens on garbage.
     assert "b" not in failed.per_role
     assert result.pass_rate == pytest.approx(2 / 3)

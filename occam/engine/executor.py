@@ -290,7 +290,7 @@ def _cost_label(labels: Sequence[str]) -> str:
 
     unique = sorted({label for label in labels if label})
     if not unique:
-        return "metered"
+        return "unavailable"
     if len(unique) == 1:
         return unique[0]
     return "mixed (" + ", ".join(unique) + ")"
