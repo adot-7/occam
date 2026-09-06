@@ -1,0 +1,114 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   OCCAM Design Tokens — CSS Custom Properties
+   Source of truth: tokens.json (Style Dictionary format)
+   Do not edit values here without updating tokens.json to match.
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+
+  /* ── BACKGROUND ── */
+  --color-bg-base:    #0c0c0c;   /* page / terminal background            */
+  --color-bg-panel:   #111111;   /* header, footer, side panels           */
+  --color-bg-sel:     #1a1a1a;   /* selected row / focused cell           */
+
+  /* ── BORDER ── */
+  --color-border:     #272727;   /* panel borders, dividers               */
+  --color-border-hi:  #3c3c3c;   /* keybinding outlines, hover borders    */
+  --color-wire:       #383838;   /* box-drawing connectors                */
+
+  /* ── TEXT ── */
+  --color-text-bright:  #ebebeb; /* primary emphasis                      */
+  --color-text:         #cacaca; /* body text                             */
+  --color-text-muted:   #8c8c8c; /* labels — minimum readable level       */
+
+  /* ── GREEN (LOAD-BEARING / positive) ── */
+  --color-green:      #3fb950;
+  --color-green-bg:   #0d2018;
+
+  /* ── RED (WITNESS / fail / harmful) ── */
+  --color-red:        #f85149;
+  --color-red-bg:     #2d0e0e;
+  --color-red-dim:    #581414;   /* struck-through DAG boxes              */
+
+  /* ── AMBER (UNCERTAIN / keybinding labels / inspector highlight) ── */
+  --color-amber:      #d29922;
+  --color-amber-hi:   #fbbf24;   /* inspector requested_date / rate_date  */
+  --color-amber-bg:   #231908;
+
+  /* ── CYAN (brand / CURRENT badge / streaming cursor) ── */
+  --color-cyan:       #58a6ff;
+  --color-cyan-bg:    #0d1e2d;
+
+  /* ── PURPLE (rel³ metric / context_iso tag) ── */
+  --color-purple:     #bc8cff;
+
+  /* ── TYPOGRAPHY ── */
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', monospace;
+
+  --font-size-xs:   10px;   /* badge labels, structural annotations      */
+  --font-size-sm:   11px;   /* panel headers, keybinding labels          */
+  --font-size-base: 12px;   /* secondary text, legend rows               */
+  --font-size-md:   13px;   /* body text — minimum for readable content  */
+  --font-size-lg:   14px;   /* brand wordmark                            */
+  --font-size-xl:   18px;   /* large metric values                       */
+
+  --font-weight-regular:  400;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;   /* WITNESS verdict, OCCAM brand          */
+
+  /* ── SPACING (2px base unit) ── */
+  --space-0:   0px;
+  --space-1:   2px;
+  --space-2:   4px;
+  --space-3:   6px;
+  --space-4:   8px;
+  --space-5:  10px;
+  --space-6:  12px;
+  --space-7:  14px;
+  --space-8:  16px;
+  --space-10: 20px;
+
+  /* ── LAYOUT: PANEL WIDTHS ── */
+  --panel-lineage:   210px;  /* left lineage tree                         */
+  --panel-right:     228px;  /* right column (DAG + metrics + lessons)    */
+
+  /* ── LAYOUT: ROW HEIGHTS ── */
+  --row-header:    48px;
+  --row-compare:   36px;
+  --row-diagnosis: 88px;
+  --row-metrics:   40px;
+  --row-keys:      30px;
+
+  /* ── ABLATION TABLE COLUMN WIDTHS ── */
+  --col-role:       128px;
+  --col-just:       100px;
+  --col-influence:  120px;
+  --col-ci:         110px;
+  --col-cost:        52px;
+  --col-divergence:  96px;
+  --col-verdict:    136px;
+
+  /* ── VERDICT SEMANTIC ALIASES ── */
+  --verdict-load-bearing-color: var(--color-green);
+  --verdict-load-bearing-bg:    var(--color-green-bg);
+
+  --verdict-witness-color:      var(--color-red);
+  --verdict-witness-bg:         var(--color-red-bg);
+  --verdict-witness-weight:     var(--font-weight-bold);
+
+  --verdict-uncertain-color:    var(--color-amber);
+  --verdict-uncertain-bg:       var(--color-amber-bg);
+
+  --verdict-harmful-color:      #ff3333;
+  --verdict-harmful-bg:         #1a0000;
+
+  /* ── JUSTIFICATION TAG COLORS ── */
+  --just-parallel:     var(--color-cyan);
+  --just-context-iso:  var(--color-purple);
+  --just-verification: var(--color-amber);
+  --just-control:      var(--color-green);
+
+  /* ── LESSON BADGE COLORS ── */
+  --badge-tool: var(--color-cyan);
+  --badge-rule: var(--color-amber);
+}
