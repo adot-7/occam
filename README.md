@@ -1,8 +1,10 @@
 # OCCAM
 
-### Build the team. Measure every role. Remove what does not matter.
+[![Watch the OCCAM demo](https://img.youtube.com/vi/uBUagVFSZSg/hqdefault.jpg)](https://www.youtube.com/watch?v=uBUagVFSZSg)
 
-![OCCAM terminal interface](design/figma.png)
+**[Watch the OCCAM demo →](https://www.youtube.com/watch?v=uBUagVFSZSg)**
+
+### Build the team. Measure every role. Remove what does not matter.
 
 ## Inspiration
 
@@ -21,6 +23,8 @@ So we almost built something the literature had just disproven. Instead, we buil
 
 **Everyone else’s diagram grows. Ours shrinks.**
 
+![OCCAM terminal interface](design/figma.png)
+
 ## How we built it
 
 - Python and a Textual TUI, built with **AO**—parallel worker sessions on isolated Git worktrees, one work package per session, every merge a PR.
@@ -31,6 +35,8 @@ So we almost built something the literature had just disproven. Instead, we buil
 - FX ground truth has one definition: the [revaluation formula in `prd/02`](prd/02-DATA-AND-TASKS.md#12-the-formula-single-source-of-truth--grader-reference-implementation-and-readme-all-use-this). Book each invoice at its issue-date rate, value open invoices at the valuation-date rate or settled invoices at their settlement proceeds, then sum `value − booked` in INR.
 - Traced end to end in **Neatlogs**; inference on **GLM-4.7-Flash via TensorMux** and **GPT-5 nano via AI Grants India**.
 - Neatlogs org ID: 0cdcf3bf-0efd-4b74-9da9-ebddf5a8520b
+
+![OCCAM traces in Neatlogs](design/neatlogs-traces.png)
 
 ## Challenges we ran into
 
