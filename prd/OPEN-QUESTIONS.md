@@ -61,12 +61,13 @@ Two PRD notes, neither blocking:
 
 ## 2026-09-06 — WP-10 live acceptance blockers
 
-- **Architect credential is absent in the acceptance environment.** The configured
-  `architect` lane is Anthropic `claude-sonnet-5`, but the available `.env` has no
-  `ANTHROPIC_API_KEY`. The exact 8-case checkpoint therefore stops after
-  `run.started` with a redacted `MissingCredentialsError`; do not silently route
-  architecture or diagnosis through a worker model. Supply the configured
-  credential before claiming a live checkpoint.
+- **Architect lane does not complete in the acceptance environment.** The
+  configured lane is Anthropic `claude-sonnet-5`; the final redacted check found
+  `ANTHROPIC_API_KEY` resolvable, but the exact 8-case checkpoint stopped after
+  `run.started` with a redacted provider `BadRequestError`. Determine whether
+  the credential/account, model id, or request contract is valid before claiming
+  a live checkpoint; do not silently route architecture or diagnosis through a
+  worker model.
 - **OpenAI worker request shape is not current-model compatible.** The configured
   `worker_alt` probe reaches OpenAI but returns a redacted HTTP 400 with
   `unsupported_parameter: max_tokens` for `gpt-5-nano`. The WP-10 checkpoint uses
