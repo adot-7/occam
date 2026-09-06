@@ -78,7 +78,18 @@ def test_invalid_daily_dates_are_rejected_before_endpoint_construction(
 
 @pytest.mark.parametrize(
     "bad_currency",
-    ["eur", "EU", "EURO", "E1R", "EUR ", " EUR", "ÉUR", "ＥＵＲ"],
+    [
+        "eur",
+        "EU",
+        "EURO",
+        "E1R",
+        "EUR ",
+        " EUR",
+        "ÉUR",
+        "ＥＵＲ",
+        "EUR&symbols=GBP",
+        "USD?base=EUR",
+    ],
 )
 def test_currency_arguments_must_be_uppercase_ascii_three_letter_codes(
     tmp_path: Path, bad_currency: str
@@ -223,7 +234,16 @@ def test_invalid_existing_cache_is_reported_and_never_used_as_a_miss(tmp_path: P
     assert requests == 0
 
 
-def test_semantically_invalid_existing_cache_is_revalidated(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "response,match",
+    [
+        (_daily(actual_date="2026-04-05"), "after requested"),
+        (_daily(rate=-1), "non-positive"),
+    ],
+)
+def test_semantically_invalid_existing_cache_is_revalidated(
+    tmp_path: Path, response: dict[str, Any], match: str
+) -> None:
     requests = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -240,14 +260,14 @@ def test_semantically_invalid_existing_cache_is_revalidated(tmp_path: Path) -> N
             {
                 "request_path": request_path,
                 "status": 200,
-                "response": _daily(rate=0),
+                "response": response,
             }
         ),
         encoding="utf-8",
     )
 
     with client:
-        with pytest.raises(FXProtocolError, match="invalid FX cache.*non-positive"):
+        with pytest.raises(FXProtocolError, match=f"invalid FX cache.*{match}"):
             client.fx_rate("2026-04-04", "EUR", "USD")
 
     assert requests == 0
@@ -311,7 +331,13 @@ def test_two_preopened_clients_share_the_five_live_request_budget(tmp_path: Path
             )
 
     assert peak <= MAX_CONCURRENT_REQUESTS
-    assert len(list(tmp_path.glob("*.json"))) == len(dates)
+    cache_files = sorted(tmp_path.glob("*.json"))
+    assert len(cache_files) == len(dates)
+    for cache_file in cache_files:
+        envelope = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert envelope["status"] == 200
+        assert envelope["request_path"].startswith("/v1/")
+        assert envelope["response"]["rates"]
     assert not list(tmp_path.glob(".*.tmp"))
 
 
