@@ -1,10 +1,10 @@
 """The Occam Textual app: a read-only view of one run directory.
 
 The app never imports the engine, never calls an LLM and never writes into the
-run directory.  It receives batches of events from an
+run directory. It receives batches of events from an
 :class:`~occam.tui.source.EventSource`, folds them through the shared pure
 reducer, and repaints panels from the resulting :class:`~occam.tui.viewmodel.RunView`.
-Replay and live differ only in which source is attached (`01 §1`).
+Replay and live differ only in which source is attached (01 §1).
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -24,8 +25,10 @@ from textual.widgets import Static
 
 from occam.core.models import Event, State
 from occam.tui.feed import StateFeed
+from occam.tui.palette import AMBER, AMBER_HI, CYAN, DIM, FG, FG_BRIGHT, GREEN, RED
 from occam.tui.panels import (
     PANEL_TYPES,
+    CasesPanel,
     DiagnosisFeed,
     FooterBar,
     HeaderBar,
@@ -47,7 +50,7 @@ class StateChanged(Message):
 
 
 class InspectRequested(Message):
-    """WP-09 seam: ``i`` asks for the Case Inspector modal (04 §3.6)."""
+    """Ask the app to open the read-only Case Inspector."""
 
     def __init__(self, case_id: str | None = None) -> None:
         super().__init__()
@@ -67,7 +70,7 @@ OCCAM — read-only run viewer
   ←/→      previous / next generation
   a c d l  focus ablation · cases · diagnosis · lessons
   b        toggle the cost-matched baseline panel
-  i        inspect the selected case
+  i/enter  inspect the selected case
   space    pause / resume replay
   .        step one event
   +/-      replay speed
@@ -79,15 +82,157 @@ OCCAM — read-only run viewer
         yield Static(self.HELP, id="help-body")
 
 
+class CaseInspector(ModalScreen[None]):
+    """A compact, read-only case and tool-trace inspector (04 §3.6).
+
+    The event schema intentionally keeps ``execution.case`` small. When a
+    richer result record is present in that projection, this screen expands the
+    per-role and raw tool fields. For summary-only fixture events it says so
+    explicitly while retaining the highlighted requested-date → rate-date row;
+    it never manufactures a response that was not recorded.
+    """
+
+    BINDINGS = [
+        Binding("escape,q", "dismiss", "close", show=False),
+    ]
+
+    def __init__(self, view: RunView, case_id: str, *, highlight: bool = False) -> None:
+        super().__init__()
+        self.view = view
+        self.case_id = case_id
+        self.highlight = highlight
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="inspector-body")
+
+    def on_mount(self) -> None:
+        self.query_one("#inspector-body", Static).update(self.render_inspector())
+
+    def render_inspector(self) -> Text:
+        case = self.view.case(self.case_id) or {"case_id": self.case_id}
+        selected = self.view.selected
+        text = Text()
+        text.append("CASE INSPECTOR", style=f"bold {CYAN}")
+        if selected is not None:
+            text.append(f"  {selected.label}", style=DIM)
+        text.append("\n\n", style=DIM)
+        text.append(f"{self.case_id}  ", style=f"bold {FG_BRIGHT}")
+        passed = bool(case.get("passed"))
+        text.append("PASS\n" if passed else "FAIL\n", style=GREEN if passed else RED)
+        text.append(
+            f"cost {_money(case.get('cost_usd'))}  ·  latency {case.get('latency_s', '—')}s\n",
+            style=FG,
+        )
+        self._append_sub_results(text, case)
+        self._append_optional_payload(text, case)
+        self._append_tool_trace(text, case)
+        return text
+
+    @staticmethod
+    def _append_sub_results(text: Text, case: dict[str, Any]) -> None:
+        sub_results = case.get("sub_results") or {}
+        if not isinstance(sub_results, dict) or not sub_results:
+            text.append("sub_results  —  not carried in this execution.case summary\n", style=DIM)
+            return
+        passed = sum(bool(value) for value in sub_results.values())
+        text.append(f"sub_results  {passed}/{len(sub_results)} invoices pass\n", style=FG)
+        for invoice, result in sub_results.items():
+            text.append(f"  {'✓' if result else '✗'} {invoice}\n", style=GREEN if result else RED)
+
+    @staticmethod
+    def _append_optional_payload(text: Text, case: dict[str, Any]) -> None:
+        for label in ("input", "expected", "answer"):
+            value = case.get(label)
+            if value is not None:
+                text.append(f"{label}  {_clip(value, 120)}\n", style=FG)
+
+    def _append_tool_trace(self, text: Text, case: dict[str, Any]) -> None:
+        text.append("\nTOOL RESPONSE HIGHLIGHT\n", style=f"bold {AMBER}")
+        calls = _tool_calls(case)
+        if not calls:
+            text.append(
+                "requested_date  →  rate_date\n",
+                style=f"bold {AMBER_HI} on #231908",
+            )
+            text.append(
+                "raw role/tool fields are not present in this fixture's compact event contract; "
+                "the labels above are the trace fields the Inspector highlights when a full "
+                "result is recorded.\n",
+                style=DIM,
+            )
+            return
+        for call in calls:
+            tool = str(call.get("tool") or call.get("name") or "tool")
+            text.append(f"{tool}\n", style=f"bold {CYAN}")
+            requested = _first_value(call, "requested_date")
+            response = call.get("response") or call.get("raw_response") or call
+            rate_date = _first_value(response, "rate_date")
+            if requested is not None or rate_date is not None:
+                text.append("  requested_date ", style=FG)
+                text.append(str(requested or "—"), style=f"bold {AMBER_HI} on #231908")
+                text.append("  →  rate_date ", style=FG)
+                text.append(str(rate_date or "—"), style=f"bold {AMBER_HI} on #231908")
+                text.append("\n", style=FG)
+            for field in ("rate", "status", "bytes", "cached", "error"):
+                value = _first_value(response, field)
+                if value is not None:
+                    text.append(f"  {field}: {value}\n", style=DIM if field != "error" else RED)
+
+
+def _money(value: Any) -> str:
+    try:
+        return f"${float(value):,.4f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _clip(value: Any, width: int) -> str:
+    text = str(value).replace("\n", " ")
+    return text if len(text) <= width else text[: max(1, width - 1)] + "…"
+
+
+def _first_value(payload: Any, key: str) -> Any:
+    if isinstance(payload, dict):
+        if key in payload:
+            return payload[key]
+        for value in payload.values():
+            found = _first_value(value, key)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _first_value(value, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _tool_calls(case: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize optional per-role trace shapes without coupling to the engine."""
+
+    calls: list[dict[str, Any]] = []
+    direct = case.get("tool_calls") or case.get("raw_tool_responses")
+    if isinstance(direct, list):
+        calls.extend(item for item in direct if isinstance(item, dict))
+    per_role = case.get("per_role")
+    if isinstance(per_role, dict):
+        for role_id, trace in per_role.items():
+            if not isinstance(trace, dict):
+                continue
+            role_calls = trace.get("tool_calls") or trace.get("raw_tool_responses") or []
+            if isinstance(role_calls, list):
+                for call in role_calls:
+                    if isinstance(call, dict):
+                        calls.append({"role_id": role_id, **call})
+    return calls
+
+
 class OccamApp(App[None]):
     """One screen over one run directory."""
 
     CSS_PATH = "occam.tcss"
     TITLE = "OCCAM"
 
-    # The shell keymap (04 §5) owns these keys everywhere: panels such as the
-    # lineage Tree and the diagnosis log bind arrows and space themselves, so
-    # the app's bindings take priority over whatever currently has focus.
     BINDINGS = [
         Binding("q,ctrl+c", "quit", "quit"),
         Binding("left", "prev_generation", "prev gen", priority=True),
@@ -97,7 +242,7 @@ class OccamApp(App[None]):
         Binding("d", "focus_panel('diagnosis')", "diagnosis", priority=True),
         Binding("l", "focus_panel('lessons')", "lessons", priority=True),
         Binding("b", "toggle_baseline", "baseline", priority=True),
-        Binding("i", "inspect", "inspect", priority=True),
+        Binding("i,enter", "inspect", "inspect", priority=True, show=False),
         Binding("space", "toggle_pause", "pause", priority=True),
         Binding("full_stop", "step", "step", priority=True),
         Binding("plus,equals_sign", "speed_up", "faster", priority=True),
@@ -123,23 +268,23 @@ class OccamApp(App[None]):
         self.pinned_generation = False
         self.view = self._build_view()
 
-    # -- composition ----------------------------------------------------
-
     def compose(self) -> ComposeResult:
         yield HeaderBar(id="header")
         with Horizontal(id="body"):
             with Vertical(id="col-left"):
                 yield LineagePanel()
-                yield PANEL_TYPES["architecture"](id="architecture")
+                yield PANEL_TYPES["structural"](id="structural")
             with Vertical(id="col-centre"):
                 yield PANEL_TYPES["ablation"](id="ablation")
                 yield PANEL_TYPES["cases"](id="cases")
-                yield DiagnosisFeed()
+                yield PANEL_TYPES["evidence"](id="evidence")
             with Vertical(id="col-right"):
+                yield PANEL_TYPES["architecture"](id="architecture")
                 yield PANEL_TYPES["generation-metrics"](id="generation-metrics")
                 yield PANEL_TYPES["lessons"](id="lessons")
                 yield PANEL_TYPES["baseline"](id="baseline")
         yield PANEL_TYPES["compare"](id="compare")
+        yield DiagnosisFeed()
         yield PANEL_TYPES["metrics"](id="metrics")
         yield FooterBar(id="footer")
 
@@ -147,8 +292,6 @@ class OccamApp(App[None]):
         self.query_one("#baseline").display = False
         self.refresh_view()
         self.run_worker(self._drive(), name="event-source", exclusive=True)
-
-    # -- run directory --------------------------------------------------
 
     def _load_compare(self) -> dict[str, Any] | None:
         """Read the optional run-over-run comparison written by ``occam compare``."""
@@ -161,8 +304,6 @@ class OccamApp(App[None]):
             return None
         return payload if isinstance(payload, dict) else None
 
-    # -- event plumbing -------------------------------------------------
-
     async def _drive(self) -> None:
         initial = self.source.initial_state()
         if initial is not None:
@@ -174,46 +315,33 @@ class OccamApp(App[None]):
             self.post_message(StateChanged(initial))
         await self.source.run(self._on_events)
         if self.feed.state is not None:
-            # Sources set ``finished`` immediately after their final sink call;
-            # repaint once more so the mode badge reflects that transition even
-            # for logs without a run.completed event.
             self.post_message(StateChanged(self.feed.state))
         else:
-            # A source can fail before producing its first event; refresh the
-            # header so a bounded-tail error is still visible.
             self.refresh_view()
 
     def _on_events(self, events: Sequence[Event]) -> None:
-        """Sink handed to the source; runs on the app's event loop."""
-
         batch = list(events)
         state = self.feed.apply(batch)
         self.query_one(DiagnosisFeed).ingest(batch)
         self.post_message(StateChanged(state))
 
     def on_state_changed(self, message: StateChanged) -> None:
-        del message  # the feed already holds the authoritative state
+        del message
         self.refresh_view()
 
     def on_inspect_requested(self, message: InspectRequested) -> None:
-        """Default handler; WP-09 mounts the Case Inspector modal instead."""
-
-        del message
-        self.notify("Case Inspector arrives with the cases grid.", timeout=2)
-
-    # -- painting -------------------------------------------------------
+        self.open_case_inspector(message.case_id)
 
     def _build_view(self) -> RunView:
-        source = self.source
         return RunView(
             self.feed.state,
             selected_generation=self.selected_generation if self.pinned_generation else None,
-            mode=source.mode,
-            speed=getattr(source, "speed", 1.0),
-            paused=getattr(source, "paused", False),
-            finished=getattr(source, "finished", False),
+            mode=self.source.mode,
+            speed=getattr(self.source, "speed", 1.0),
+            paused=getattr(self.source, "paused", False),
+            finished=getattr(self.source, "finished", False),
             elapsed_s=self.feed.elapsed_s(),
-            status=getattr(source, "status", None),
+            status=getattr(self.source, "status", None),
             compare=self.compare,
         )
 
@@ -223,8 +351,6 @@ class OccamApp(App[None]):
         for panel in self.query(".view-panel"):
             if isinstance(panel, ViewPanel):
                 panel.update_view(self.view)
-
-    # -- generation navigation ------------------------------------------
 
     def _select(self, generation: int) -> None:
         self.pinned_generation = True
@@ -250,8 +376,6 @@ class OccamApp(App[None]):
         if isinstance(generation, int):
             self._select(generation)
 
-    # -- transport ------------------------------------------------------
-
     def action_toggle_pause(self) -> None:
         source = self.source
         if isinstance(source, ReplaySource):
@@ -276,25 +400,39 @@ class OccamApp(App[None]):
             source.nudge_speed(factor)
             self.refresh_view()
 
-    # -- panels ---------------------------------------------------------
-
     def action_focus_panel(self, panel_id: str) -> None:
         try:
             panel = self.query_one(f"#{panel_id}")
-        except NoMatches:  # a panel WP-09 has not mounted must never crash the shell
+        except NoMatches:
             return
         if panel.display:
             panel.focus()
 
     def action_toggle_baseline(self) -> None:
-        panel = self.query_one("#baseline")
+        try:
+            panel = self.query_one("#baseline")
+        except NoMatches:
+            return
         panel.display = not panel.display
 
     def action_inspect(self) -> None:
-        self.post_message(InspectRequested())
+        try:
+            case_id = self.query_one(CasesPanel).selected_case_id
+        except NoMatches:
+            case_id = None
+        self.open_case_inspector(case_id)
+
+    def open_case_inspector(self, case_id: str | None = None) -> None:
+        if case_id is None and self.view.selected is not None:
+            selected = self.view.selected.selected_case
+            case_id = str(selected.get("case_id")) if selected else None
+        if case_id is None:
+            self.notify("No case is available for inspection.", severity="warning", timeout=2)
+            return
+        self.push_screen(CaseInspector(self.view, case_id))
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
 
 
-__all__ = ["HelpScreen", "InspectRequested", "OccamApp", "StateChanged"]
+__all__ = ["CaseInspector", "HelpScreen", "InspectRequested", "OccamApp", "StateChanged"]

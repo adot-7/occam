@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.widgets import DataTable
 from typer.testing import CliRunner
 
 from occam.cli import app as cli_app
@@ -99,6 +100,67 @@ def test_replay_reaches_the_end_of_both_fixtures(run_dir: Path) -> None:
     # Replay is indistinguishable from live: the same events, the same reducer,
     # therefore byte-identical state.
     assert replayed_state == state_json_bytes(reduce(expected))
+
+
+def test_wp09_ablation_table_and_case_trace_use_fixture_contract() -> None:
+    async def scenario() -> tuple[list[str], int, str, str, bool]:
+        source = _replay(RUN1, to_gen=0, at="lesson.written", paused=True)
+        app = OccamApp(RUN1, source=source)
+
+        async def body(pilot: Any) -> tuple[list[str], int, str, str, bool]:
+            await pilot.pause()
+            await asyncio.sleep(0)
+            table = app.query_one("#ablation-table", DataTable)
+            labels = [column.label.plain for column in table.columns.values()]
+            return (
+                labels,
+                table.row_count,
+                app.query_one("#evidence").renderable.plain,
+                _header(app),
+                app._exception is None,
+            )
+
+        return await _run_app(app, body)
+
+    labels, rows, evidence, header, clean = _drive(scenario)
+    assert labels == [
+        "ROLE",
+        "JUSTIFICATION",
+        "INFLUENCE",
+        "95% CI",
+        "COST",
+        "DIVERGENCE",
+        "VERDICT",
+    ]
+    assert rows == 5
+    assert "requested_date  →  rate_date" in evidence
+    assert "lessons 0" in header
+    assert clean
+
+
+def test_wp09_run2_surfaces_lessons_compare_and_diagnosis() -> None:
+    async def scenario() -> tuple[str, str, int, bool]:
+        source = _replay(RUN2, at="diagnosis.emitted", paused=True)
+        app = OccamApp(RUN2, source=source)
+
+        async def body(pilot: Any) -> tuple[str, str, int, bool]:
+            await pilot.pause()
+            await asyncio.sleep(0)
+            return (
+                _header(app),
+                app.query_one("#compare").renderable.plain,
+                len(app.query_one(DiagnosisFeed).lines),
+                "The response's rate_date" in app.query_one("#lessons").renderable.plain,
+            )
+
+        return await _run_app(app, body)
+
+    header, compare, diagnosis_lines, has_lesson = _drive(scenario)
+    assert "lessons loaded 3" in header
+    assert "run1 g0 0.55" in compare
+    assert "run2 g0 0.85" in compare
+    assert diagnosis_lines == 3
+    assert has_lesson
 
 
 @pytest.mark.parametrize("run_dir", FIXTURES, ids=lambda path: path.name)
