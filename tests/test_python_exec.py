@@ -12,6 +12,8 @@ import pytest
 
 from occam.tools.python_exec import (
     ALLOWED_IMPORTS,
+    BOUND_METHOD_GUARDS,
+    BOUND_METHOD_POLICIES,
     CPYTHON_SYNTHESIZED_ENV,
     DEFAULT_MAX_OUTPUT_CHARS,
     ENV_PASSTHROUGH,
@@ -31,6 +33,29 @@ def test_returns_stdout_of_a_successful_program() -> None:
 def test_public_docstring_describes_the_restricted_calculation_surface() -> None:
     assert "restricted calculation subset" in (python_exec.__doc__ or "")
     assert "arbitrary Python is unsupported" in (python_exec.__doc__ or "")
+
+
+@pytest.mark.parametrize(
+    ("type_name", "method_name", "policy"),
+    tuple(
+        (type_name, method_name, policy)
+        for type_name, methods in BOUND_METHOD_POLICIES.items()
+        for method_name, policy in methods.items()
+    ),
+)
+def test_every_exposed_bound_method_has_an_explicit_resource_policy(
+    type_name: str, method_name: str, policy: str
+) -> None:
+    assert type_name
+    assert method_name
+    assert policy in BOUND_METHOD_GUARDS
+
+
+def test_set_growth_methods_are_not_exposed() -> None:
+    result = run("values = set()\nvalues.add('sentinel')")
+
+    assert not result.ok
+    assert "attribute 'add' is not available" in result.stderr
 
 
 def test_allowed_imports_cover_the_arithmetic_an_fx_ledger_needs() -> None:
@@ -146,6 +171,67 @@ def test_subprocess_and_child_network_escapes_are_rejected(label: str, code: str
     assert "import of 'subprocess' is not allowed" in result.stderr
 
 
+def test_thirty_six_adversarial_escape_attempts_cannot_exfiltrate_sentinels(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret_file = tmp_path / ".env-sentinel"
+    secret_file.write_text("OCCAM_FILE_SENTINEL=file-secret\n", encoding="utf-8")
+    monkeypatch.setenv("OCCAM_SECRET_SENTINEL", "environment-secret")
+    path = str(secret_file)
+    attempts = (
+        f"open({path!r}).read()",
+        "open('relative-sentinel').read()",
+        f"import pathlib\npathlib.Path({path!r}).read_text()",
+        f"import io\nio.open({path!r}).read()",
+        f"import os\nos.open({path!r}, os.O_RDONLY)",
+        "import os\nos.system('echo PROCESS_SENTINEL')",
+        "import subprocess\nsubprocess.run(['echo', 'PROCESS_SENTINEL'])",
+        "import shutil\nshutil.which('python')",
+        "import ctypes\nctypes.CDLL('libc.so.6')",
+        "import socket\nsocket.create_connection(('example.com', 80), 1)",
+        "import urllib\nprint(urllib)",
+        "import http\nprint(http)",
+        "import requests\nprint(requests)",
+        "__import__('os')",
+        "__import__.__globals__['sys'].modules['os']",
+        "def f():\n    pass\nprint(f.__globals__)",
+        "def f():\n    pass\nprint(f.__code__)",
+        "try:\n    1 / 0\nexcept Exception as exc:\n    print(exc.__traceback__)",
+        "try:\n    1 / 0\nexcept Exception as exc:\n"
+        "    print(exc.__traceback__.tb_frame.f_globals)",
+        "def g():\n    yield 1\nprint(g().gi_frame)",
+        "().__class__.__mro__",
+        "object.__subclasses__()",
+        "type(1)",
+        "globals()",
+        "locals()",
+        "eval('1')",
+        "exec('print('PROCESS_SENTINEL')')",
+        "compile('print('PROCESS_SENTINEL')', '<x>', 'exec')",
+        "memoryview(b'x')",
+        "bytearray(1)",
+        "import importlib.machinery\nprint(importlib.machinery)",
+        "import sys\nprint(sys.modules)",
+        "import multiprocessing\nprint(multiprocessing)",
+        "__builtins__['open']('relative-sentinel')",
+        "__builtins__['__import__']('os')",
+        "import subprocess\n"
+        "subprocess.run(['python', '-c', \"import socket; "
+        "socket.create_connection(('example.com', 80), 1)\"])",
+    )
+
+    assert len(attempts) == 36
+    for code in attempts:
+        result = run(code, timeout_s=2.0)
+        output = result.as_text()
+        assert not result.ok
+        assert not result.timed_out
+        assert "OCCAM_FILE_SENTINEL" not in output
+        assert "file-secret" not in output
+        assert "environment-secret" not in output
+        assert "PROCESS_SENTINEL" not in output
+
+
 def test_the_environment_allow_list_carries_no_credentials() -> None:
     assert not any(
         marker in name
@@ -257,17 +343,17 @@ def test_unsupported_syntax_reports_the_restricted_surface() -> None:
     (
         (
             "repr",
-            "repr(['x' * 200_000] * 10)",
+            "repr('x' * 999_999)",
             "string conversion size limit exceeded",
         ),
         (
             "ascii",
-            "ascii(['x' * 200_000] * 10)",
+            "ascii('x' * 999_999)",
             "string conversion size limit exceeded",
         ),
         (
             "json",
-            "import json\njson.dumps(['x' * 200_000] * 10)",
+            "import json\njson.dumps(['x'] * 100_000, indent=100)",
             "JSON output size limit exceeded",
         ),
     ),
@@ -295,6 +381,136 @@ def test_print_streams_each_argument_and_separator_into_the_bounded_sink() -> No
 
 
 @pytest.mark.parametrize(
+    ("label", "code"),
+    (
+        (
+            "repeated strings",
+            "values = []\n"
+            "values.append('x' * 600_000)\n"
+            "values.append('y' * 600_000)\n"
+            "print('COMPLETED')",
+        ),
+        (
+            "1.1M append attempt",
+            "values = []\n"
+            "for index in range(1_100_000):\n"
+            "    values.append('')\n"
+            "print('COMPLETED')",
+        ),
+        (
+            "1.1M extend attempt",
+            "values = []\n"
+            "for index in range(1_100_000):\n"
+            "    values.extend([''])\n"
+            "print('COMPLETED')",
+        ),
+        (
+            "append item bound",
+            "values = []\n"
+            "for index in range(100_000):\n"
+            "    values.append('')\n"
+            "values.append('')\n"
+            "print('COMPLETED')",
+        ),
+        (
+            "insert item bound",
+            "values = [''] * 100_000\nvalues.insert(0, '')\nprint('COMPLETED')",
+        ),
+        (
+            "extend item bound",
+            "values = []\n"
+            "for index in range(100_000):\n"
+            "    values.extend([''])\n"
+            "values.extend([''])\n"
+            "print('COMPLETED')",
+        ),
+        (
+            "f-string",
+            "print(f\"{'x' * 600_000}{'y' * 600_000}\")\nprint('COMPLETED')",
+        ),
+        (
+            "bytes",
+            "print((b'x' * 600_000).hex())\nprint('COMPLETED')",
+        ),
+    ),
+    ids=lambda case: case[0],
+)
+def test_growth_probes_reject_before_completion(label: str, code: str) -> None:
+    result = run(code, timeout_s=3.0)
+
+    assert not result.ok, label
+    assert not result.timed_out, label
+    assert "COMPLETED" not in result.as_text(), label
+
+
+@pytest.mark.parametrize(
+    ("label", "code"),
+    (
+        ("join", "print(('x' * 500_000).join(['y' * 300_000, 'z' * 300_000]))"),
+        ("center", "print('x'.center(1_000_001))"),
+        ("ljust", "print('x'.ljust(1_000_001))"),
+        ("rjust", "print('x'.rjust(1_000_001))"),
+        ("zfill", "print('1'.zfill(1_000_001))"),
+        ("replace", "print(('x' * 500_001).replace('x', 'xx'))"),
+        ("encode", "print(('x' * 300_000).encode('utf-32'))"),
+        ("bytes.hex", "print((b'x' * 600_000).hex())"),
+    ),
+    ids=lambda case: case[0],
+)
+def test_exposed_string_and_bytes_aggregators_are_preflighted(label: str, code: str) -> None:
+    result = run(code, timeout_s=3.0)
+
+    assert not result.ok, label
+    assert not result.timed_out, label
+    assert not result.stdout, label
+
+
+@pytest.mark.parametrize(
+    ("label", "code"),
+    (
+        (
+            "dict assignment",
+            "values = {}\n"
+            "for index in range(100_000):\n"
+            "    values[index] = 0\n"
+            "values[100_000] = 0\n"
+            "print('COMPLETED')",
+        ),
+        (
+            "dict setdefault",
+            "values = {}\n"
+            "for index in range(100_000):\n"
+            "    values.setdefault(index, 0)\n"
+            "values.setdefault(100_000, 0)\n"
+            "print('COMPLETED')",
+        ),
+    ),
+    ids=lambda case: case[0],
+)
+def test_dict_growth_is_checked_before_mutation(label: str, code: str) -> None:
+    result = run(code, timeout_s=3.0)
+
+    assert not result.ok, label
+    assert not result.timed_out, label
+    assert "COMPLETED" not in result.as_text(), label
+
+
+def test_json_loads_checks_aggregate_items_before_parser_allocation() -> None:
+    result = run(
+        "import json\n"
+        "payload = '[' + ('0,' * 100_001) + '0]'\n"
+        "json.loads(payload)\n"
+        "print('COMPLETED')",
+        timeout_s=3.0,
+    )
+
+    assert not result.ok
+    assert not result.timed_out
+    assert "collection item limit exceeded" in result.stderr
+    assert "COMPLETED" not in result.as_text()
+
+
+@pytest.mark.parametrize(
     "code",
     (
         f"print(2 ** {MAX_INTEGER_BITS})",
@@ -318,6 +534,53 @@ def test_integer_bit_boundary_allows_normal_sized_results() -> None:
 
     assert power.ok and power.stdout == "True\n"
     assert shift.ok and shift.stdout == "True\n"
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        f"print(2 ** {MAX_INTEGER_BITS - 1} > 0)",
+        f"print((2 ** {MAX_INTEGER_BITS - 1}) + (2 ** {MAX_INTEGER_BITS - 1} - 1) > 0)",
+        f"print((2 ** {MAX_INTEGER_BITS - 1}) - (-(2 ** {MAX_INTEGER_BITS - 1} - 1)) > 0)",
+        f"print((2 ** {MAX_INTEGER_BITS - 2}) * 2 > 0)",
+        f"print((2 ** {MAX_INTEGER_BITS - 1}) * 0 == 0)",
+        f"print((2 ** {MAX_INTEGER_BITS - 1}) * -1 < 0)",
+        f"print(1 << {MAX_INTEGER_BITS - 1} > 0)",
+        f"print(True << {MAX_INTEGER_BITS - 1} > 0)",
+        f"print(1 >> {MAX_INTEGER_BITS} == 0)",
+        f"print(int('1' * {MAX_INTEGER_BITS}, 2) > 0)",
+        f"print(int('-' + '1' * {MAX_INTEGER_BITS}, 2) < 0)",
+        "print(int('z' * 19_342, 36) > 0)",
+    ),
+)
+def test_integer_operations_allow_exact_bounded_results(code: str) -> None:
+    result = run(code, timeout_s=4.0)
+
+    assert result.ok
+    assert result.stdout == "True\n"
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        f"print(2 ** {MAX_INTEGER_BITS} > 0)",
+        f"print((2 ** {MAX_INTEGER_BITS - 1}) + (2 ** {MAX_INTEGER_BITS - 1}) > 0)",
+        f"print((2 ** {MAX_INTEGER_BITS - 1}) - (-(2 ** {MAX_INTEGER_BITS - 1})) > 0)",
+        f"print((2 ** {MAX_INTEGER_BITS - 1}) * 2 > 0)",
+        f"print(1 << {MAX_INTEGER_BITS} > 0)",
+        f"print(True << {MAX_INTEGER_BITS} > 0)",
+        f"print(1 >> {MAX_INTEGER_BITS + 1} == 0)",
+        f"print(int('1' * {MAX_INTEGER_BITS + 1}, 2) > 0)",
+        "print(int('z' * 19_343, 36) > 0)",
+        "print(2 ** 1_000_000)",
+    ),
+)
+def test_integer_operations_reject_one_over_before_completion(code: str) -> None:
+    result = run(code, timeout_s=4.0)
+
+    assert not result.ok
+    assert not result.timed_out
+    assert "integer magnitude limit exceeded" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -373,7 +636,9 @@ def test_comprehension_results_are_limited_incrementally(label: str, code: str) 
 
     assert not result.ok, label
     assert not result.timed_out, label
-    assert "item limit exceeded" in result.stderr, label
+    assert (
+        "item limit exceeded" in result.stderr or "display size limit exceeded" in result.stderr
+    ), label
 
 
 def test_the_child_cannot_see_the_engines_own_package() -> None:
