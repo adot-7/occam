@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Justification = Literal[
     "parallel",
@@ -64,14 +64,14 @@ class ToolSpec(ContractModel):
 class Role(ContractModel):
     """One node in an architecture DAG."""
 
-    id: str
-    name: str
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
     justification: Justification
-    model: str
+    model: str = Field(min_length=1)
     system_prompt: str
     tools: list[str]
     inputs: list[str]
-    output_key: str
+    output_key: str = Field(min_length=1)
     memory: MemoryPolicy = "none"
     max_turns: int = Field(default=6, ge=1)
 
@@ -79,10 +79,10 @@ class Role(ContractModel):
 class Architecture(ContractModel):
     """A versioned, topologically sortable set of roles."""
 
-    id: str
+    id: str = Field(min_length=1)
     parent_id: str | None
     roles: list[Role]
-    final_role: str
+    final_role: str = Field(min_length=1)
     control: ControlMode = "deterministic"
     notes: str = ""
 
@@ -96,16 +96,80 @@ class Case(ContractModel):
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
+def _validate_lesson_provenance(
+    label: str,
+    value: dict[str, Any],
+    *,
+    require_case_ids: bool = True,
+) -> None:
+    """Validate the stable provenance fields shared by lesson evidence."""
+
+    run_id = value.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError(f"lesson {label}.run_id must be a non-empty string")
+    generation = value.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+        raise ValueError(f"lesson {label}.generation must be a non-negative integer")
+    if require_case_ids and "case_ids" not in value:
+        raise ValueError("lesson evidence must include case_ids")
+    case_ids = value.get("case_ids")
+    if case_ids is not None:
+        if not isinstance(case_ids, list) or any(
+            not isinstance(case_id, str) or not case_id.strip() for case_id in case_ids
+        ):
+            raise ValueError(f"lesson {label}.case_ids must be a list of non-empty strings")
+    trace_refs = value.get("trace_refs")
+    if trace_refs is not None:
+        if not isinstance(trace_refs, list) or any(
+            not isinstance(trace_ref, str) or not trace_ref.strip() for trace_ref in trace_refs
+        ):
+            raise ValueError(f"lesson {label}.trace_refs must be a list of non-empty strings")
+
+
 class Lesson(ContractModel):
     """A reusable, evidence-backed rule learned during a run."""
 
     id: str = Field(min_length=1)
     kind: Literal["tool_note", "domain_rule"]
     text: str = Field(min_length=1)
-    tool: str | None
+    tool: str | None = None
     evidence: dict[str, Any]
     born: dict[str, Any]
     status: Literal["active", "retired"] = "active"
+
+    @field_validator("text")
+    @classmethod
+    def text_is_short_and_nonblank(cls, value: str) -> str:
+        """Keep lessons at the concise, reusable-rule boundary from the PRD."""
+
+        text = value.strip()
+        if not text:
+            raise ValueError("lesson text must not be blank")
+        if len(text.split()) > 60:
+            raise ValueError("lesson text must contain at most 60 words")
+        return text
+
+    @model_validator(mode="after")
+    def validate_typed_provenance(self) -> Lesson:
+        """Enforce the typed lesson and provenance contract at every boundary.
+
+        The diagnose/lesson-writer leak guard also checks case values.  This
+        model deliberately owns only the schema-level part of that contract:
+        tool notes name a tool, domain rules do not, and both carry enough
+        provenance to be followed back to a run and generation.
+        """
+
+        if self.kind == "tool_note" and not self.tool:
+            raise ValueError("tool_note lessons require a non-empty tool")
+        if self.kind == "domain_rule" and self.tool is not None:
+            raise ValueError("domain_rule lessons must not name a tool")
+        _validate_lesson_provenance("evidence", self.evidence)
+        _validate_lesson_provenance("born", self.born, require_case_ids=False)
+        if self.born["run_id"] != self.evidence["run_id"]:
+            raise ValueError("lesson born.run_id must match evidence.run_id")
+        if self.born["generation"] != self.evidence["generation"]:
+            raise ValueError("lesson born.generation must match evidence.generation")
+        return self
 
 
 class RoleTrace(ContractModel):
