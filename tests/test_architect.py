@@ -185,6 +185,37 @@ def test_architect_emits_schema_compatible_event(tmp_path: Path) -> None:
     assert proposal.data["architecture"]["id"] == "g000"
 
 
+def test_architect_overwrites_model_guessed_id_instead_of_raising(tmp_path: Path) -> None:
+    # A model that invents a plausible-looking id ("fx_recon_a_v1" instead of
+    # "g000") must not kill the run - id/parent_id are engine bookkeeping,
+    # assigned after the model responds, not something it can get "wrong".
+    payload = {**architecture_payload(), "id": "fx_recon_a_v1", "parent_id": "not-a-real-parent"}
+    llm = StubArchitectLLM(payload)
+
+    architecture = Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    assert architecture.id == "g000"
+    assert architecture.parent_id is None
+
+    schema = llm.calls[0]["response_schema"]
+    assert "id" not in schema["properties"]
+    assert "parent_id" not in schema["properties"]
+    assert "id" not in schema["required"]
+    assert "parent_id" not in schema["required"]
+
+
+def test_architect_assigns_parent_id_from_the_loop_for_later_generations(tmp_path: Path) -> None:
+    payload = {**architecture_payload(), "id": "whatever-the-model-felt-like", "parent_id": "g000"}
+    llm = StubArchitectLLM(payload)
+
+    architecture = Architect(llm=llm, memory=tmp_path / "memory").propose(
+        TASK, generation=1, parent_id="g000-actual-parent"
+    )
+
+    assert architecture.id == "g001"
+    assert architecture.parent_id == "g000-actual-parent"
+
+
 @pytest.mark.parametrize("field", ("id", "name", "model", "output_key"))
 def test_architect_rejects_empty_schema_constrained_role_fields_without_writer(
     tmp_path: Path, field: str

@@ -136,6 +136,27 @@ def _lesson_list(raw: Iterable[Lesson | Mapping[str, Any]]) -> list[Lesson]:
     return lessons
 
 
+def _architect_response_schema() -> dict[str, Any]:
+    """The ``Architecture`` schema handed to the model, minus engine-owned ids.
+
+    ``id`` and ``parent_id`` are the engine's own generation bookkeeping
+    (``01`` section 2: ``g000``, ``g001``, ...), assigned by :meth:`Architect
+    ._parse_architecture` after the model responds. Excluding them here means
+    the model is never asked to invent a value it cannot get right and that
+    would otherwise abort the run if it guessed wrong.
+    """
+
+    schema = Architecture.model_json_schema()
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        properties.pop("id", None)
+        properties.pop("parent_id", None)
+    required = schema.get("required")
+    if isinstance(required, list):
+        schema["required"] = [name for name in required if name not in ("id", "parent_id")]
+    return schema
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
@@ -263,7 +284,7 @@ class Architect:
         specs = self._build_tool_specs(task, tool_names, loaded)
         manifest = self._build_manifest(task, specs)
         messages = self._build_messages(manifest, loaded)
-        response_schema = Architecture.model_json_schema()
+        response_schema = _architect_response_schema()
         self.last_context = ArchitectContext(
             task=manifest,
             tools=specs,
@@ -347,7 +368,7 @@ class Architect:
             "TASK AND TOOL MANIFEST",
             json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2),
             "ARCHITECTURE OUTPUT SCHEMA",
-            json.dumps(Architecture.model_json_schema(), ensure_ascii=False, sort_keys=True),
+            json.dumps(_architect_response_schema(), ensure_ascii=False, sort_keys=True),
         ]
         domain_rules = [lesson for lesson in lessons if lesson.kind == "domain_rule"]
         if domain_rules:
@@ -421,17 +442,15 @@ class Architect:
             raise ArchitectError("architect output must be one JSON object with no prose") from exc
         if not isinstance(payload, Mapping):
             raise ArchitectError("architect output must be a JSON object")
+        # `id`/`parent_id` are engine-assigned generation bookkeeping, not
+        # something the model can be expected to guess correctly - overwrite
+        # whatever (if anything) it returned rather than aborting the run
+        # over a plausible-looking value like "fx_recon_a_v1".
+        payload = {**payload, "id": f"g{generation:03d}", "parent_id": parent_id}
         try:
             architecture = Architecture.model_validate(payload)
         except ValidationError as exc:
             raise ArchitectError(f"architect output failed strict validation: {exc}") from exc
-        expected_id = f"g{generation:03d}"
-        if architecture.id != expected_id:
-            raise ArchitectError(f"architect id must be {expected_id!r}, got {architecture.id!r}")
-        if architecture.parent_id != parent_id:
-            raise ArchitectError(
-                f"architect parent_id must be {parent_id!r}, got {architecture.parent_id!r}"
-            )
         return architecture
 
     def _validate_proposal(
