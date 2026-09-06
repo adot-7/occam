@@ -290,6 +290,7 @@ def test_accounting_records_render_for_a_role_trace(offline_registry: ToolRegist
         "latency_s",
         "bytes",
         "cached",
+        "response",
         "http_status",
         "error",
     }

@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from occam.core.models import ToolSpec
@@ -124,6 +124,11 @@ class ToolBinding:
 
     spec: ToolSpec
     call: Callable[..., Any]
+    # Keep the owner available when a caller hands ``bindings()`` to another
+    # component.  The public binding contract remains ``spec`` + ``call``;
+    # this private provenance lets the executor create a role-scoped sibling
+    # without requiring callers to pass the registry a second time.
+    _registry: Any = field(default=None, repr=False, compare=False)
 
     @property
     def name(self) -> str:
@@ -238,7 +243,7 @@ class ToolRegistry:
         def invoke(**arguments: Any) -> Any:
             return self.call(name, **arguments)
 
-        return ToolBinding(spec=self.spec(name), call=invoke)
+        return ToolBinding(spec=self.spec(name), call=invoke, _registry=self)
 
     def bindings(self, names: Iterable[str] | None = None) -> dict[str, ToolBinding]:
         """Return the registry mapping ``name -> (ToolSpec, callable)``."""
@@ -331,6 +336,7 @@ class ToolRegistry:
                     latency_s=time.perf_counter() - started,
                     bytes=0,
                     cached=False,
+                    response=None,
                     http_status=_http_status(exc),
                     error=f"{type(exc).__name__}: {exc}",
                 )
@@ -346,6 +352,7 @@ class ToolRegistry:
                 latency_s=latency_s,
                 bytes=_payload_bytes(result, fx_call),
                 cached=bool(fx_call.cached) if fx_call is not None else False,
+                response=_jsonable(result),
                 http_status=fx_call.status if fx_call is not None else None,
             )
         )
@@ -395,6 +402,20 @@ def _payload_bytes(result: Any, fx_call: FXCall | None) -> int:
     if isinstance(result, list) and all(isinstance(item, str) for item in result):
         return sum(len(item.encode("utf-8")) for item in result)
     return len(json.dumps(result, default=str).encode("utf-8"))
+
+
+def _jsonable(value: Any) -> Any:
+    """Return the JSON-safe response retained by the authoritative call log."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return _jsonable(value.model_dump())
+    return str(value)
 
 
 def default_registry(**kwargs: Any) -> ToolRegistry:

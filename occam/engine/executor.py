@@ -27,15 +27,18 @@ prompt:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
+import os
 import re
+import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 from occam.core.models import (
     Architecture,
@@ -48,6 +51,8 @@ from occam.core.models import (
 )
 from occam.llm.client import LLMClient, LLMError
 from occam.llm.config import ConfigurationError
+from occam.tools.accounting import STATUS_ERROR, STATUS_OK, ToolCall
+from occam.tools.registry import ToolBinding, ToolRegistry
 
 #: ``Role.inputs`` entry standing for the raw case text rather than a role id.
 TASK_INPUT_KEY = "task"
@@ -81,13 +86,6 @@ class CycleError(ArchitectureError):
     """The role graph is not a DAG."""
 
 
-class ToolBinding(NamedTuple):
-    """One entry of the ``name -> (ToolSpec, callable)`` registry of ``01 §6``."""
-
-    spec: ToolSpec
-    call: Callable[..., Any]
-
-
 def sentinel_for(role: Role) -> str:
     """Return the knock-out marker downstream prompts render for ``role``."""
 
@@ -95,15 +93,18 @@ def sentinel_for(role: Role) -> str:
 
 
 def normalize_registry(registry: Any) -> dict[str, ToolBinding]:
-    """Accept WP-04's registry in any of its reasonable shapes.
+    """Accept the real WP-04 bindings and small test doubles.
 
-    ``01 §6`` specifies ``name -> (ToolSpec, callable)``.  A plain callable
-    carrying a ``spec`` attribute and an already-built :class:`ToolBinding` are
-    also accepted so wiring the real registry stays a one-liner.
+    ``ToolRegistry.bindings()`` returns objects with ``spec`` and ``call``
+    attributes.  The tuple and callable forms remain useful for isolated unit
+    tests, but the real binding is preserved rather than mistaken for its
+    callable wrapper.
     """
 
     if registry is None:
         return {}
+    if isinstance(registry, ToolRegistry):
+        registry = registry.bindings()
     if not isinstance(registry, Mapping):
         if hasattr(registry, "items"):
             registry = dict(registry.items())
@@ -120,6 +121,8 @@ def _binding(name: str, entry: Any) -> ToolBinding:
         return entry
     if isinstance(entry, tuple) and len(entry) == 2:
         spec, call = entry
+    elif hasattr(entry, "spec") and hasattr(entry, "call"):
+        spec, call = entry.spec, entry.call
     else:
         spec, call = getattr(entry, "spec", None), entry
     if spec is None:
@@ -128,7 +131,7 @@ def _binding(name: str, entry: Any) -> ToolBinding:
         spec = ToolSpec.model_validate(spec if isinstance(spec, Mapping) else _jsonable(spec))
     if not callable(call):
         raise ArchitectureError(f"tool {name!r} is not callable")
-    return ToolBinding(spec=spec, call=call)
+    return ToolBinding(spec=spec, call=call, _registry=getattr(entry, "_registry", None))
 
 
 def role_index(architecture: Architecture) -> dict[str, Role]:
@@ -154,7 +157,15 @@ def validate_architecture(
         raise ArchitectureError("architecture has no roles")
     if architecture.final_role not in index:
         raise ArchitectureError(f"final_role {architecture.final_role!r} is not a role")
+    output_keys: dict[str, str] = {}
     for role in architecture.roles:
+        previous_role = output_keys.get(role.output_key)
+        if previous_role is not None:
+            raise ArchitectureError(
+                f"duplicate output_key {role.output_key!r} on roles "
+                f"{previous_role!r} and {role.id!r}"
+            )
+        output_keys[role.output_key] = role.id
         for source in role.inputs:
             if source != TASK_INPUT_KEY and source not in index:
                 raise ArchitectureError(f"role {role.id!r} reads unknown input {source!r}")
@@ -285,6 +296,56 @@ def _cost_label(labels: Sequence[str]) -> str:
     return "mixed (" + ", ".join(unique) + ")"
 
 
+def _registry_owner(
+    source: Any,
+    bindings: Mapping[str, ToolBinding],
+) -> ToolRegistry | None:
+    """Recover a real registry from either it or its published bindings."""
+
+    if isinstance(source, ToolRegistry):
+        return source
+    owners = [getattr(binding, "_registry", None) for binding in bindings.values()]
+    owners = [owner for owner in owners if owner is not None]
+    if not owners:
+        return None
+    first = owners[0]
+    if len(owners) != len(bindings) or any(owner is not first for owner in owners[1:]):
+        return None
+    return first if isinstance(first, ToolRegistry) else None
+
+
+def _record_from_registry(
+    registry: ToolRegistry | None,
+    before: int,
+    name: str,
+) -> ToolCall | None:
+    """Return the one authoritative record emitted by a registry invocation."""
+
+    if registry is None:
+        return None
+    calls = registry.log.calls
+    if len(calls) <= before:
+        return None
+    record = calls[before]
+    return record if record.name == name else None
+
+
+def _response_bytes(response: Any) -> int:
+    """Measure a fallback binding response using the registry's JSON shape."""
+
+    if isinstance(response, str):
+        return len(response.encode("utf-8"))
+    return len(json.dumps(response, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """Extract an HTTP status from a custom binding exception when available."""
+
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -346,6 +407,7 @@ class Executor:
             raise ValueError("model_concurrency must be at least 1")
         self._llm = llm
         self.tools = normalize_registry(tools)
+        self._tool_registry = _registry_owner(tools, self.tools)
         self.grader = grader
         self.writer = writer
         self.run_dir = None if run_dir is None else Path(run_dir)
@@ -486,6 +548,10 @@ class Executor:
         latency_mean = (sum(result.latency_s for result in final) / len(final)) if final else 0.0
         tokens = sum(result.tokens_in + result.tokens_out for result in final)
         lo, hi = wilson_ci(passed, len(final))
+        # Results contain the authoritative per-role traces, including raw
+        # tool responses.  Make them durable before advertising completion so
+        # a reader that reacts to the event can open the variant immediately.
+        await asyncio.to_thread(self._write_results, generation, variant, final)
         await self._emit(
             "execution.completed",
             {
@@ -498,7 +564,6 @@ class Executor:
                 "ci": {"lo": lo, "hi": hi},
             },
         )
-        self._write_results(generation, variant, final)
         return RunResult(
             architecture_id=architecture.id,
             variant=variant,
@@ -575,12 +640,26 @@ class Executor:
         """Run one role's bounded tool-call loop and return its trace."""
 
         started = time.perf_counter()
+        loop = asyncio.get_running_loop()
+        role_registry = self._role_registry(
+            role,
+            case,
+            context,
+            index,
+            control,
+            loop,
+        )
+        role_tools = (
+            normalize_registry(role_registry.bindings(role.tools))
+            if role_registry is not None
+            else {name: self.tools[name] for name in role.tools}
+        )
         system, user = self._render_messages(role, case, context, index, control)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        specs = [self.tools[name].spec.model_dump() for name in role.tools]
+        specs = [role_tools[name].spec.model_dump() for name in role.tools]
         tool_calls: list[dict[str, Any]] = []
         tokens_in = tokens_out = 0
         cost = 0.0
@@ -615,7 +694,13 @@ class Executor:
                 }
             )
             for call in completion.tool_calls:
-                record, content = await self._invoke_tool(role, turn, call)
+                record, content = await self._invoke_tool(
+                    role,
+                    turn,
+                    call,
+                    role_tools,
+                    role_registry,
+                )
                 tool_calls.append(record)
                 messages.append(
                     {
@@ -640,6 +725,42 @@ class Executor:
             error=error,
         )
 
+    def _role_registry(
+        self,
+        role: Role,
+        case: Case,
+        context: Mapping[str, str],
+        index: Mapping[str, Role],
+        control: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> ToolRegistry | None:
+        """Create the registry scoped to ``role`` and its prompt runner."""
+
+        if self._tool_registry is None:
+            return None
+
+        def run_subtask(subtask: str) -> str:
+            # ``fan_out`` is synchronous and runs this callback in its own
+            # worker threads.  Submit the real async role runner back to the
+            # executor loop; the parent loop remains free while the tool call
+            # itself is offloaded.
+            future = asyncio.run_coroutine_threadsafe(
+                self._run_role(
+                    role,
+                    case.model_copy(update={"input": subtask}),
+                    context,
+                    index,
+                    control,
+                ),
+                loop,
+            )
+            trace = future.result()
+            if trace.error:
+                raise ExecutorError(trace.error)
+            return trace.output
+
+        return self._tool_registry.for_role(run_subtask)
+
     async def _complete(
         self,
         model_key: str,
@@ -663,6 +784,8 @@ class Executor:
         role: Role,
         turn: int,
         call: Mapping[str, Any],
+        bindings: Mapping[str, ToolBinding],
+        role_registry: ToolRegistry | None,
     ) -> tuple[dict[str, Any], str]:
         """Run one native tool call, recording the response verbatim.
 
@@ -676,34 +799,50 @@ class Executor:
         raw_arguments = function.get("arguments", "")
         started = time.perf_counter()
         error: str | None = None
+        failure: BaseException | None = None
         response: Any = None
+        arguments: dict[str, Any] = {}
         try:
             arguments = _parse_arguments(raw_arguments)
         except ValueError as exc:
-            arguments = raw_arguments
             error = f"invalid tool arguments: {exc}"
         if error is None and name not in role.tools:
             error = f"tool {name!r} is not bound to role {role.id!r}"
-        if error is None and name not in self.tools:
+        binding = bindings.get(name)
+        if error is None and binding is None:
             error = f"tool {name!r} is not in the registry"
+        before = len(role_registry.log.calls) if role_registry is not None else 0
         if error is None:
             try:
-                result = self.tools[name].call(**arguments)
-                if asyncio.iscoroutine(result):
+                # Registry handlers are synchronous (including HTTP and
+                # subprocess tools).  Never let one hold the event loop while
+                # independent roles are awaiting their own tools.
+                result = await asyncio.to_thread(binding.call, **arguments)
+                if inspect.isawaitable(result):
                     result = await result
                 response = _jsonable(result)
             except Exception as exc:  # noqa: BLE001 - surfaced to the model
+                failure = exc
                 error = f"{type(exc).__name__}: {exc}"
-        record = {
-            "turn": turn,
-            "id": call.get("id"),
-            "name": name,
-            "arguments": _jsonable(arguments),
-            "response": response,
-            "latency_s": time.perf_counter() - started,
-            "error": error,
-        }
-        content = error if error is not None else json.dumps(response, ensure_ascii=False)
+        authoritative = _record_from_registry(role_registry, before, name)
+        if authoritative is None or (error is not None and authoritative.error is None):
+            authoritative = ToolCall(
+                name=name,
+                arguments=_jsonable(arguments),
+                status=STATUS_ERROR if error is not None else STATUS_OK,
+                latency_s=time.perf_counter() - started,
+                bytes=0 if error is not None else _response_bytes(response),
+                cached=False,
+                response=None if error is not None else response,
+                http_status=_http_status(failure) if failure is not None else None,
+                error=error,
+            )
+        record = authoritative.as_dict()
+        content = (
+            authoritative.error
+            if authoritative.error is not None
+            else json.dumps(authoritative.response, ensure_ascii=False)
+        )
         return record, content
 
     # -- prompt assembly --------------------------------------------------
@@ -774,12 +913,53 @@ class Executor:
         directory = self.run_dir / "generations" / f"g{generation:03d}"
         directory.mkdir(parents=True, exist_ok=True)
         name = "results.jsonl" if variant == "full" else f"results.{_slug(variant)}.jsonl"
-        with (directory / name).open("w", encoding="utf-8", newline="\n") as handle:
-            for result in results:
-                handle.write(
-                    json.dumps(result.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
-                )
-                handle.write("\n")
+        destination = directory / name
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                dir=directory,
+                prefix=f".{name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                for result in results:
+                    handle.write(
+                        json.dumps(
+                            result.model_dump(mode="json"),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    )
+                    handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, destination)
+            _fsync_directory(directory)
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush the rename metadata where the platform permits directory fsync."""
+
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _slug(variant: str) -> str:

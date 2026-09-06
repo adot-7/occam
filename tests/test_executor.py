@@ -25,6 +25,7 @@ from occam.llm.client import CompletionError
 from occam.llm.providers import ProviderResponse
 from occam.store.reader import EventReader
 from occam.store.writer import EventWriter
+from occam.tools.registry import ToolRegistry
 from tests.executor_doubles import (
     WORKER,
     WORKER_CONFIG,
@@ -122,6 +123,16 @@ def test_validate_architecture_rejects_duplicate_ids():
         validate_architecture(arch)
 
 
+def test_validate_architecture_rejects_duplicate_output_keys():
+    arch = architecture(
+        role("a", output_key="shared"),
+        role("b", output_key="shared"),
+    )
+
+    with pytest.raises(ArchitectureError, match="duplicate output_key"):
+        validate_architecture(arch)
+
+
 def test_descendants_are_transitive():
     arch = architecture(
         role("a"),
@@ -147,6 +158,16 @@ def test_normalize_registry_accepts_tuple_and_spec_carrier():
     bindings = normalize_registry({"echo": (ECHO_SPEC, tool), "echo2": tool})
     assert bindings["echo"].spec.name == "echo"
     assert bindings["echo2"].spec.name == "echo"
+
+
+def test_normalize_registry_accepts_real_tool_registry_bindings():
+    registry = ToolRegistry()
+
+    bindings = normalize_registry(registry.bindings())
+
+    assert set(bindings) == set(registry.names)
+    assert all(binding.spec.name == name for name, binding in bindings.items())
+    assert all(callable(binding.call) for binding in bindings.values())
 
 
 # -- deterministic routing --------------------------------------------------
