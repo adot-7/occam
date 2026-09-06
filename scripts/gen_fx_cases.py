@@ -34,6 +34,24 @@ HOLIDAY_LOOKUP_DATES = (
     date(2026, 4, 6),
 )
 CURRENCIES = ("EUR", "USD", "GBP", "JPY", "AUD", "SGD", "CHF", "CAD")
+# Approximate INR mid-rates for the generated window, used only to keep a
+# cross-currency settlement amount economically plausible.  The rates behind
+# ``expected`` always come from the cached Frankfurter client, never from here.
+APPROX_INR_RATES = {
+    "AUD": 64.69,
+    "CAD": 66.96,
+    "CHF": 117.46,
+    "EUR": 107.48,
+    "GBP": 123.20,
+    "JPY": 0.5833,
+    "SGD": 71.90,
+    "USD": 92.15,
+}
+BANK_FEES = (1500.0, 2400.0, 3200.0, 4500.0)
+TRAILING_INSTRUCTION = (
+    "Compute the total FX gain/(loss) in INR as of the valuation date, "
+    "and the gain/(loss) per invoice."
+)
 CUSTOMERS = (
     "Acme GmbH",
     "Kyoto Labs",
@@ -94,16 +112,20 @@ def generate_pack(
             }
         )
 
-    report = _report(cases)
+    report = _report(cases, generated)
     _assert_mix(report, n)
     _write_task_yaml(output_dir, pack_name)
     cases_path = output_dir / "cases.jsonl"
+    # ``newline=""`` keeps the pack byte-identical on Windows, where the default
+    # translation would emit CRLF and break regeneration against the committed
+    # LF packs.
     cases_path.write_text(
         "".join(
             json.dumps(case, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
             for case in cases
         ),
         encoding="utf-8",
+        newline="",
     )
     return report
 
@@ -139,6 +161,7 @@ def _make_case(rng: random.Random, prefix: str, index: int) -> dict[str, Any]:
         )
         invoices.append(invoice)
         lines.append(_invoice_line(invoice, invoice_index + 1))
+    lines.append(TRAILING_INSTRUCTION)
 
     return {
         "id": f"fx{prefix}_{index:03d}",
@@ -198,7 +221,7 @@ def _make_invoice(
             )
         amount = _amount(rng, currency)
         received_amount = _received_amount(rng, amount, currency, received_currency)
-        bank_fee = float(rng.choice((125.0, 250.0, 875.0, 1250.0))) if force_fee else 0.0
+        bank_fee = float(rng.choice(BANK_FEES)) if force_fee else 0.0
         return {
             "id": _invoice_id(prefix, case_index, invoice_index),
             "customer": CUSTOMERS[(case_index + invoice_index) % len(CUSTOMERS)],
@@ -253,14 +276,18 @@ def _received_amount(
     currency: str,
     received_currency: str,
 ) -> float:
-    if currency == received_currency:
-        received = round(amount * rng.uniform(0.97, 1.03), 2)
-        return float(round(received)) if currency == "JPY" else received
+    """Convert at roughly the market rate, so the realised move stays plausible.
+
+    Exactly one draw is taken on every branch: the pack's dates and currencies —
+    and therefore its set of cached rate lookups — must not depend on how the
+    settled amount is computed.
+    """
+
+    jitter = rng.uniform(0.97, 1.03)
+    converted = amount * jitter * APPROX_INR_RATES[currency] / APPROX_INR_RATES[received_currency]
     if received_currency == "JPY":
-        return float(max(1000, round(amount * rng.uniform(80, 170) / 1000) * 1000))
-    if currency == "JPY":
-        return round(amount / rng.uniform(70, 170), 2)
-    return round(amount * rng.uniform(0.75, 1.25), 2)
+        return float(round(converted))
+    return round(converted, 2)
 
 
 def _money(value: float, currency: str) -> str:
@@ -306,12 +333,12 @@ def _write_task_yaml(output_dir: Path, pack_name: str) -> None:
     # Keep manifests human-readable and stable across runs.  The schema and
     # model validation below are the source of truth for the accepted fields.
     task_yaml = yaml.safe_dump(task, sort_keys=False, allow_unicode=True, width=100)
-    output_dir.joinpath("task.yaml").write_text(task_yaml, encoding="utf-8")
+    output_dir.joinpath("task.yaml").write_text(task_yaml, encoding="utf-8", newline="")
     validate_task(task)
     Task.model_validate(task)
 
 
-def _report(cases: list[dict[str, Any]]) -> dict[str, Any]:
+def _report(cases: list[dict[str, Any]], generated: list[dict[str, Any]]) -> dict[str, Any]:
     n = len(cases)
     mix = {
         "holiday_weekend": sum(case["meta"]["has_weekend_or_holiday"] for case in cases),
@@ -323,12 +350,20 @@ def _report(cases: list[dict[str, Any]]) -> dict[str, Any]:
     relative_tolerances = [
         max(5.0, 0.001 * absolute) / absolute for absolute in absolute_totals if absolute
     ]
+    # A bank fee smaller than the grader's tolerance would let an agent that
+    # ignores D1 pass the total anyway, so the fee cases would teach nothing.
+    fee_headrooms = [
+        fee / max(5.0, 0.001 * abs(float(case["expected"]["total_inr"])))
+        for case, item in zip(cases, generated, strict=True)
+        if (fee := sum(invoice["bank_fee_inr"] for invoice in item["invoices"]))
+    ]
     return {
         "n": n,
         "mix": mix,
         "min_abs_expected": min(absolute_totals),
         "max_abs_expected": max(absolute_totals),
         "tightest_relative_tolerance": min(relative_tolerances),
+        "min_bank_fee_headroom": min(fee_headrooms),
     }
 
 
@@ -339,6 +374,11 @@ def _assert_mix(report: dict[str, Any], n: int) -> None:
             raise AssertionError(f"{name} mix {report['mix'][name]} is below {minimum}")
     if report["n"] != n:
         raise AssertionError("generator report count does not match requested n")
+    if report["min_bank_fee_headroom"] <= 1.0:
+        raise AssertionError(
+            f"bank fee headroom {report['min_bank_fee_headroom']:.2f} is not above the "
+            "grader tolerance, so a fee case would pass without applying D1"
+        )
 
 
 def _print_report(report: dict[str, Any], *, seed: int, out: Path) -> None:
@@ -355,7 +395,8 @@ def _print_report(report: dict[str, Any], *, seed: int, out: Path) -> None:
         "tolerance sanity: "
         f"min_abs_expected={report['min_abs_expected']:.2f}, "
         f"max_abs_expected={report['max_abs_expected']:.2f}, "
-        f"tightest_relative_tolerance={report['tightest_relative_tolerance']:.6f}"
+        f"tightest_relative_tolerance={report['tightest_relative_tolerance']:.6f}, "
+        f"min_bank_fee_headroom={report['min_bank_fee_headroom']:.2f}x"
     )
 
 

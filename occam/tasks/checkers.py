@@ -1,4 +1,9 @@
-"""Task-pack graders."""
+"""Task-pack graders.
+
+``fx_total`` grades the answer defined by ``prd/02-DATA-AND-TASKS.md`` §1.2: pass
+iff ``|answer - expected.total_inr| <= max(5.00, 0.001 * |expected.total_inr|)``,
+with per-invoice correctness recorded in ``sub_results`` at ₹1 or 0.1%.
+"""
 
 from __future__ import annotations
 
@@ -61,11 +66,13 @@ class GradeResult(Mapping[str, Any]):
 
 
 def fx_total(answer: str | Mapping[str, Any], expected: Mapping[str, Any]) -> GradeResult:
-    """Grade an answer against the FX total and per-invoice tolerances.
+    """Grade an answer against the FX total and per-invoice tolerances (`02 §1.2`).
 
-    The candidate answer is read from the last fenced JSON block, as required
-    by the v3 task contract.  A malformed answer is a normal failed grade so a
-    run can continue and record the failure.
+    The candidate answer is read from the last fenced JSON block, as required by
+    the v3 task contract, falling back to the last line that is a JSON object so
+    the packs' own ``answer_format`` ("Final line: a JSON object ...") is
+    gradeable too.  A malformed answer is a normal failed grade so a run can
+    continue and record the failure.
     """
 
     expected_total = _number(expected.get("total_inr"))
@@ -137,13 +144,23 @@ def _candidate_json(answer: str | Mapping[str, Any]) -> Mapping[str, Any]:
             answer,
             flags=re.IGNORECASE | re.DOTALL,
         )
-        encoded = blocks[-1] if blocks else answer.strip()
+        encoded = blocks[-1] if blocks else _last_json_line(answer)
         candidate = json.loads(encoded)
     else:
         raise TypeError("answer must be a mapping or JSON text")
     if not isinstance(candidate, Mapping):
         raise ValueError("answer JSON is not an object")
     return candidate
+
+
+def _last_json_line(answer: str) -> str:
+    """Return the last line that is a JSON object, else the whole answer."""
+
+    for line in reversed(answer.splitlines()):
+        candidate = line.strip()
+        if candidate.startswith("{") and candidate.endswith("}"):
+            return candidate
+    return answer.strip()
 
 
 def _number(value: Any) -> float:

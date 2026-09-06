@@ -110,6 +110,17 @@ def test_fx_total_extracts_last_fenced_json_and_records_sub_results() -> None:
     assert result.total_tolerance == 5.0
 
 
+def test_fx_total_reads_the_final_json_line_when_no_fence_is_present() -> None:
+    """The packs' own answer_format asks for a bare final JSON line."""
+
+    answer = 'Working: booked 100, revalued 105.\n{"total_inr": 5, "per_invoice": {"INV-1": 5}}'
+
+    result = fx_total(answer, {"total_inr": 5, "per_invoice": {"INV-1": 5}})
+
+    assert result.passed is True
+    assert result.sub_results == {"INV-1": True}
+
+
 def test_fx_total_uses_point_one_percent_for_large_totals() -> None:
     result = fx_total(
         '{"total_inr": 10009, "per_invoice": {"INV-1": 10000}}',
