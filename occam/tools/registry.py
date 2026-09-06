@@ -44,7 +44,10 @@ FAN_OUT = "fan_out"
 
 TOOL_NAMES: tuple[str, ...] = (FX_RATE, FX_SERIES, PYTHON_EXEC, FAN_OUT)
 
-PYTHON_EXEC_DESCRIPTION = "Run a short Python program and return what it prints to stdout."
+PYTHON_EXEC_DESCRIPTION = (
+    "Evaluate a restricted calculation subset, not arbitrary Python; unsupported "
+    "constructs return an error."
+)
 FAN_OUT_DESCRIPTION = (
     "Run your own instructions separately on each of several subtasks "
     "and return one result per subtask."
@@ -88,7 +91,10 @@ PARAMETERS: Mapping[str, dict[str, Any]] = {
     PYTHON_EXEC: {
         "type": "object",
         "properties": {
-            "code": {"type": "string", "description": "Python program to run."},
+            "code": {
+                "type": "string",
+                "description": "Restricted calculation source to evaluate.",
+            },
         },
         "required": ["code"],
         "additionalProperties": False,

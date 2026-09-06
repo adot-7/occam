@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 DEFAULT_TIMEOUT_S = 10.0
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
+MAX_OUTPUT_CHARS_LIMIT = 1_000_000
 
 #: The only variables the child inherits: what a Python interpreter needs to
 #: start, and nothing else.  ``-I`` ignores ``PYTHON*`` variables but does not
@@ -141,6 +142,7 @@ _FORBIDDEN_NAMES = frozenset(
         "input",
         "locals",
         "memoryview",
+        "bytearray",
         "open",
         "object",
         "setattr",
@@ -243,6 +245,12 @@ class _EvalError(RuntimeError):
     pass
 
 
+def _unsupported_syntax(name):
+    raise _EvalError(
+        "python_exec: syntax %r is unsupported by the restricted calculation subset" % name
+    )
+
+
 class _UserRaised(Exception):
     def __init__(self, name, message):
         super().__init__(message)
@@ -301,7 +309,9 @@ class _Environment:
             return self.values[name]
         if self.parent is not None:
             return self.parent.get(name)
-        raise _EvalError("python_exec: name %r is not available" % name)
+        raise _EvalError(
+            "python_exec: name %r is unavailable in the restricted calculation subset" % name
+        )
 
     def set(self, name, value):
         self.values[name] = value
@@ -531,6 +541,10 @@ class _Evaluator:
     def _safe_str(self, value):
         if _is_wrapper(value):
             return self._display(value)
+        _validate_value(value)
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value.bit_length() > self.MAX_STRING_CHARS * 4:
+                raise _EvalError("python_exec: string constructor size limit exceeded")
         if isinstance(value, (list, tuple, dict, set, frozenset)):
             return self._display(value)
         return str(value)
@@ -544,9 +558,16 @@ class _Evaluator:
         return ascii(self._plain(value))
 
     def _safe_bytes(self, value=b"", encoding=None, errors="strict"):
+        value = self._plain(value)
+        if isinstance(value, int):
+            self._check_constructor_size(value, "bytes", self.MAX_STRING_CHARS)
         if encoding is None:
-            return bytes(self._plain(value))
-        return bytes(self._plain(value), self._plain(encoding), self._plain(errors))
+            return bytes(value)
+        encoding = self._plain(encoding)
+        errors = self._plain(errors)
+        if isinstance(value, str) and len(value) > self.MAX_STRING_CHARS // 4:
+            raise _EvalError("python_exec: encoded bytes constructor size limit exceeded")
+        return bytes(value, encoding, errors)
 
     def _safe_int(self, value=0, base=10):
         value = self._plain(value)
@@ -563,6 +584,12 @@ class _Evaluator:
             return pow(left, right)
         return pow(left, right, self._plain(modulo))
 
+    def _check_constructor_size(self, size, label, limit):
+        if isinstance(size, int) and size > limit:
+            raise _EvalError(
+                "python_exec: %s constructor size exceeds its bounded limit" % label
+            )
+
     def _range(self, *args):
         values = tuple(self._plain(value) for value in args)
         result = range(*values)
@@ -577,30 +604,54 @@ class _Evaluator:
     def _iter_values(self, value):
         self._plain(value)
         if isinstance(value, dict):
-            return list(value)
+            return value
         if isinstance(value, (list, tuple, set, frozenset, str, bytes, range)):
             return value
         raise _EvalError("python_exec: value is not iterable")
 
+    def _materialize(self, values, label):
+        result = []
+        for value in values:
+            if len(result) >= self.MAX_ITEMS:
+                raise _EvalError("python_exec: %s item limit exceeded" % label)
+            result.append(value)
+        return result
+
     def _make_list(self, value=()):
-        return list(self._iter_values(value))
+        return self._materialize(self._iter_values(value), "list constructor")
 
     def _make_tuple(self, value=()):
-        return tuple(self._iter_values(value))
+        return tuple(self._materialize(self._iter_values(value), "tuple constructor"))
 
     def _make_set(self, value=()):
-        return set(self._iter_values(value))
+        result = set()
+        for item in self._iter_values(value):
+            if item not in result and len(result) >= self.MAX_ITEMS:
+                raise _EvalError("python_exec: set constructor item limit exceeded")
+            result.add(item)
+        return result
 
     def _make_frozenset(self, value=()):
-        return frozenset(self._iter_values(value))
+        result = set()
+        for item in self._iter_values(value):
+            if item not in result and len(result) >= self.MAX_ITEMS:
+                raise _EvalError("python_exec: frozenset constructor item limit exceeded")
+            result.add(item)
+        return frozenset(result)
 
     def _make_dict(self, value=(), **kwargs):
+        if len(kwargs) > self.MAX_ITEMS:
+            raise _EvalError("python_exec: dict constructor item limit exceeded")
         if value == ():
             result = {}
         elif isinstance(value, dict):
+            if len(value) > self.MAX_ITEMS:
+                raise _EvalError("python_exec: dict constructor item limit exceeded")
             result = dict(value)
         else:
-            result = dict(self._iter_values(value))
+            result = dict(self._materialize(self._iter_values(value), "dict constructor"))
+        if len(result) + len(kwargs) > self.MAX_ITEMS:
+            raise _EvalError("python_exec: dict constructor item limit exceeded")
         result.update(kwargs)
         _validate_value(result)
         return result
@@ -612,24 +663,36 @@ class _Evaluator:
         return any(self._iter_values(value))
 
     def _enumerate(self, value, start=0):
-        return list(enumerate(self._iter_values(value), self._plain(start)))
+        return self._materialize(
+            enumerate(self._iter_values(value), self._plain(start)), "enumerate"
+        )
 
     def _filter(self, function, value):
         items = self._iter_values(value)
-        return [item for item in items if self._truth(self._invoke(function, (item,), {}))]
+        result = []
+        for item in items:
+            if self._truth(self._invoke(function, (item,), {})):
+                if len(result) >= self.MAX_ITEMS:
+                    raise _EvalError("python_exec: filter result item limit exceeded")
+                result.append(item)
+        return result
 
     def _map(self, function, *values):
         items = [self._iter_values(value) for value in values]
-        return [self._invoke(function, tuple(row), {}) for row in zip(*items)]
+        return self._materialize(
+            (self._invoke(function, tuple(row), {}) for row in zip(*items)), "map result"
+        )
 
     def _zip(self, *values):
-        return list(zip(*(self._iter_values(value) for value in values)))
+        return self._materialize(
+            zip(*(self._iter_values(value) for value in values)), "zip result"
+        )
 
     def _reversed(self, value):
-        return list(reversed(self._iter_values(value)))
+        return self._materialize(reversed(self._iter_values(value)), "reversed result")
 
     def _sorted(self, value, reverse=False):
-        items = list(self._iter_values(value))
+        items = self._materialize(self._iter_values(value), "sorted result")
         reverse = bool(self._plain(reverse))
         return sorted(items, reverse=reverse)
 
@@ -671,7 +734,46 @@ class _Evaluator:
         sys.stdout.write(sep.join(self._display(value) for value in values) + end)
         sys.stdout.flush()
 
-    def _display(self, value):
+    def _display_size(self, value, nested=False, depth=0):
+        if depth > 64:
+            raise _EvalError("python_exec: display nesting limit exceeded")
+        if isinstance(value, _Capability):
+            return len(value.label) + 13
+        if isinstance(value, _SafeModule):
+            return len(value.name) + 9
+        if isinstance(value, _UserFunction):
+            return len(value.name) + 11
+        if isinstance(value, _SafeException):
+            return len(value.name) + len(value.message) + 2
+        if isinstance(value, str):
+            return len(value) if not nested else len(value) * 6 + 2
+        if isinstance(value, bytes):
+            return len(value) * 4 + 4
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value.bit_length() * 4 + 1
+        if isinstance(value, (list, tuple, set, frozenset)):
+            total = 2
+            for item in value:
+                total += self._display_size(item, nested=True, depth=depth + 1) + 2
+                if total > self.MAX_STRING_CHARS:
+                    return total
+            return total
+        if isinstance(value, dict):
+            total = 2
+            for key, item in value.items():
+                total += (
+                    self._display_size(key, nested=True, depth=depth + 1)
+                    + self._display_size(item, nested=True, depth=depth + 1)
+                    + 4
+                )
+                if total > self.MAX_STRING_CHARS:
+                    return total
+            return total
+        return len(str(value))
+
+    def _display(self, value, _checked=False):
+        if not _checked and self._display_size(value) > self.MAX_STRING_CHARS:
+            raise _EvalError("python_exec: string conversion size limit exceeded")
         if isinstance(value, _Capability):
             return "<capability %s>" % value.label
         if isinstance(value, _SafeModule):
@@ -696,13 +798,13 @@ class _Evaluator:
 
     def _repr_value(self, value):
         if _is_wrapper(value):
-            return self._display(value)
+            return self._display(value, _checked=True)
         if isinstance(value, _SafeException):
-            return self._display(value)
+            return self._display(value, _checked=True)
         if isinstance(value, dict):
-            return self._display(value)
+            return self._display(value, _checked=True)
         if isinstance(value, (list, tuple, set, frozenset)):
-            return self._display(value)
+            return self._display(value, _checked=True)
         return repr(value)
 
     def _json_plain(self, value, depth=0):
@@ -1060,12 +1162,21 @@ class _Evaluator:
             )
         raise _EvalError("python_exec: augmented assignment target is not available")
 
-    def _comprehension(self, generators, emit, environment):
-        result = []
+    def _comprehension(self, generators, emit, environment, result=None, add=None):
+        if result is None:
+            result = []
+
+            def add(value):
+                if len(result) >= self.MAX_ITEMS:
+                    raise _EvalError("python_exec: comprehension result item limit exceeded")
+                result.append(value)
+
+        elif add is None:
+            raise _EvalError("python_exec: internal comprehension collector is missing")
 
         def visit(index, current):
             if index == len(generators):
-                result.append(emit(current))
+                add(emit(current))
                 return
             generator = generators[index]
             values = self._iter_values(self._eval(generator.iter, current))
@@ -1082,6 +1193,7 @@ class _Evaluator:
         self._tick()
         if isinstance(node, ast.Constant):
             if node.value is None or isinstance(node.value, (bool, int, float, str, bytes)):
+                _validate_value(node.value)
                 return node.value
             raise _EvalError("python_exec: literal type is not available")
         if isinstance(node, ast.Name):
@@ -1089,20 +1201,42 @@ class _Evaluator:
                 raise _EvalError("python_exec: dunder identifier %r is not available" % node.id)
             return environment.get(node.id)
         if isinstance(node, ast.List):
-            return [self._eval(item, environment) for item in node.elts]
+            result = []
+            for item in node.elts:
+                if len(result) >= self.MAX_ITEMS:
+                    raise _EvalError("python_exec: list literal item limit exceeded")
+                result.append(self._eval(item, environment))
+            return result
         if isinstance(node, ast.Tuple):
-            return tuple(self._eval(item, environment) for item in node.elts)
+            result = []
+            for item in node.elts:
+                if len(result) >= self.MAX_ITEMS:
+                    raise _EvalError("python_exec: tuple literal item limit exceeded")
+                result.append(self._eval(item, environment))
+            return tuple(result)
         if isinstance(node, ast.Set):
-            return set(self._eval(item, environment) for item in node.elts)
+            result = set()
+            for item in node.elts:
+                value = self._eval(item, environment)
+                if value not in result and len(result) >= self.MAX_ITEMS:
+                    raise _EvalError("python_exec: set literal item limit exceeded")
+                result.add(value)
+            return result
         if isinstance(node, ast.Dict):
             result = {}
             for key, value in zip(node.keys, node.values):
                 if key is None:
-                    result.update(self._plain(self._eval(value, environment)))
+                    unpacked = self._plain(self._eval(value, environment))
+                    for unpacked_key, unpacked_value in unpacked.items():
+                        if unpacked_key not in result and len(result) >= self.MAX_ITEMS:
+                            raise _EvalError("python_exec: dict literal item limit exceeded")
+                        result[unpacked_key] = unpacked_value
                 else:
-                    result[self._plain(self._eval(key, environment))] = self._eval(
-                        value, environment
-                    )
+                    evaluated_key = self._plain(self._eval(key, environment))
+                    evaluated_value = self._eval(value, environment)
+                    if evaluated_key not in result and len(result) >= self.MAX_ITEMS:
+                        raise _EvalError("python_exec: dict literal item limit exceeded")
+                    result[evaluated_key] = evaluated_value
             _validate_value(result)
             return result
         if isinstance(node, ast.Starred):
@@ -1195,21 +1329,39 @@ class _Evaluator:
                 node.generators, lambda current: self._eval(node.elt, current), environment
             )
         if isinstance(node, ast.SetComp):
-            return set(
-                self._comprehension(
-                    node.generators, lambda current: self._eval(node.elt, current), environment
-                )
+            result = set()
+
+            def add(value):
+                if value not in result and len(result) >= self.MAX_ITEMS:
+                    raise _EvalError("python_exec: set comprehension item limit exceeded")
+                result.add(value)
+
+            return self._comprehension(
+                node.generators,
+                lambda current: self._eval(node.elt, current),
+                environment,
+                result=result,
+                add=add,
             )
         if isinstance(node, ast.DictComp):
-            pairs = self._comprehension(
+            result = {}
+
+            def add(pair):
+                key, value = pair
+                if key not in result and len(result) >= self.MAX_ITEMS:
+                    raise _EvalError("python_exec: dict comprehension item limit exceeded")
+                result[key] = value
+
+            return self._comprehension(
                 node.generators,
                 lambda current: (
                     self._eval(node.key, current),
                     self._eval(node.value, current),
                 ),
                 environment,
+                result=result,
+                add=add,
             )
-            return dict(pairs)
         if isinstance(node, ast.GeneratorExp):
             return self._comprehension(
                 node.generators, lambda current: self._eval(node.elt, current), environment
@@ -1218,7 +1370,7 @@ class _Evaluator:
             value = self._eval(node.value, environment)
             self._store(node.target, value, environment)
             return value
-        raise _EvalError("python_exec: syntax %s is not available" % type(node).__name__)
+        _unsupported_syntax(type(node).__name__)
 
     def _block(self, statements, environment):
         for statement in statements:
@@ -1325,7 +1477,7 @@ class _Evaluator:
         elif isinstance(node, ast.Continue):
             raise _ContinueSignal()
         else:
-            raise _EvalError("python_exec: syntax %s is not available" % type(node).__name__)
+            _unsupported_syntax(type(node).__name__)
 
     def run(self):
         self._block(self.tree.body, self.global_env)
@@ -1383,12 +1535,13 @@ def run(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
 ) -> PythonExecResult:
-    """Execute ``code`` in the sandbox and return the structured result."""
+    """Evaluate a restricted calculation subset and return its structured result."""
 
     if not isinstance(code, str):
         raise TypeError("python_exec: code must be a string")
     if timeout_s <= 0:
         raise ValueError("python_exec: timeout_s must be positive")
+    _validate_max_output_chars(max_output_chars)
 
     bootstrap = (
         _BOOTSTRAP.replace("__ALLOWED__", repr(sorted(ALLOWED_IMPORTS)))
@@ -1438,9 +1591,19 @@ def python_exec(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
 ) -> str:
-    """Run a short Python program and return what it wrote to stdout."""
+    """Evaluate a restricted calculation subset; arbitrary Python is unsupported."""
 
+    _validate_max_output_chars(max_output_chars)
     return run(code, timeout_s=timeout_s, max_output_chars=max_output_chars).as_text()
+
+
+def _validate_max_output_chars(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("python_exec: max_output_chars must be a positive integer")
+    if not 0 < value <= MAX_OUTPUT_CHARS_LIMIT:
+        raise ValueError(
+            f"python_exec: max_output_chars must be between 1 and {MAX_OUTPUT_CHARS_LIMIT}"
+        )
 
 
 def child_env() -> dict[str, str]:
@@ -1480,6 +1643,7 @@ __all__ = [
     "DEFAULT_MAX_OUTPUT_CHARS",
     "DEFAULT_TIMEOUT_S",
     "ENV_PASSTHROUGH",
+    "MAX_OUTPUT_CHARS_LIMIT",
     "NETWORK_BLOCKED_MESSAGE",
     "child_env",
     "PythonExecError",

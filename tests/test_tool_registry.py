@@ -150,6 +150,14 @@ def test_base_descriptions_stay_one_plain_sentence() -> None:
         assert "\n" not in description
 
 
+def test_python_exec_description_names_its_restricted_surface() -> None:
+    description = build_spec("python_exec").description
+
+    assert "restricted calculation subset" in description
+    assert "not arbitrary Python" in description
+    assert "unsupported constructs" in description
+
+
 # -- the tool_note append hook -----------------------------------------
 
 

@@ -48,6 +48,11 @@ All notable changes to Occam are documented here.
   a subprocess-based network escape. The documentation explicitly treats this
   as model-calculation containment rather than a perfect arbitrary-Python
   sandbox.
+- Added bounded public output-limit validation, pre-allocation guards for large
+  constructors, and incremental collection limits for comprehensions and
+  generator expressions. The plain tool description and callable docstring now
+  identify the restricted calculation subset and its actionable unsupported-
+  construct errors.
 - `EventWriter` now locks with `msvcrt` on Windows and `fcntl` elsewhere. The
   store imported `fcntl` at module level, so `occam.store` was unimportable on
   Windows and three test modules failed at collection. Covered by a fresh-

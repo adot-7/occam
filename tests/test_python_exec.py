@@ -1,4 +1,4 @@
-"""Sandbox guarantees for ``python_exec``: termination, no network, no imports."""
+"""Capability-surface guarantees for ``python_exec``: limits and no escapes."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from occam.tools.python_exec import (
     ALLOWED_IMPORTS,
     CPYTHON_SYNTHESIZED_ENV,
     ENV_PASSTHROUGH,
+    MAX_OUTPUT_CHARS_LIMIT,
     PythonExecResult,
     child_env,
     python_exec,
@@ -23,6 +24,11 @@ from occam.tools.python_exec import (
 
 def test_returns_stdout_of_a_successful_program() -> None:
     assert python_exec("print(2 + 2)") == "4\n"
+
+
+def test_public_docstring_describes_the_restricted_calculation_surface() -> None:
+    assert "restricted calculation subset" in (python_exec.__doc__ or "")
+    assert "arbitrary Python is unsupported" in (python_exec.__doc__ or "")
 
 
 def test_allowed_imports_cover_the_arithmetic_an_fx_ledger_needs() -> None:
@@ -192,6 +198,83 @@ def test_output_is_clipped_so_one_call_cannot_flood_a_transcript() -> None:
 
     assert len(text) < 200
     assert "truncated at 100 characters" in text
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [0, -1, True, 1.5, MAX_OUTPUT_CHARS_LIMIT + 1],
+)
+def test_output_limit_must_be_a_positive_bounded_integer(limit) -> None:
+    with pytest.raises((TypeError, ValueError), match="max_output_chars"):
+        run("print('ok')", max_output_chars=limit)
+
+
+def test_python_exec_public_entry_also_rejects_disabled_output_clipping() -> None:
+    with pytest.raises(ValueError, match="max_output_chars"):
+        python_exec("print('ok')", max_output_chars=0)
+
+
+def test_unsupported_syntax_reports_the_restricted_surface() -> None:
+    result = run("class NotAvailable:\n    pass")
+
+    assert not result.ok
+    assert "unsupported by the restricted calculation subset" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("label", "code", "message"),
+    (
+        ("bytes", "bytes(2 ** 60)", "bytes constructor size exceeds"),
+        ("bytearray", "bytearray(2 ** 60)", "builtin 'bytearray' is not allowed"),
+        ("string", "str('x' * (2 ** 60))", "multiplication result limit exceeded"),
+        (
+            "string conversion",
+            "str(['x' * 100_000] * 100_000)",
+            "string conversion size limit exceeded",
+        ),
+        ("list", "list(range(2 ** 60))", "range limit exceeded"),
+        ("tuple", "tuple(range(2 ** 60))", "range limit exceeded"),
+    ),
+    ids=lambda case: case[0],
+)
+def test_oversized_constructors_fail_before_large_allocation(
+    label: str, code: str, message: str
+) -> None:
+    result = run(code, timeout_s=1.0)
+
+    assert not result.ok, label
+    assert not result.timed_out, label
+    assert message in result.stderr, label
+
+
+@pytest.mark.parametrize(
+    ("label", "code"),
+    (
+        (
+            "list comprehension",
+            "[x for group in range(2) for x in range(50_001)]",
+        ),
+        (
+            "set comprehension",
+            "{group * 50_001 + x for group in range(2) for x in range(50_001)}",
+        ),
+        (
+            "dict comprehension",
+            "{group * 50_001 + x: x for group in range(2) for x in range(50_001)}",
+        ),
+        (
+            "generator expression",
+            "sum(x for group in range(2) for x in range(50_001))",
+        ),
+    ),
+    ids=lambda case: case[0],
+)
+def test_comprehension_results_are_limited_incrementally(label: str, code: str) -> None:
+    result = run(code, timeout_s=2.0)
+
+    assert not result.ok, label
+    assert not result.timed_out, label
+    assert "item limit exceeded" in result.stderr, label
 
 
 def test_the_child_cannot_see_the_engines_own_package() -> None:
