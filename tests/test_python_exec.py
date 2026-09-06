@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import ast
+import os
+import subprocess
+import sys
 import time
 
 import pytest
 
 from occam.tools.python_exec import (
     ALLOWED_IMPORTS,
+    CPYTHON_SYNTHESIZED_ENV,
     ENV_PASSTHROUGH,
-    NETWORK_BLOCKED_MESSAGE,
     PythonExecResult,
+    child_env,
     python_exec,
     run,
 )
@@ -40,39 +44,73 @@ def test_network_capable_modules_cannot_be_imported(module: str) -> None:
     assert f"import of '{module}' is not allowed" in result.stderr
 
 
-def test_a_socket_reached_around_the_import_guard_still_cannot_connect() -> None:
-    # Second layer: reaching sys.modules through the guard's own closure skips
-    # the import check entirely, so the socket module itself is neutered too.
-    code = (
-        "sock = __builtins__['__import__'].__globals__['sys'].modules['socket']\n"
-        "try:\n"
-        "    sock.create_connection(('example.com', 80), timeout=2)\n"
-        "except OSError as exc:\n"
-        "    print(exc)\n"
-    )
-    assert python_exec(code).strip() == NETWORK_BLOCKED_MESSAGE
-
-
-def test_the_child_inherits_none_of_the_engines_secrets(
+def test_child_env_is_explicit_and_allows_cpython_locale_synthesis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # os is blocked by both import guards but sits in sys.modules regardless
-    # (random pulls in urandom during the allow-list preload), so introspection
-    # can still reach os.environ. Anything printed there would land in
-    # RoleTrace.tool_calls, events.jsonl and the committed fixtures.
     for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TENSORMUX_API_KEY"):
         monkeypatch.setenv(name, "sk-must-not-leak")
+    monkeypatch.setenv("LC_CTYPE", "secret-locale-value")
 
-    code = (
-        "environ = __builtins__['__import__'].__globals__['sys'].modules['os'].environ\n"
-        "print(sorted(environ))\n"
+    expected = {name: os.environ[name] for name in ENV_PASSTHROUGH if name in os.environ}
+    actual = child_env()
+
+    assert actual == expected
+    assert set(actual) <= set(ENV_PASSTHROUGH)
+    assert "LC_CTYPE" not in ENV_PASSTHROUGH
+    assert CPYTHON_SYNTHESIZED_ENV == {"LC_CTYPE"}
+    assert all("must-not-leak" not in value for value in actual.values())
+
+    # CPython may add LC_CTYPE while starting with an otherwise empty POSIX
+    # environment.  That implementation detail is allowed in the child, but
+    # it is not a value passed through by child_env().
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", "import os; print(sorted(os.environ.items()))"],
+        env=actual,
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    text = python_exec(code)
+    observed = dict(ast.literal_eval(completed.stdout))
+    assert set(observed) <= set(ENV_PASSTHROUGH) | set(CPYTHON_SYNTHESIZED_ENV)
+    assert all(
+        name not in observed
+        for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TENSORMUX_API_KEY")
+    )
+    assert "secret-locale-value" not in completed.stdout
 
-    assert "sk-must-not-leak" not in text
-    inherited = ast.literal_eval(text.strip())
-    leaked = sorted(set(inherited) - set(ENV_PASSTHROUGH))
-    assert leaked == [], f"child inherited unexpected variables: {leaked}"
+
+def test_absolute_env_file_read_is_blocked(tmp_path) -> None:
+    secret_file = tmp_path / ".env"
+    secret_file.write_text("OCCAM_FILE_SENTINEL=repo-secret\n", encoding="utf-8")
+
+    result = run(f"print(open({str(secret_file)!r}, encoding='utf-8').read())")
+
+    assert not result.ok
+    assert "OCCAM_FILE_SENTINEL=repo-secret" not in result.as_text()
+    assert "builtin 'open' is not allowed" in result.stderr
+
+
+def test_process_and_introspection_routes_cannot_print_sentinels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OCCAM_SECRET_SENTINEL", "environment-secret")
+    attempts = (
+        "__builtins__['__import__'].__globals__['sys'].modules['os'].system("
+        "'echo PROCESS_SENTINEL')",
+        "__builtins__['__import__'].__globals__['sys'].modules['os'].environ["
+        "'OCCAM_SECRET_SENTINEL']",
+        "def f():\n    pass\nprint('{0.__globals__}'.format(f))",
+        "try:\n    1 / 0\nexcept Exception as exc:\n"
+        "    print(exc.__traceback__.tb_frame.f_globals)",
+        "def g():\n    yield 1\nprint(g().gi_frame.f_back.f_globals)",
+    )
+
+    for code in attempts:
+        result = run(code)
+        assert not result.ok
+        output = result.as_text()
+        assert "PROCESS_SENTINEL" not in output
+        assert "environment-secret" not in output
 
 
 def test_the_environment_allow_list_carries_no_credentials() -> None:
@@ -84,17 +122,26 @@ def test_the_environment_allow_list_carries_no_credentials() -> None:
 
 
 def test_process_and_filesystem_escapes_are_blocked() -> None:
-    for module in ("os", "subprocess", "shutil", "importlib", "ctypes", "pathlib"):
+    for module in (
+        "os",
+        "subprocess",
+        "shutil",
+        "importlib",
+        "ctypes",
+        "pathlib",
+        "io",
+        "operator",
+    ):
         result = run(f"import {module}")
         assert not result.ok, module
         assert f"import of '{module}' is not allowed" in result.stderr, module
 
 
-def test_import_guard_survives_an_importlib_style_bypass() -> None:
+def test_ast_guard_rejects_dynamic_import_and_network_bypass() -> None:
     result = run("__import__('socket').create_connection(('example.com', 80))")
 
     assert not result.ok
-    assert "import of 'socket' is not allowed" in result.stderr
+    assert "dunder identifier '__import__' is not allowed" in result.stderr
 
 
 def test_an_endless_program_is_killed_at_the_timeout() -> None:
