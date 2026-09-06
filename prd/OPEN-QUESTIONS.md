@@ -73,12 +73,13 @@ Two PRD notes, neither blocking:
   passes `use_cache=False` through the LLM client; fresh responses are neither
   read from nor written to the content cache, and the integration test verifies
   the canonical full cache remains unchanged.
-- **2026-09-06 — WP-01c noise-floor and cost contracts are adopted by WP-08.**
+- **2026-09-06 — WP-01c noise-floor and cost contracts are on `main`.** PR #8
+  merged at `597f349`; WP-08 consumes the shared contract without duplicating its
+  schema, model, fixture, executor-cost, or documentation changes.
   `noise_rate` is required on `ablation.started`; `RoleTrace.cost_usd` is the
   displayed cost, while `billed_cost_usd` and `cost_label` preserve the nominal
   billing basis. Cost shares reject a zero displayed-cost denominator rather
-  than invent token or uniform shares. The pending WP-01c commit is carried
-  temporarily in the WP-08 branch until PR #8 lands and is inherited by `main`.
+  than invent token or uniform shares.
 - **2026-09-06 — WP-01b fixture and design-reference decisions:**
   - **Run-2 lesson count:** resolved to 3, matching `prd/08-END-TO-END-WALKTHROUGH.md` and lessons L1, D1, and L2. The WP-01b acceptance wording of 2 is corrected; the canonical fixture and acceptance evidence use 3.
   - **Design reference filename:** resolved to `design/figma.png`; it is the intended visual target and there is no missing `figma-v2` asset. No design file was changed.

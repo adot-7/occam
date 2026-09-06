@@ -1035,17 +1035,6 @@ def _slug(variant: str) -> str:
     return _VARIANT_SAFE.sub("_", variant).strip("_") or "variant"
 
 
-def _trace_cost_label(labels: Sequence[str]) -> str:
-    """Describe the cost basis without hiding a mixed multi-turn trace."""
-
-    unique = sorted({label for label in labels if label})
-    if not unique:
-        return "metered"
-    if len(unique) == 1:
-        return unique[0]
-    return "mixed (" + ", ".join(unique) + ")"
-
-
 def _parse_arguments(raw: Any) -> dict[str, Any]:
     if raw in (None, ""):
         return {}
