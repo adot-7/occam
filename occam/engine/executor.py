@@ -1036,12 +1036,14 @@ def _slug(variant: str) -> str:
 
 
 def _trace_cost_label(labels: Sequence[str]) -> str:
-    """Summarize per-completion cost labels without hiding a mixed basis."""
+    """Describe the cost basis without hiding a mixed multi-turn trace."""
 
-    if not labels:
+    unique = sorted({label for label in labels if label})
+    if not unique:
         return "metered"
-    unique = set(labels)
-    return next(iter(unique)) if len(unique) == 1 else "mixed"
+    if len(unique) == 1:
+        return unique[0]
+    return "mixed (" + ", ".join(unique) + ")"
 
 
 def _parse_arguments(raw: Any) -> dict[str, Any]:

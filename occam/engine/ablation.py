@@ -401,7 +401,11 @@ def build_table(
     if not ids:
         raise ValueError("ablation needs at least one case")
     roles = [role for role in architecture.roles if role.id in knockouts]
-    shares = role_cost_shares(full, [role.id for role in architecture.roles])
+    shares = role_cost_shares(
+        full,
+        [role.id for role in architecture.roles],
+        case_ids=ids,
+    )
     rows = [
         build_row(
             role,
@@ -488,7 +492,11 @@ def ablate(
         },
     )
 
-    shares = role_cost_shares(full, [role.id for role in architecture.roles])
+    shares = role_cost_shares(
+        full,
+        [role.id for role in architecture.roles],
+        case_ids=case_ids,
+    )
     rows: list[AblationRow] = []
     for role in architecture.roles:
         if role.id not in targets:

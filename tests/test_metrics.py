@@ -92,6 +92,27 @@ def test_cost_share_is_the_role_share_of_total_spend() -> None:
     assert role_cost_shares(run, ["r_a", "r_b", "r_c"])["r_c"] == 0.0
 
 
+def test_cost_share_can_be_restricted_to_the_exact_ablation_subset() -> None:
+    run = make_run_result(
+        "full",
+        [("c1", "a", True), ("c2", "b", True), ("c3", "c", True)],
+        role_costs={"r_a": 1.0, "r_b": 1.0},
+    )
+    for trace in run.results[0].per_role.values():
+        trace.cost_usd = 1.0
+    for trace in run.results[1].per_role.values():
+        trace.cost_usd = 3.0
+    for trace in run.results[2].per_role.values():
+        trace.cost_usd = 100.0
+
+    assert role_cost_shares(run, ["r_a", "r_b"], case_ids=["c1", "c2"]) == {
+        "r_a": pytest.approx(0.5),
+        "r_b": pytest.approx(0.5),
+    }
+    with pytest.raises(ValueError, match="missing"):
+        role_cost_shares(run, ["r_a", "r_b"], case_ids=["missing"])
+
+
 def test_cost_share_requires_positive_displayed_role_trace_costs() -> None:
     granted = RunResult(
         architecture_id="g000",
