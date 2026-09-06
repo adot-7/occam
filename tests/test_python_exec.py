@@ -369,6 +369,106 @@ def test_aggregate_renderers_reject_before_building_large_representations(
     assert message in result.stderr, label
 
 
+def test_mutable_aliases_are_recounted_after_child_mutation() -> None:
+    result = run(
+        "inner = ['x' * 300_000]\n"
+        "outer = [inner]\n"
+        "inner.append('y' * 300_000)\n"
+        "outer.append('z' * 500_000)\n"
+        "print('COMPLETED')",
+        timeout_s=3.0,
+    )
+
+    assert not result.ok
+    assert not result.timed_out
+    assert "list.append display size limit exceeded" in result.stderr
+    assert "COMPLETED" not in result.as_text()
+
+
+def test_aliases_count_as_repeated_display_and_cycles_use_separate_detection() -> None:
+    repeated = run(
+        "inner = ['x' * 500_000]\nouter = [inner, inner]\nprint('COMPLETED')",
+        timeout_s=3.0,
+    )
+    cycle = run("value = []\nvalue.append(value)\nprint(value)", timeout_s=3.0)
+
+    assert not repeated.ok
+    assert not repeated.timed_out
+    assert "display size limit exceeded" in repeated.stderr
+    assert "COMPLETED" not in repeated.as_text()
+    assert not cycle.ok
+    assert not cycle.timed_out
+    assert "cycle detected" in cycle.stderr
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        "from decimal import Decimal\nprint(int(Decimal('1e1000000')))\nprint('COMPLETED')",
+        "from decimal import Decimal\nprint(round(Decimal('1e1000000')))\nprint('COMPLETED')",
+        "from decimal import Decimal\nimport math\n"
+        "print(math.ceil(Decimal('1e1000000')))\nprint('COMPLETED')",
+        "from decimal import Decimal\nimport math\n"
+        "print(math.floor(Decimal('1e1000000')))\nprint('COMPLETED')",
+    ),
+)
+def test_decimal_to_integer_paths_reject_huge_exponents_before_conversion(code: str) -> None:
+    result = run(code, timeout_s=2.0)
+
+    assert not result.ok
+    assert not result.timed_out
+    assert "integer magnitude limit exceeded" in result.stderr
+    assert "COMPLETED" not in result.as_text()
+
+
+def test_decimal_integer_paths_preserve_normal_fx_sized_values() -> None:
+    result = run(
+        "from decimal import Decimal\n"
+        "import math\n"
+        "print(int(Decimal('12.9')), round(Decimal('1.25')), "
+        "math.ceil(Decimal('1.1')), math.floor(Decimal('1.9')))",
+    )
+
+    assert result.ok
+    assert result.stdout == "12 1 2 1\n"
+
+
+def test_bytes_integer_parsing_honors_the_explicit_base() -> None:
+    result = run("print(int(b'ff', 16), int(b'101', 2))")
+
+    assert result.ok
+    assert result.stdout == "255 5\n"
+
+
+def test_strftime_directives_are_preflighted_before_formatting() -> None:
+    result = run(
+        "import datetime\n"
+        "print(datetime.date(2026, 1, 2).strftime('%Y' * 300_000))\n"
+        "print('COMPLETED')",
+        timeout_s=2.0,
+    )
+
+    assert not result.ok
+    assert not result.timed_out
+    assert "formatted string size limit exceeded" in result.stderr
+    assert "COMPLETED" not in result.as_text()
+
+
+def test_safe_list_slice_assignment_is_reachable_and_bounded() -> None:
+    result = run("values = [1, 2]\nvalues[1:1] = [3, 4]\nprint(values)")
+    oversized = run(
+        "values = [''] * 100_000\nvalues[0:0] = ['']\nprint('COMPLETED')",
+        timeout_s=2.0,
+    )
+
+    assert result.ok
+    assert result.stdout == "[1, 3, 4, 2]\n"
+    assert not oversized.ok
+    assert not oversized.timed_out
+    assert "item limit exceeded" in oversized.stderr
+    assert "COMPLETED" not in oversized.as_text()
+
+
 def test_print_streams_each_argument_and_separator_into_the_bounded_sink() -> None:
     result = run(
         "print('x' * 800_000, 'y' * 800_000, sep='s' * 800_000, end='e' * 800_000)",
@@ -406,11 +506,7 @@ def test_print_streams_each_argument_and_separator_into_the_bounded_sink() -> No
         ),
         (
             "append item bound",
-            "values = []\n"
-            "for index in range(100_000):\n"
-            "    values.append('')\n"
-            "values.append('')\n"
-            "print('COMPLETED')",
+            "values = [''] * 100_000\nvalues.append('')\nprint('COMPLETED')",
         ),
         (
             "insert item bound",
@@ -418,11 +514,7 @@ def test_print_streams_each_argument_and_separator_into_the_bounded_sink() -> No
         ),
         (
             "extend item bound",
-            "values = []\n"
-            "for index in range(100_000):\n"
-            "    values.extend([''])\n"
-            "values.extend([''])\n"
-            "print('COMPLETED')",
+            "values = [''] * 100_000\nvalues.extend([''])\nprint('COMPLETED')",
         ),
         (
             "f-string",
@@ -470,17 +562,13 @@ def test_exposed_string_and_bytes_aggregators_are_preflighted(label: str, code: 
     (
         (
             "dict assignment",
-            "values = {}\n"
-            "for index in range(100_000):\n"
-            "    values[index] = 0\n"
+            "values = {index: 0 for index in range(100_000)}\n"
             "values[100_000] = 0\n"
             "print('COMPLETED')",
         ),
         (
             "dict setdefault",
-            "values = {}\n"
-            "for index in range(100_000):\n"
-            "    values.setdefault(index, 0)\n"
+            "values = {index: 0 for index in range(100_000)}\n"
             "values.setdefault(100_000, 0)\n"
             "print('COMPLETED')",
         ),

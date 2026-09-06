@@ -18,6 +18,11 @@ a dedicated sandbox service).  The temporary directory is a convenience, not
 a filesystem-security claim; the security property here is that submitted
 source is never executed as Python and receives no file/process/network
 capability.
+
+Collection construction, sorting, conversion, and JSON encoding use bounded
+transient copies where the underlying CPython operation allocates one.  The
+limits bound those copies' item/display budgets; they are not a zero-copy or
+perfect-memory-isolation guarantee.
 """
 
 from __future__ import annotations
@@ -455,25 +460,15 @@ class _UserFunction:
         self.expression = expression
 
 
-class _BoundedList(list):
-    __slots__ = ("_occam_display_cost",)
-
-
-class _BoundedDict(dict):
-    __slots__ = ("_occam_display_cost",)
-
-
-class _BoundedSet(set):
-    __slots__ = ("_occam_display_cost",)
-
-
 def _is_wrapper(value):
     return isinstance(value, (_Capability, _SafeModule, _UserFunction))
 
 
-def _validate_value(value, depth=0):
+def _validate_value(value, depth=0, active=None):
     if depth > 64:
         raise _EvalError("python_exec: value nesting limit exceeded")
+    if active is None:
+        active = set()
     if _is_wrapper(value) or isinstance(value, _SafeException):
         return
     if value is None or isinstance(value, (bool, float)):
@@ -486,22 +481,36 @@ def _validate_value(value, depth=0):
         if len(value) > _Evaluator.MAX_STRING_CHARS:
             raise _EvalError("python_exec: string value limit exceeded")
         return
+    if isinstance(value, slice):
+        _validate_value(value.start, depth + 1, active)
+        _validate_value(value.stop, depth + 1, active)
+        _validate_value(value.step, depth + 1, active)
+        return
     if isinstance(
         value, (_decimal.Decimal, _datetime.date, _datetime.datetime, _datetime.timedelta)
     ):
         return
-    if isinstance(value, (list, tuple, set, frozenset, range)):
-        if len(value) > _Evaluator.MAX_ITEMS:
-            raise _EvalError("python_exec: collection item limit exceeded")
-        for item in value:
-            _validate_value(item, depth + 1)
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        marker = id(value)
+        if marker in active:
+            raise _EvalError("python_exec: value cycle detected")
+        active.add(marker)
+        try:
+            if len(value) > _Evaluator.MAX_ITEMS:
+                raise _EvalError("python_exec: collection item limit exceeded")
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    _validate_value(key, depth + 1, active)
+                    _validate_value(item, depth + 1, active)
+            else:
+                for item in value:
+                    _validate_value(item, depth + 1, active)
+        finally:
+            active.remove(marker)
         return
-    if isinstance(value, dict):
+    if isinstance(value, range):
         if len(value) > _Evaluator.MAX_ITEMS:
             raise _EvalError("python_exec: collection item limit exceeded")
-        for key, item in value.items():
-            _validate_value(key, depth + 1)
-            _validate_value(item, depth + 1)
         return
     raise _EvalError("python_exec: value type %r is not available" % type(value).__name__)
 
@@ -528,51 +537,63 @@ class _Evaluator:
         return _Capability(label, function, attributes, allow_wrappers)
 
     def _new_list(self):
-        result = _BoundedList()
-        result._occam_display_cost = 2
-        return result
+        return []
 
     def _new_dict(self):
-        result = _BoundedDict()
-        result._occam_display_cost = 2
-        return result
+        return {}
 
     def _new_set(self):
-        result = _BoundedSet()
-        result._occam_display_cost = 2
-        return result
+        return set()
 
     def _collection_cost(self, value):
-        if isinstance(value, (_BoundedList, _BoundedDict, _BoundedSet)):
-            return value._occam_display_cost
         return self._display_size(value)
 
-    def _set_collection_cost(self, value, cost):
-        if isinstance(value, (_BoundedList, _BoundedDict, _BoundedSet)):
-            value._occam_display_cost = cost
+    def _contains_mutable_container(self, value, active=None):
+        """Detect mutable descendants without retaining state on the value."""
+
+        if isinstance(value, (list, dict, set)):
+            return True
+        if not isinstance(value, (tuple, frozenset)):
+            return False
+        if active is None:
+            active = set()
+        marker = id(value)
+        if marker in active:
+            return True
+        active.add(marker)
+        try:
+            return any(self._contains_mutable_container(item, active) for item in value)
+        finally:
+            active.remove(marker)
 
     def _collection_item_cost(self, value):
         return self._display_size(value, nested=True) + 2
 
-    def _check_collection_add(self, value, item, label):
+    def _check_collection_add(self, value, item, label, cost=None):
         if len(value) >= self.MAX_ITEMS:
             raise _EvalError("python_exec: %s item limit exceeded" % label)
-        cost = self._collection_cost(value) + self._collection_item_cost(item)
+        if cost is None:
+            cost = self._collection_cost(value)
+        cost += self._collection_item_cost(item)
         if cost > self.MAX_STRING_CHARS:
             raise _EvalError("python_exec: %s display size limit exceeded" % label)
         return cost
 
-    def _append_collection_item(self, value, item, label):
-        cost = self._check_collection_add(value, item, label)
+    def _append_collection_item(self, value, item, label, cost=None, has_mutable=False):
+        if cost is None or has_mutable:
+            cost = self._collection_cost(value)
+        cost = self._check_collection_add(value, item, label, cost)
         value.append(item)
-        self._set_collection_cost(value, cost)
+        return cost, has_mutable or self._contains_mutable_container(item)
 
-    def _add_set_item(self, value, item, label):
+    def _add_set_item(self, value, item, label, cost=None, has_mutable=False):
         if item in value:
-            return
-        cost = self._check_collection_add(value, item, label)
+            return cost, has_mutable
+        if cost is None or has_mutable:
+            cost = self._collection_cost(value)
+        cost = self._check_collection_add(value, item, label, cost)
         value.add(item)
-        self._set_collection_cost(value, cost)
+        return cost, has_mutable or self._contains_mutable_container(item)
 
     def _dict_entry_cost(self, key, item):
         return (
@@ -581,7 +602,7 @@ class _Evaluator:
             + 4
         )
 
-    def _set_dict_item(self, value, key, item, label):
+    def _set_dict_item(self, value, key, item, label, cost=None, has_mutable=False):
         try:
             present = key in value
         except TypeError as exc:
@@ -591,44 +612,29 @@ class _Evaluator:
             old_cost = self._dict_entry_cost(key, value[key])
         elif len(value) >= self.MAX_ITEMS:
             raise _EvalError("python_exec: %s item limit exceeded" % label)
-        cost = self._collection_cost(value) - old_cost + self._dict_entry_cost(key, item)
+        if cost is None or has_mutable:
+            cost = self._collection_cost(value)
+        cost = cost - old_cost + self._dict_entry_cost(key, item)
         if cost > self.MAX_STRING_CHARS:
             raise _EvalError("python_exec: %s display size limit exceeded" % label)
         value[key] = item
-        self._set_collection_cost(value, cost)
+        return (
+            cost,
+            has_mutable
+            or self._contains_mutable_container(key)
+            or self._contains_mutable_container(item),
+        )
 
     def _validate_mutated(self, value):
-        if isinstance(value, (_BoundedList, _BoundedDict, _BoundedSet)):
-            if len(value) > self.MAX_ITEMS:
-                raise _EvalError("python_exec: collection item limit exceeded")
-            if value._occam_display_cost > self.MAX_STRING_CHARS:
-                raise _EvalError("python_exec: collection display size limit exceeded")
-            return
         _validate_value(value)
         if isinstance(value, (list, tuple, set, frozenset, dict)):
             if len(value) > self.MAX_ITEMS:
                 raise _EvalError("python_exec: collection item limit exceeded")
             if self._display_size(value) > self.MAX_STRING_CHARS:
                 raise _EvalError("python_exec: collection display size limit exceeded")
-            self._set_collection_cost(value, self._display_size(value))
 
     def _validate_collection_result(self, value, label):
         self._validate_mutated(value)
-        if isinstance(value, list) and not isinstance(value, _BoundedList):
-            result = self._new_list()
-            for item in value:
-                self._append_collection_item(result, item, label)
-            return result
-        if isinstance(value, dict) and not isinstance(value, _BoundedDict):
-            result = self._new_dict()
-            for key, item in value.items():
-                self._set_dict_item(result, key, item, label)
-            return result
-        if isinstance(value, set) and not isinstance(value, _BoundedSet):
-            result = self._new_set()
-            for item in value:
-                self._add_set_item(result, item, label)
-            return result
         return value
 
     def _make_modules(self):
@@ -694,9 +700,9 @@ class _Evaluator:
                 {
                     "e": _math.e,
                     "pi": _math.pi,
-                    "ceil": self._capability("math.ceil", _math.ceil),
+                    "ceil": self._capability("math.ceil", self._ceil),
                     "fabs": self._capability("math.fabs", _math.fabs),
-                    "floor": self._capability("math.floor", _math.floor),
+                    "floor": self._capability("math.floor", self._floor),
                     "isclose": self._capability("math.isclose", _math.isclose),
                     "isfinite": self._capability("math.isfinite", _math.isfinite),
                     "isinf": self._capability("math.isinf", _math.isinf),
@@ -902,10 +908,33 @@ class _Evaluator:
             raise _EvalError("python_exec: encoded bytes constructor size limit exceeded")
         return self._check_bytes_result(bytes(value, encoding, errors), "bytes constructor")
 
+    def _check_decimal_integer_magnitude(self, value, label):
+        if not isinstance(value, _decimal.Decimal) or not value.is_finite():
+            return
+        sign, digits, exponent = value.as_tuple()
+        if not digits or value.is_zero():
+            return
+        adjusted = value.adjusted()
+        if adjusted < 0:
+            return
+        if exponent >= 0:
+            decimal_digits = len(digits) + exponent
+        else:
+            decimal_digits = adjusted + 1
+        # A decimal digit count is a safe pre-conversion resource estimate;
+        # conversion is only attempted while the result can be near the
+        # bounded integer contract.  The final bit-length check handles the
+        # small leading-digit slack at the boundary.
+        max_decimal_digits = int(self.MAX_INTEGER_BITS * _math.log10(2)) + 1
+        if decimal_digits > max_decimal_digits:
+            raise _EvalError("python_exec: %s integer magnitude limit exceeded" % label)
+
     def _safe_int(self, value=0, base=10):
         value = self._plain(value)
+        base = self._plain(base)
+        if isinstance(value, bytes):
+            value = value.decode("ascii")
         if isinstance(value, str):
-            base = self._plain(base)
             digits = value.strip().lstrip("+-").replace("_", "")
             effective_base = base
             lowered = digits.lower()
@@ -933,9 +962,9 @@ class _Evaluator:
             result = int(value, base)
             _validate_value(result)
             return result
-        if isinstance(value, _decimal.Decimal) and value.is_finite():
-            if value.adjusted() * 3 > self.MAX_INTEGER_BITS:
-                raise _EvalError("python_exec: integer magnitude limit exceeded")
+        self._check_decimal_integer_magnitude(value, "int")
+        if base != 10:
+            return int(value, base)
         result = int(value)
         _validate_value(result)
         return result
@@ -966,8 +995,10 @@ class _Evaluator:
             if isinstance(right, int):
                 if abs(right) > self.MAX_INTEGER_BITS:
                     raise _EvalError("python_exec: integer magnitude limit exceeded")
-            if not integer_operands or right < 0:
+            if not integer_operands:
                 return
+            if right < 0:
+                raise _EvalError("python_exec: negative shift count")
             if isinstance(operator, ast.LShift):
                 projected_bits = 0 if left == 0 else abs(left).bit_length() + right
                 if projected_bits > self.MAX_INTEGER_BITS:
@@ -1023,42 +1054,69 @@ class _Evaluator:
 
     def _materialize(self, values, label):
         result = self._new_list()
+        cost = 2
+        has_mutable = False
         for value in values:
-            self._append_collection_item(result, value, label)
+            cost, has_mutable = self._append_collection_item(
+                result, value, label, cost, has_mutable
+            )
+        self._validate_mutated(result)
         return result
 
     def _make_list(self, value=()):
         return self._materialize(self._iter_values(value), "list constructor")
 
     def _make_tuple(self, value=()):
-        return tuple(self._materialize(self._iter_values(value), "tuple constructor"))
+        result = tuple(self._materialize(self._iter_values(value), "tuple constructor"))
+        self._validate_mutated(result)
+        return result
 
     def _make_set(self, value=()):
         result = self._new_set()
+        cost = 2
+        has_mutable = False
         for item in self._iter_values(value):
-            self._add_set_item(result, item, "set constructor")
+            cost, has_mutable = self._add_set_item(
+                result, item, "set constructor", cost, has_mutable
+            )
+        self._validate_mutated(result)
         return result
 
     def _make_frozenset(self, value=()):
         result = self._new_set()
+        cost = 2
+        has_mutable = False
         for item in self._iter_values(value):
-            self._add_set_item(result, item, "frozenset constructor")
-        return frozenset(result)
+            cost, has_mutable = self._add_set_item(
+                result, item, "frozenset constructor", cost, has_mutable
+            )
+        result = frozenset(result)
+        self._validate_mutated(result)
+        return result
 
     def _make_dict(self, value=(), **kwargs):
         result = self._new_dict()
+        cost = 2
+        has_mutable = False
         if value == ():
             pass
         elif isinstance(value, dict):
             for key, item in value.items():
-                self._set_dict_item(result, key, item, "dict constructor")
+                cost, has_mutable = self._set_dict_item(
+                    result, key, item, "dict constructor", cost, has_mutable
+                )
         else:
             for pair in self._iter_values(value):
                 if not isinstance(pair, (list, tuple)) or len(pair) != 2:
                     raise _EvalError("python_exec: dict constructor needs key/value pairs")
-                self._set_dict_item(result, pair[0], pair[1], "dict constructor")
+                cost, has_mutable = self._set_dict_item(
+                    result, pair[0], pair[1], "dict constructor", cost, has_mutable
+                )
         for key, item in kwargs.items():
-            self._set_dict_item(result, key, item, "dict constructor")
+            cost, has_mutable = self._set_dict_item(
+                result, key, item, "dict constructor", cost, has_mutable
+            )
+        self._validate_mutated(result)
         return result
 
     def _all(self, value):
@@ -1075,9 +1133,14 @@ class _Evaluator:
     def _filter(self, function, value):
         items = self._iter_values(value)
         result = self._new_list()
+        cost = 2
+        has_mutable = False
         for item in items:
             if self._truth(self._invoke(function, (item,), {})):
-                self._append_collection_item(result, item, "filter result")
+                cost, has_mutable = self._append_collection_item(
+                    result, item, "filter result", cost, has_mutable
+                )
+        self._validate_mutated(result)
         return result
 
     def _map(self, function, *values):
@@ -1097,7 +1160,11 @@ class _Evaluator:
     def _sorted(self, value, reverse=False):
         items = self._materialize(self._iter_values(value), "sorted result")
         reverse = bool(self._plain(reverse))
-        return sorted(items, reverse=reverse)
+        # CPython's sort allocates a second list.  Both copies are bounded by
+        # the preflighted item/display contract before the sort starts.
+        self._validate_mutated(items)
+        result = sorted(items, reverse=reverse)
+        return self._validate_collection_result(result, "sorted result")
 
     def _minimum(self, *values, **kwargs):
         return self._extreme(min, values, kwargs)
@@ -1124,8 +1191,19 @@ class _Evaluator:
     def _round(self, value, ndigits=None):
         value = self._plain(value)
         if ndigits is None:
+            self._check_decimal_integer_magnitude(value, "round")
             return round(value)
         return round(value, self._plain(ndigits))
+
+    def _ceil(self, value):
+        value = self._plain(value)
+        self._check_decimal_integer_magnitude(value, "math.ceil")
+        return _math.ceil(value)
+
+    def _floor(self, value):
+        value = self._plain(value)
+        self._check_decimal_integer_magnitude(value, "math.floor")
+        return _math.floor(value)
 
     def _sum(self, value, start=0):
         total = self._plain(start)
@@ -1145,45 +1223,82 @@ class _Evaluator:
         sys.stdout.write(end)
         sys.stdout.flush()
 
-    def _display_size(self, value, nested=False, depth=0):
+    def _display_size(self, value, nested=False, depth=0, active=None):
         if depth > 64:
             raise _EvalError("python_exec: display nesting limit exceeded")
-        if isinstance(value, _Capability):
-            return len(value.label) + 13
-        if isinstance(value, _SafeModule):
-            return len(value.name) + 9
-        if isinstance(value, _UserFunction):
-            return len(value.name) + 11
-        if isinstance(value, _SafeException):
-            return len(value.name) + len(value.message) + 2
-        if isinstance(value, str):
-            return len(value) if not nested else self._ascii_string_size(value) + 2
-        if isinstance(value, bytes):
-            return len(value) * 4 + 4
-        if isinstance(value, int) and not isinstance(value, bool):
-            bits = value.bit_length()
-            if bits <= 4096:
-                return len(str(value))
-            return bits * 4 + 1
-        if isinstance(value, (list, tuple, set, frozenset)):
-            total = 2
-            for item in value:
-                total += self._display_size(item, nested=True, depth=depth + 1) + 2
-                if total > self.MAX_STRING_CHARS:
-                    return total
-            return total
-        if isinstance(value, dict):
-            total = 2
-            for key, item in value.items():
-                total += (
-                    self._display_size(key, nested=True, depth=depth + 1)
-                    + self._display_size(item, nested=True, depth=depth + 1)
-                    + 4
-                )
-                if total > self.MAX_STRING_CHARS:
-                    return total
-            return total
-        return len(str(value)) + 16
+        if active is None:
+            active = set()
+        container = isinstance(value, (list, tuple, set, frozenset, dict))
+        marker = id(value)
+        if container:
+            if marker in active:
+                raise _EvalError("python_exec: display cycle detected")
+            active.add(marker)
+        try:
+            if isinstance(value, _Capability):
+                return len(value.label) + 13
+            if isinstance(value, _SafeModule):
+                return len(value.name) + 9
+            if isinstance(value, _UserFunction):
+                return len(value.name) + 11
+            if isinstance(value, _SafeException):
+                return len(value.name) + len(value.message) + 2
+            if isinstance(value, str):
+                return len(value) if not nested else self._ascii_string_size(value) + 2
+            if isinstance(value, bytes):
+                return len(value) * 4 + 4
+            if isinstance(value, int) and not isinstance(value, bool):
+                bits = value.bit_length()
+                if bits <= 4096:
+                    return len(str(value))
+                return bits * 4 + 1
+            if isinstance(value, (list, tuple, set, frozenset)):
+                total = 2
+                for item in value:
+                    total += (
+                        self._display_size(
+                            item, nested=True, depth=depth + 1, active=active
+                        )
+                        + 2
+                    )
+                    if total > self.MAX_STRING_CHARS:
+                        return total
+                return total
+            if isinstance(value, dict):
+                total = 2
+                for key, item in value.items():
+                    total += (
+                        self._display_size(
+                            key, nested=True, depth=depth + 1, active=active
+                        )
+                        + self._display_size(
+                            item, nested=True, depth=depth + 1, active=active
+                        )
+                        + 4
+                    )
+                    if total > self.MAX_STRING_CHARS:
+                        return total
+                return total
+            return len(str(value)) + 16
+        finally:
+            if container:
+                active.remove(marker)
+
+    def _bounded_join(self, parts, separator, label, overhead=0):
+        chunks = []
+        total = overhead
+        for part in parts:
+            if len(chunks) >= self.MAX_ITEMS:
+                raise _EvalError("python_exec: %s item limit exceeded" % label)
+            if not isinstance(part, str):
+                raise _EvalError("python_exec: %s requires text parts" % label)
+            if chunks:
+                total += len(separator)
+            total += len(part)
+            if total > self.MAX_STRING_CHARS:
+                raise _EvalError("python_exec: %s size limit exceeded" % label)
+            chunks.append(part)
+        return separator.join(chunks)
 
     def _display(self, value):
         if self._display_size(value) > self.MAX_STRING_CHARS:
@@ -1202,11 +1317,25 @@ class _Evaluator:
             left, right = ("[", "]") if isinstance(value, list) else ("(", ")")
             if isinstance(value, (set, frozenset)):
                 left, right = ("{", "}")
-            return left + ", ".join(self._render_value(item) for item in value) + right
+            return left + self._bounded_join(
+                (self._render_value(item) for item in value),
+                ", ",
+                "display",
+                overhead=len(left) + len(right),
+            ) + right
         if isinstance(value, dict):
-            return "{" + ", ".join(
-                "%s: %s" % (self._render_value(key), self._render_value(item))
-                for key, item in value.items()
+            return "{" + self._bounded_join(
+                (
+                    self._bounded_join(
+                        (self._render_value(key), self._render_value(item)),
+                        ": ",
+                        "display entry",
+                    )
+                    for key, item in value.items()
+                ),
+                ", ",
+                "display",
+                overhead=2,
             ) + "}"
         return str(value)
 
@@ -1215,11 +1344,25 @@ class _Evaluator:
             left, right = ("[", "]") if isinstance(value, list) else ("(", ")")
             if isinstance(value, (set, frozenset)):
                 left, right = ("{", "}")
-            return left + ", ".join(self._ascii_render(item) for item in value) + right
+            return left + self._bounded_join(
+                (self._ascii_render(item) for item in value),
+                ", ",
+                "ascii display",
+                overhead=len(left) + len(right),
+            ) + right
         if isinstance(value, dict):
-            return "{" + ", ".join(
-                "%s: %s" % (self._ascii_render(key), self._ascii_render(item))
-                for key, item in value.items()
+            return "{" + self._bounded_join(
+                (
+                    self._bounded_join(
+                        (self._ascii_render(key), self._ascii_render(item)),
+                        ": ",
+                        "ascii display entry",
+                    )
+                    for key, item in value.items()
+                ),
+                ", ",
+                "ascii display",
+                overhead=2,
             ) + "}"
         return ascii(value)
 
@@ -1234,23 +1377,32 @@ class _Evaluator:
             return self._display(value)
         return repr(value)
 
-    def _json_plain(self, value, depth=0):
+    def _json_plain(self, value, depth=0, active=None):
         if depth > 64:
             raise _EvalError("python_exec: JSON nesting limit exceeded")
+        if active is None:
+            active = set()
         if _is_wrapper(value) or isinstance(value, _SafeException):
             raise _EvalError("python_exec: JSON cannot contain capabilities")
         if value is None or isinstance(value, (bool, int, float, str, bytes)):
             return value
         if isinstance(value, (_decimal.Decimal, _datetime.date, _datetime.datetime)):
             return value
-        if isinstance(value, (list, tuple)):
-            for item in value:
-                self._json_plain(item, depth + 1)
-            return value
-        if isinstance(value, dict):
-            for key, item in value.items():
-                self._json_plain(key, depth + 1)
-                self._json_plain(item, depth + 1)
+        if isinstance(value, (list, tuple, dict)):
+            marker = id(value)
+            if marker in active:
+                raise _EvalError("python_exec: JSON cycle detected")
+            active.add(marker)
+            try:
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        self._json_plain(key, depth + 1, active)
+                        self._json_plain(item, depth + 1, active)
+                else:
+                    for item in value:
+                        self._json_plain(item, depth + 1, active)
+            finally:
+                active.remove(marker)
             return value
         raise _EvalError("python_exec: JSON value is not available")
 
@@ -1270,9 +1422,11 @@ class _Evaluator:
                 return total
         return total
 
-    def _json_size(self, value, depth=0, ensure_ascii=True):
+    def _json_size(self, value, depth=0, ensure_ascii=True, active=None):
         if depth > 64:
             raise _EvalError("python_exec: JSON nesting limit exceeded")
+        if active is None:
+            active = set()
         if _is_wrapper(value) or isinstance(value, _SafeException):
             raise _EvalError("python_exec: JSON cannot contain capabilities")
         if value is None:
@@ -1291,25 +1445,30 @@ class _Evaluator:
             return len(value) * 4 + 2
         if isinstance(value, (_decimal.Decimal, _datetime.date, _datetime.datetime)):
             return len(str(value)) * 12 + 2
-        if isinstance(value, (list, tuple)):
-            if len(value) > self.MAX_ITEMS:
-                raise _EvalError("python_exec: collection item limit exceeded")
-            total = 2
-            for item in value:
-                total += self._json_size(item, depth + 1, ensure_ascii) + 1
-                if total > self.MAX_STRING_CHARS:
-                    return total
-            return total
-        if isinstance(value, dict):
-            if len(value) > self.MAX_ITEMS:
-                raise _EvalError("python_exec: collection item limit exceeded")
-            total = 2
-            for key, item in value.items():
-                total += self._json_size(key, depth + 1, ensure_ascii)
-                total += self._json_size(item, depth + 1, ensure_ascii) + 2
-                if total > self.MAX_STRING_CHARS:
-                    return total
-            return total
+        if isinstance(value, (list, tuple, dict)):
+            marker = id(value)
+            if marker in active:
+                raise _EvalError("python_exec: JSON cycle detected")
+            active.add(marker)
+            try:
+                if len(value) > self.MAX_ITEMS:
+                    raise _EvalError("python_exec: collection item limit exceeded")
+                if isinstance(value, dict):
+                    total = 2
+                    for key, item in value.items():
+                        total += self._json_size(key, depth + 1, ensure_ascii, active)
+                        total += self._json_size(item, depth + 1, ensure_ascii, active) + 2
+                        if total > self.MAX_STRING_CHARS:
+                            return total
+                else:
+                    total = 2
+                    for item in value:
+                        total += self._json_size(item, depth + 1, ensure_ascii, active) + 1
+                        if total > self.MAX_STRING_CHARS:
+                            return total
+                return total
+            finally:
+                active.remove(marker)
         raise _EvalError("python_exec: JSON value is not available")
 
     def _json_dumps(self, value, **kwargs):
@@ -1397,8 +1556,13 @@ class _Evaluator:
 
         def bounded_pairs(pairs):
             result = self._new_dict()
+            cost = 2
+            has_mutable = False
             for key, item in pairs:
-                self._set_dict_item(result, key, item, "json.loads")
+                cost, has_mutable = self._set_dict_item(
+                    result, key, item, "json.loads", cost, has_mutable
+                )
+            self._validate_mutated(result)
             return result
 
         result = _json.loads(
@@ -1463,11 +1627,81 @@ class _Evaluator:
             if len(value) * 4 > self.MAX_STRING_CHARS:
                 raise _EvalError("python_exec: string result size limit exceeded")
 
+    def _preflight_strftime(self, format_string):
+        if not isinstance(format_string, str):
+            return
+        directive_sizes = {
+            "%": 1,
+            "a": 16,
+            "A": 32,
+            "b": 16,
+            "B": 32,
+            "c": 128,
+            "C": 2,
+            "d": 2,
+            "D": 8,
+            "e": 2,
+            "F": 10,
+            "g": 2,
+            "G": 4,
+            "H": 2,
+            "I": 2,
+            "j": 3,
+            "k": 2,
+            "l": 2,
+            "m": 2,
+            "M": 2,
+            "n": 1,
+            "p": 16,
+            "r": 16,
+            "R": 5,
+            "S": 2,
+            "t": 1,
+            "T": 8,
+            "u": 1,
+            "U": 2,
+            "V": 2,
+            "w": 1,
+            "W": 2,
+            "x": 32,
+            "X": 32,
+            "y": 2,
+            "Y": 4,
+            "z": 16,
+            "Z": 128,
+        }
+        total = 0
+        index = 0
+        while index < len(format_string):
+            if format_string[index] != "%":
+                total += 1
+                index += 1
+            else:
+                index += 1
+                if index >= len(format_string):
+                    total += 1
+                else:
+                    if format_string[index] == ":":
+                        index += 1
+                        if index < len(format_string) and format_string[index] == ":":
+                            index += 1
+                    while index < len(format_string) and format_string[index] in "-_0^#":
+                        index += 1
+                    if index < len(format_string) and format_string[index] in "EO":
+                        index += 1
+                    if index < len(format_string):
+                        directive = format_string[index]
+                        total += directive_sizes.get(directive, 256)
+                        index += 1
+                    else:
+                        total += 1
+            if total > self.MAX_STRING_CHARS:
+                raise _EvalError("python_exec: formatted string size limit exceeded")
+
     def _safe_string_method(self, value, name, args, kwargs):
         if name == "strftime":
             format_string = args[0] if args else kwargs.get("format", "")
-            if isinstance(format_string, str) and len(format_string) * 4 > self.MAX_STRING_CHARS:
-                raise _EvalError("python_exec: formatted string size limit exceeded")
+            self._preflight_strftime(format_string)
         preflight = self._preflight_string_method(value, name, args, kwargs)
         if name == "join" and preflight is not None:
             return self._check_text_result(value.join(preflight))
@@ -1603,22 +1837,37 @@ class _Evaluator:
                 raise _EvalError("python_exec: collection display size limit exceeded")
             if name == "copy":
                 result = self._new_dict()
+                cost = 2
+                has_mutable = False
                 for key, item in value.items():
-                    self._set_dict_item(result, key, item, "dict.copy")
+                    cost, has_mutable = self._set_dict_item(
+                        result, key, item, "dict.copy", cost, has_mutable
+                    )
+                self._validate_mutated(result)
                 return result
             if name in {"items", "keys", "values"}:
                 result = self._new_list()
+                cost = 2
+                has_mutable = False
                 for key, item in value.items():
                     output = (key, item) if name == "items" else key if name == "keys" else item
-                    self._append_collection_item(result, output, "dict.%s" % name)
+                    cost, has_mutable = self._append_collection_item(
+                        result, output, "dict.%s" % name, cost, has_mutable
+                    )
+                self._validate_mutated(result)
                 return result
         elif isinstance(value, list):
             if self._display_size(value) > self.MAX_STRING_CHARS:
                 raise _EvalError("python_exec: collection display size limit exceeded")
             if name == "copy":
                 result = self._new_list()
+                cost = 2
+                has_mutable = False
                 for item in value:
-                    self._append_collection_item(result, item, "list.copy")
+                    cost, has_mutable = self._append_collection_item(
+                        result, item, "list.copy", cost, has_mutable
+                    )
+                self._validate_mutated(result)
                 return result
         result = getattr(value, name)(*args, **kwargs)
         return self._validate_collection_result(result, "%s.%s" % (type(value).__name__, name))
@@ -1671,7 +1920,7 @@ class _Evaluator:
                 raise _EvalError("python_exec: list.extend display size limit exceeded")
             pending.append(item)
         value.extend(pending)
-        self._set_collection_cost(value, cost)
+        self._validate_mutated(value)
         return None
 
     def _safe_mutator(self, value, name, args, kwargs):
@@ -1685,13 +1934,11 @@ class _Evaluator:
                 self._validate_mutated(value)
                 return result
             if name == "insert" and len(args) == 2 and not kwargs:
-                cost = self._check_collection_add(value, args[1], "list.insert")
+                self._check_collection_add(value, args[1], "list.insert")
                 value.insert(args[0], args[1])
-                self._set_collection_cost(value, cost)
                 self._validate_mutated(value)
                 return None
             result = getattr(value, name)(*args, **kwargs)
-            self._set_collection_cost(value, self._display_size(value))
             self._validate_mutated(value)
             return result
         if isinstance(value, dict):
@@ -1703,7 +1950,6 @@ class _Evaluator:
                 self._validate_mutated(value)
                 return value[key]
             result = getattr(value, name)(*args, **kwargs)
-            self._set_collection_cost(value, self._display_size(value))
             self._validate_mutated(value)
             return result
         result = getattr(value, name)(*args, **kwargs)
@@ -1816,7 +2062,7 @@ class _Evaluator:
         if step != 1 and len(pending) != len(removed):
             raise _EvalError("python_exec: list assignment size mismatch")
         value[key] = pending
-        self._set_collection_cost(value, cost)
+        self._validate_mutated(value)
 
     def _setitem(self, value, key, item):
         self._plain(key)
@@ -1838,7 +2084,7 @@ class _Evaluator:
                 if cost > self.MAX_STRING_CHARS:
                     raise _EvalError("python_exec: list assignment display size limit exceeded")
                 value[key] = item
-                self._set_collection_cost(value, cost)
+                self._validate_mutated(value)
             except _EvalError:
                 raise
             except (IndexError, KeyError, TypeError) as exc:
@@ -2074,9 +2320,14 @@ class _Evaluator:
     def _comprehension(self, generators, emit, environment, result=None, add=None):
         if result is None:
             result = self._new_list()
+            cost = 2
+            has_mutable = False
 
             def add(value):
-                self._append_collection_item(result, value, "comprehension result")
+                nonlocal cost, has_mutable
+                cost, has_mutable = self._append_collection_item(
+                    result, value, "comprehension result", cost, has_mutable
+                )
 
         elif add is None:
             raise _EvalError("python_exec: internal comprehension collector is missing")
@@ -2094,6 +2345,7 @@ class _Evaluator:
                     visit(index + 1, child)
 
         visit(0, _Environment(environment))
+        self._validate_mutated(result)
         return result
 
     def _eval(self, node, environment):
@@ -2109,37 +2361,72 @@ class _Evaluator:
             return environment.get(node.id)
         if isinstance(node, ast.List):
             result = self._new_list()
+            cost = 2
+            has_mutable = False
             for item in node.elts:
-                self._append_collection_item(
-                    result, self._eval(item, environment), "list literal"
+                cost, has_mutable = self._append_collection_item(
+                    result,
+                    self._eval(item, environment),
+                    "list literal",
+                    cost,
+                    has_mutable,
                 )
+            self._validate_mutated(result)
             return result
         if isinstance(node, ast.Tuple):
             result = self._new_list()
+            cost = 2
+            has_mutable = False
             for item in node.elts:
-                self._append_collection_item(
-                    result, self._eval(item, environment), "tuple literal"
+                cost, has_mutable = self._append_collection_item(
+                    result,
+                    self._eval(item, environment),
+                    "tuple literal",
+                    cost,
+                    has_mutable,
                 )
-            return tuple(result)
+            result = tuple(result)
+            self._validate_mutated(result)
+            return result
         if isinstance(node, ast.Set):
             result = self._new_set()
+            cost = 2
+            has_mutable = False
             for item in node.elts:
                 value = self._eval(item, environment)
-                self._add_set_item(result, value, "set literal")
+                cost, has_mutable = self._add_set_item(
+                    result, value, "set literal", cost, has_mutable
+                )
+            self._validate_mutated(result)
             return result
         if isinstance(node, ast.Dict):
             result = self._new_dict()
+            cost = 2
+            has_mutable = False
             for key, value in zip(node.keys, node.values):
                 if key is None:
                     unpacked = self._plain(self._eval(value, environment))
                     for unpacked_key, unpacked_value in unpacked.items():
-                        self._set_dict_item(
-                            result, unpacked_key, unpacked_value, "dict literal"
+                        cost, has_mutable = self._set_dict_item(
+                            result,
+                            unpacked_key,
+                            unpacked_value,
+                            "dict literal",
+                            cost,
+                            has_mutable,
                         )
                 else:
                     evaluated_key = self._plain(self._eval(key, environment))
                     evaluated_value = self._eval(value, environment)
-                    self._set_dict_item(result, evaluated_key, evaluated_value, "dict literal")
+                    cost, has_mutable = self._set_dict_item(
+                        result,
+                        evaluated_key,
+                        evaluated_value,
+                        "dict literal",
+                        cost,
+                        has_mutable,
+                    )
+            self._validate_mutated(result)
             return result
         if isinstance(node, ast.Starred):
             return self._eval(node.value, environment)
@@ -2239,9 +2526,14 @@ class _Evaluator:
             )
         if isinstance(node, ast.SetComp):
             result = self._new_set()
+            cost = 2
+            has_mutable = False
 
             def add(value):
-                self._add_set_item(result, value, "set comprehension")
+                nonlocal cost, has_mutable
+                cost, has_mutable = self._add_set_item(
+                    result, value, "set comprehension", cost, has_mutable
+                )
 
             return self._comprehension(
                 node.generators,
@@ -2252,10 +2544,15 @@ class _Evaluator:
             )
         if isinstance(node, ast.DictComp):
             result = self._new_dict()
+            cost = 2
+            has_mutable = False
 
             def add(pair):
+                nonlocal cost, has_mutable
                 key, value = pair
-                self._set_dict_item(result, key, value, "dict comprehension")
+                cost, has_mutable = self._set_dict_item(
+                    result, key, value, "dict comprehension", cost, has_mutable
+                )
 
             return self._comprehension(
                 node.generators,

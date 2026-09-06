@@ -59,6 +59,12 @@ All notable changes to Occam are documented here.
   magnitude boundaries. This remains capability containment, not a perfect
   hostile-Python sandbox or OS isolation boundary; the residual OS caveat in
   the README still applies.
+- Removed mutable display-cost state in `python_exec`; current-graph display
+  validation now recounts aliases and detects cycles separately. Decimal-to-
+  integer conversions, `round`, `math.ceil`, and `math.floor` preflight
+  metadata before conversion, while byte-base parsing and `strftime`
+  directives retain their bounded contracts. Collection operations may make
+  bounded transient copies; this is not a claim of zero-copy execution.
 - `EventWriter` now locks with `msvcrt` on Windows and `fcntl` elsewhere. The
   store imported `fcntl` at module level, so `occam.store` was unimportable on
   Windows and three test modules failed at collection. Covered by a fresh-
