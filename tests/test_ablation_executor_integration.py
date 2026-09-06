@@ -103,6 +103,11 @@ def test_ablation_uses_fresh_stratified_repeat_and_current_executor_events(tmp_p
         for result in repeat_results
         for trace in result["per_role"].values()
     )
+    for role_id in ("r_source", "r_final"):
+        knockout_path = run_dir / "generations" / "g002" / f"results.ablate_{role_id}.jsonl"
+        knockout_results = [json.loads(line) for line in knockout_path.read_text().splitlines()]
+        assert [result["case_id"] for result in knockout_results] == ["c1", "c2"]
+        assert all(role_id not in result["per_role"] for result in knockout_results)
     # The repeat bypassed the LLM cache and did not overwrite the canonical
     # full-run entries: four repeat calls plus one unique sentinel prompt.  The
     # second identical sentinel prompt is itself a valid content-cache hit.
