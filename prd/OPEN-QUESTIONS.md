@@ -59,6 +59,17 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 - **`fcntl` on Windows — seconding the WP-03 item above.** It is worse than `tests/test_packaging.py`: `occam/store/__init__.py` re-exports `EventWriter`, so *every* test module that reaches the store fails at collection and `pytest -q` collects nothing at all. Fix is a small cross-platform advisory-lock shim (`msvcrt.locking` on win32, `fcntl.flock` elsewhere). Left to a WP-01 owner rather than widened into WP-04; WP-04's full-suite evidence was gathered behind a local, uncommitted shim.
 - **`wasted_calls` — resolved, see Resolved below.** Dropped from the PRD rather than defined.
 
+## 2026-09-06 — WP-07 (TUI shell + replay): PRD notes for the orchestrator
+
+Two PRD notes, neither blocking:
+
+- **`04 §2` header shows `gen 1/6`; `design/figma.png` shows `g0/g5`.** Implemented the Figma form
+  (`g{selected}/g{config.max_generations}`), since the PRD's example is a mock with no matching run.
+- **`04 §1b` wants the task label `fx_recon_a · FX revaluation`.** Nothing in the event log carries
+  the short human string, so it is derived from `task.goal` up to the first `:` — the header reads
+  `fx_recon_a · Month-end FX revaluation`. If the exact wording matters, `run.started`'s `task`
+  needs a `label` field (a schema change, so not taken here).
+
 ## Resolved
 - **2026-09-06 — WP-03 answer format: the canonical answer is the LAST FENCED JSON BLOCK.** `02` contradicted itself — §1.2 extracted the answer from the last fenced JSON block while the `task.yaml` template in §3 instructed `answer_format: 'Final line: a JSON object {...}'`, so an agent obeying the pack's own instruction was ungradeable. **§1.2 wins and §3 was changed**, because §1.2 is the grading contract and `AGENTS.md` treats `02` as authoritative for the task; because a fenced block survives trailing prose whereas "final line" breaks the moment a model adds a closing sentence, and GLM-4.7-Flash emits reasoning and prose freely; and because the grader already implemented fence extraction. Both packs' `task.yaml` were regenerated to match. `fx_total` keeps a bare-JSON-line fallback when no fence is present — defensive salvage so a dropped fence cannot crash or fail a run, explicitly **not** part of the contract.
 - **2026-09-06 — `wasted_calls` is dropped, not defined.** `02 §2` named it but nothing ever specified the aggregation. Ruling: remove the phrase; `02 §2` now reads "Feeds `n_tool_calls`." Reasoning: the disk cache is committed and permanent, so a repeat call costs approximately nothing and "wasted" is close to meaningless as a cost signal; and the metric appears in no success criterion (`00 §6`), no field in `events.schema.json`, and no TUI panel. `tool_calls_per_case` is already in `metrics.snapshot` and carries the whole cost/speed story, including the L2 range-endpoint halving. Defining a new metric under this deadline is scope we do not need. WP-04 keeps its raw per-call fields unchanged (`name`, `arguments`, `status`, `latency_s`, `bytes`, `cached`, `http_status`, `error`), so the metric can be reconstructed later if it ever earns its place.

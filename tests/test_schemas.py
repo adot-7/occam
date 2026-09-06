@@ -266,7 +266,11 @@ def test_full_repeat_is_a_fresh_nonzero_accounted_run() -> None:
             assert repeat["tokens"] > 0
             assert all(case["cost_usd"] > 0 for case in repeat["cases"])
             assert all(case["latency_s"] > 0 for case in repeat["cases"])
-            assert sum(case["cost_usd"] for case in repeat["cases"]) == repeat["cost_usd"]
+            # Binary floats: the fixture's total and this sum differ only in the
+            # last ulp, so compare within tolerance rather than bit-for-bit.
+            assert sum(case["cost_usd"] for case in repeat["cases"]) == pytest.approx(
+                repeat["cost_usd"]
+            )
 
 
 def test_full_repeat_matches_the_configured_ablation_subset() -> None:

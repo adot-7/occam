@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
 from occam.store.reader import EventReader
 from occam.store.reducer import reduce, state_json_bytes
 from occam.store.schema import validate_state
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance for type checkers
+    from occam.tui.app import OccamApp
+
+#: Test/CI affordances.  The documented interface is the flags below; these let
+#: an automated check drive the real command without a terminal.
+HEADLESS_ENV = "OCCAM_TUI_HEADLESS"
+EXIT_AFTER_ENV = "OCCAM_TUI_EXIT_AFTER"
 
 app = typer.Typer(
     add_completion=False,
@@ -61,6 +70,69 @@ def validate_run(
         f"deterministic: yes ({len(first_bytes)} state bytes; "
         f"derived state schema validated; {snapshot_message})"
     )
+
+
+def _launch(app_instance: OccamApp) -> None:
+    """Run a Textual app, honouring the headless/auto-exit test affordances."""
+
+    import asyncio
+
+    headless = os.environ.get(HEADLESS_ENV) == "1"
+    exit_after = os.environ.get(EXIT_AFTER_ENV)
+    auto_pilot = None
+    if exit_after:
+        seconds = float(exit_after)
+
+        async def auto_pilot(pilot: Any) -> None:  # noqa: RUF029 - Textual API shape
+            await asyncio.sleep(seconds)
+            pilot.app.exit()
+
+    app_instance.run(headless=headless, auto_pilot=auto_pilot)
+
+
+@app.command("tui")
+def tui(
+    run: Annotated[Path, typer.Option("--run", help="Run directory to attach to")],
+) -> None:
+    """Attach the read-only TUI to a live or finished run."""
+
+    from occam.tui.app import OccamApp
+
+    try:
+        _launch(OccamApp(run))
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="--run") from exc
+
+
+@app.command("replay")
+def replay(
+    run_dir: Annotated[Path, typer.Argument(help="Recorded run directory to replay")],
+    speed: Annotated[
+        float, typer.Option("--speed", help="Playback speed multiplier", min=0.0)
+    ] = 1.0,
+    to_gen: Annotated[
+        int | None,
+        typer.Option("--to-gen", help="Fast-forward silently to this generation"),
+    ] = None,
+    at: Annotated[
+        str | None,
+        typer.Option("--at", help="Fast-forward to the first event of this type"),
+    ] = None,
+    pause: Annotated[
+        bool, typer.Option("--pause", help="Start paused, for recording a static frame")
+    ] = False,
+) -> None:
+    """Replay a recorded run into the TUI, indistinguishably from live."""
+
+    from occam.tui.app import OccamApp
+    from occam.tui.source import ReplayOptions
+
+    try:
+        options = ReplayOptions(speed=speed, to_gen=to_gen, at=at, paused=pause)
+        instance = OccamApp(run_dir, replay=options)
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="run_dir") from exc
+    _launch(instance)
 
 
 @llm_app.command("ping")

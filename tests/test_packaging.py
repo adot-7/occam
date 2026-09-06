@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import textwrap
 import zipfile
 from importlib.resources import files
 from pathlib import Path
@@ -48,11 +49,25 @@ def test_wheel_contains_schema_resources_and_loads_them_outside_checkout(tmp_pat
     with zipfile.ZipFile(wheel_path) as wheel:
         names = set(wheel.namelist())
     assert {f"occam/schemas/{name}" for name in SCHEMA_NAMES} <= names
+    assert "occam/tui/occam.tcss" in names
 
     installed = tmp_path / "installed"
     installed.mkdir()
-    with zipfile.ZipFile(wheel_path) as wheel:
-        wheel.extractall(installed)
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--target",
+            str(installed),
+            str(wheel_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(installed)
     result = subprocess.run(
@@ -70,3 +85,35 @@ def test_wheel_contains_schema_resources_and_loads_them_outside_checkout(tmp_pat
         text=True,
     )
     assert result.returncode == 0
+
+    tui_result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                """
+                import asyncio
+
+                from occam.tui.app import OccamApp
+                from occam.tui.source import EventSource
+
+                class EmptySource(EventSource):
+                    async def run(self, sink):
+                        return
+
+                async def main():
+                    app = OccamApp('.', source=EmptySource())
+                    async with app.run_test(size=(80, 24)):
+                        assert app.CSS_PATH == 'occam.tcss'
+
+                asyncio.run(main())
+                """
+            ),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert tui_result.returncode == 0, tui_result.stderr

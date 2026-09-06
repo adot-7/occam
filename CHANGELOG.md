@@ -29,6 +29,14 @@ All notable changes to Occam are documented here.
   trace, the event log, or a fixture.
 - WP-04 `fan_out`, the in-role multi-agent primitive: bounded concurrency, results in
   subtask order, one failing branch does not fail the batch.
+- WP-07 read-only Textual shell (`occam/tui/`): header, lineage tree, diagnosis
+  feed, layout skeleton, keymap, palette, and `update_view` panel seams for WP-09.
+- WP-07 replay driver: `occam replay <run_dir> [--speed] [--to-gen] [--at] [--pause]`
+  with silent fast-forward, capped inter-event gaps, pause/step/speed transport,
+  and `occam tui --run <run_dir>` for live or finished runs.
+- `store.reducer.Reduction`, the incremental form of `reduce()`, so a follower can
+  fold new events without re-reducing the whole log. Both paths run the same
+  transition function; `reduce()` is now defined in terms of it.
 
 - WP-01c contract patch: `ablation.started` now carries the generation's
   `noise_rate` (required), so the ablation table's noise floor is readable while
@@ -69,6 +77,8 @@ All notable changes to Occam are documented here.
   store imported `fcntl` at module level, so `occam.store` was unimportable on
   Windows and three test modules failed at collection. Covered by a fresh-
   interpreter import test and a cross-process concurrent append test.
+- `test_full_repeat_is_a_fresh_nonzero_accounted_run` compares the fixture's
+  floating-point total within tolerance instead of requiring bit-for-bit equality.
 
 ## [0.1.0] - 2026-09-05
 

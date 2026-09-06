@@ -1,0 +1,451 @@
+"""Event sources that feed the TUI: recorded replay and live tail.
+
+Both sources hand the app the same thing — batches of validated
+:class:`~occam.core.models.Event` objects read from ``runs/<run_id>/events.jsonl``
+— so the app cannot tell replay from live (`01 §1`).  Neither source ever writes
+into the run directory.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+from occam.core.models import Event, State
+from occam.store.reader import EventCursor, EventReader
+
+EventSink = Callable[[Sequence[Event]], None]
+
+MIN_SPEED = 0.25
+MAX_SPEED = 64.0
+DEFAULT_MAX_GAP_S = 2.0
+
+
+class ReplayTargetNotFound(ValueError):
+    """Raised when ``--to-gen`` or ``--at`` matches no event in the log."""
+
+
+def _generation_of(event: Event) -> int | None:
+    value = event.data.get("generation")
+    return int(value) if isinstance(value, int) else None
+
+
+def generation_start_index(events: Sequence[Event], generation: int) -> int:
+    """Index of the first event belonging to ``generation``."""
+
+    for index, event in enumerate(events):
+        if _generation_of(event) == generation:
+            return index
+    raise ReplayTargetNotFound(f"no events for generation {generation}")
+
+
+def fast_forward_index(
+    events: Sequence[Event],
+    *,
+    to_gen: int | None = None,
+    at: str | None = None,
+) -> int:
+    """Index of the last event to emit instantly; ``-1`` plays from the start.
+
+    ``--to-gen N`` alone stops just *before* generation ``N`` opens, so the
+    generation then plays normally from its first event (`04 §4`).  ``--at
+    <type>`` lands *on* the first event of that type — inside ``--to-gen`` when
+    both are given — so the frame already shows that event's effect.
+    """
+
+    if at is None:
+        if to_gen is None:
+            return -1
+        return generation_start_index(events, to_gen) - 1
+
+    start = 0 if to_gen is None else generation_start_index(events, to_gen)
+    for index in range(start, len(events)):
+        event = events[index]
+        if event.type != at:
+            continue
+        if to_gen is not None:
+            generation = _generation_of(event)
+            if generation != to_gen:
+                continue
+        return index
+    scope = "" if to_gen is None else f" within generation {to_gen}"
+    raise ReplayTargetNotFound(f"no {at!r} event{scope}")
+
+
+@dataclass(frozen=True)
+class ReplayOptions:
+    """Command-line shape of ``occam replay``."""
+
+    speed: float = 1.0
+    to_gen: int | None = None
+    at: str | None = None
+    paused: bool = False
+    max_gap_s: float = DEFAULT_MAX_GAP_S
+
+    def __post_init__(self) -> None:
+        if self.speed <= 0:
+            raise ValueError("--speed must be greater than zero")
+        if self.max_gap_s < 0:
+            raise ValueError("max_gap_s must not be negative")
+        if self.to_gen is not None and self.to_gen < 0:
+            raise ValueError("--to-gen must not be negative")
+
+
+class EventSource(ABC):
+    """Something that pushes batches of events at the app."""
+
+    mode: str = "live"
+
+    def initial_state(self) -> State | None:
+        """A snapshot for the first paint, when one is available and honest."""
+
+        return None
+
+    def initial_events(self) -> Sequence[Event]:
+        """Already-read history used for non-reducer UI metadata."""
+
+        return ()
+
+    @property
+    def status(self) -> str | None:
+        """A user-visible source warning, if the source cannot tail cleanly."""
+
+        return None
+
+    @abstractmethod
+    async def run(self, sink: EventSink) -> None:
+        """Push every event this source has, then return."""
+
+
+class ReplaySource(EventSource):
+    """Play a recorded ``events.jsonl`` back at a chosen speed."""
+
+    mode = "replay"
+
+    def __init__(
+        self,
+        run_dir: str | Path,
+        options: ReplayOptions | None = None,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ):
+        self.run_dir = Path(run_dir)
+        self.options = options or ReplayOptions()
+        self._sleep = sleep
+        self._events = EventReader(self.run_dir).read()
+        self._speed = self.options.speed
+        self._paused = self.options.paused
+        self._steps = 0
+        self._wake = asyncio.Event()
+        self._finished = asyncio.Event()
+        self.emitted = 0
+        # Validate the landing point eagerly so the CLI can report a bad
+        # --to-gen/--at before it clears the screen.
+        self.fast_forward_to = fast_forward_index(
+            self._events, to_gen=self.options.to_gen, at=self.options.at
+        )
+
+    # -- transport controls --------------------------------------------
+
+    @property
+    def speed(self) -> float:
+        return self._speed
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    @property
+    def finished(self) -> bool:
+        return self._finished.is_set()
+
+    @property
+    def total_events(self) -> int:
+        return len(self._events)
+
+    def pause(self) -> None:
+        self._paused = True
+        # Interrupt an in-flight inter-event delay so pause takes effect at the
+        # current frame rather than after the next (possibly capped) gap.
+        self._wake.set()
+
+    def resume(self) -> None:
+        self._paused = False
+        self._steps = 0
+        self._wake.set()
+
+    def toggle_pause(self) -> bool:
+        if self._paused:
+            self.resume()
+        else:
+            self.pause()
+        return self._paused
+
+    def step(self) -> None:
+        """Advance exactly one event, pausing first if playback is running."""
+
+        self._paused = True
+        self._steps += 1
+        self._wake.set()
+
+    def set_speed(self, speed: float) -> float:
+        self._speed = min(MAX_SPEED, max(MIN_SPEED, speed))
+        return self._speed
+
+    def nudge_speed(self, factor: float) -> float:
+        return self.set_speed(self._speed * factor)
+
+    async def wait_finished(self) -> None:
+        await self._finished.wait()
+
+    # -- playback -------------------------------------------------------
+
+    async def _gate(self) -> bool:
+        """Block while paused; return True when released by a single step."""
+
+        while self._paused and self._steps == 0:
+            self._wake.clear()
+            await self._wake.wait()
+        if self._paused and self._steps > 0:
+            self._steps -= 1
+            return True
+        return False
+
+    def _delay(self, index: int) -> float:
+        if index <= 0:
+            return 0.0
+        gap = (self._events[index].ts - self._events[index - 1].ts).total_seconds()
+        gap = max(0.0, min(gap, self.options.max_gap_s))
+        return gap / self._speed
+
+    async def _wait_delay(self, delay: float) -> bool:
+        """Wait for a gap, returning whether a transport signal interrupted it."""
+
+        if delay <= 0:
+            return False
+        self._wake.clear()
+        sleeper = asyncio.ensure_future(self._sleep(delay))
+        wake = asyncio.create_task(self._wake.wait())
+        try:
+            done, pending = await asyncio.wait((sleeper, wake), return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            return wake in done
+        finally:
+            for task in (sleeper, wake):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sleeper, wake, return_exceptions=True)
+
+    async def run(self, sink: EventSink) -> None:
+        head = self.fast_forward_to + 1
+        if head:
+            # The fast-forward is silent: one batch, one repaint, no sleeps.
+            sink(self._events[:head])
+            self.emitted = head
+        index = head
+        while index < len(self._events):
+            stepped = await self._gate()
+            if not stepped:
+                delay = self._delay(index)
+                if await self._wait_delay(delay) and self._paused:
+                    continue
+            sink([self._events[index]])
+            self.emitted = index + 1
+            index += 1
+        self._finished.set()
+
+
+class LiveSource(EventSource):
+    """Tail a run directory that the engine may still be writing to."""
+
+    mode = "live"
+
+    def __init__(
+        self,
+        run_dir: str | Path,
+        *,
+        poll_interval: float = 0.25,
+        follow: bool = True,
+        incomplete_timeout_s: float = 2.0,
+    ):
+        self.run_dir = Path(run_dir)
+        if poll_interval < 0:
+            raise ValueError("poll_interval must not be negative")
+        if incomplete_timeout_s < 0:
+            raise ValueError("incomplete_timeout_s must not be negative")
+        self.poll_interval = poll_interval
+        self.follow = follow
+        self.incomplete_timeout_s = incomplete_timeout_s
+        self._reader = EventReader(self.run_dir)
+        self._cursor = EventCursor(self.run_dir)
+        if not self._reader.events_path.exists() and not self._reader.state_path.exists():
+            raise FileNotFoundError(f"event log not found: {self._reader.events_path}")
+        self._finished = asyncio.Event()
+        self._start_seq = 0
+        self._initial_events: tuple[Event, ...] = ()
+        self._pending_events: tuple[Event, ...] = ()
+        self._status: str | None = None
+        self._incomplete_since: float | None = None
+        self._stop_on_error = False
+
+    @property
+    def finished(self) -> bool:
+        return self._finished.is_set()
+
+    @property
+    def status(self) -> str | None:
+        return self._status
+
+    def initial_events(self) -> Sequence[Event]:
+        """Return history read for first-paint diagnosis and clock metadata."""
+
+        return self._initial_events
+
+    def _set_error(self, message: str, *, stop: bool = False) -> None:
+        self._status = f"⚠ tail error: {message}"
+        self._incomplete_since = None
+        self._stop_on_error = self._stop_on_error or stop
+
+    def _mark_incomplete(self) -> bool:
+        """Mark a partial tail and return whether its bounded wait expired."""
+
+        if self._incomplete_since is None:
+            self._incomplete_since = time.monotonic()
+        elapsed = time.monotonic() - self._incomplete_since
+        if not self.follow or elapsed >= self.incomplete_timeout_s:
+            self._status = f"⚠ tail incomplete after {elapsed:.2f}s"
+            return True
+        self._status = "⚠ tail waiting for complete event"
+        return False
+
+    def _clear_incomplete(self) -> None:
+        self._incomplete_since = None
+        if self._status == "⚠ tail waiting for complete event":
+            self._status = None
+
+    def initial_state(self) -> State | None:
+        """Load ``state.json`` for an instant first paint when it exists."""
+
+        try:
+            state = self._reader.load_state()
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            self._set_error(f"state snapshot: {exc}")
+            return None
+        self._start_seq = max(0, state.last_seq + 1)
+        self._initial_events = ()
+        self._pending_events = ()
+        if self._reader.events_path.exists():
+            try:
+                self._initial_events = tuple(self._cursor.read(live=True))
+            except (OSError, ValueError) as exc:
+                # Keep the snapshot available for first paint, but make the
+                # malformed log visible and let ``run`` finish the status path.
+                self._set_error(f"event log: {exc}", stop=True)
+            else:
+                if self._cursor.last_read_had_incomplete_trailing_line:
+                    self._mark_incomplete()
+                elif not self._initial_events and state.last_seq >= 0:
+                    self._set_error("state snapshot is ahead of an empty event log", stop=True)
+                elif self._initial_events[-1].seq < state.last_seq:
+                    self._set_error(
+                        f"state snapshot seq {state.last_seq} is ahead of event log seq "
+                        f"{self._initial_events[-1].seq}",
+                        stop=True,
+                    )
+                self._pending_events = tuple(
+                    event for event in self._initial_events if event.seq >= self._start_seq
+                )
+
+        if (
+            state.completed
+            and self._status is None
+            and (
+                (self._initial_events and self._initial_events[-1].seq == state.last_seq)
+                or (not self._initial_events and state.last_seq == -1)
+            )
+        ):
+            # A normal finished run has a snapshot at the log head.  There is
+            # nothing left to tail, so a default ``occam tui --run`` must not
+            # poll forever waiting for a second ``run.completed`` event.
+            self._finished.set()
+        return state
+
+    async def wait_finished(self) -> None:
+        await self._finished.wait()
+
+    async def run(self, sink: EventSink) -> None:
+        if self._finished.is_set():
+            return
+        if self._stop_on_error:
+            self._finished.set()
+            return
+        # ``initial_state`` primes the app's reducer to this sequence.  If no
+        # snapshot was available, the full event log is the only source of
+        # truth and playback starts at zero.
+        next_seq = self._start_seq
+        try:
+            if self._pending_events:
+                pending = self._pending_events
+                self._pending_events = ()
+                fresh = [event for event in pending if event.seq >= next_seq]
+                if fresh:
+                    next_seq = fresh[-1].seq + 1
+                    sink(fresh)
+                    if (
+                        any(event.type == "run.completed" for event in fresh)
+                        and not self._cursor.last_read_had_incomplete_trailing_line
+                    ):
+                        return
+            while True:
+                try:
+                    events = await asyncio.to_thread(self._cursor.read, live=True)
+                except (OSError, ValueError) as exc:
+                    # A malformed middle/trailing line is not a transient
+                    # partial write. Stop visibly; the cursor remains strict.
+                    self._set_error(f"event log: {exc}", stop=True)
+                    break
+
+                incomplete = self._cursor.last_read_had_incomplete_trailing_line
+                fresh = [event for event in events if event.seq >= next_seq]
+                if fresh:
+                    next_seq = fresh[-1].seq + 1
+                    sink(fresh)
+
+                if incomplete:
+                    if self._mark_incomplete() or not self.follow:
+                        break
+                    await asyncio.sleep(self.poll_interval)
+                    continue
+
+                self._clear_incomplete()
+                if fresh and any(event.type == "run.completed" for event in fresh):
+                    break
+                if not self.follow:
+                    break
+                await asyncio.sleep(self.poll_interval)
+        finally:
+            self._finished.set()
+
+
+__all__ = [
+    "DEFAULT_MAX_GAP_S",
+    "EventSink",
+    "EventSource",
+    "LiveSource",
+    "MAX_SPEED",
+    "MIN_SPEED",
+    "ReplayOptions",
+    "ReplaySource",
+    "ReplayTargetNotFound",
+    "fast_forward_index",
+    "generation_start_index",
+]
