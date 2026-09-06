@@ -1,10 +1,10 @@
 # OCCAM
+### Build the team. Measure every role. Remove what does not matter.
 
 [![Watch the OCCAM demo](https://img.youtube.com/vi/uBUagVFSZSg/hqdefault.jpg)](https://www.youtube.com/watch?v=uBUagVFSZSg)
 
-**[Watch the OCCAM demo →](https://www.youtube.com/watch?v=uBUagVFSZSg)**
+**[Watch the demo](https://www.youtube.com/watch?v=uBUagVFSZSg)**
 
-### Build the team. Measure every role. Remove what does not matter.
 
 ## Inspiration
 
