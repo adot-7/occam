@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from occam.store.reader import EventReader
+from occam.store.reader import EventCursor, EventReader
 from occam.store.writer import EventWriter
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +63,12 @@ def _log_event(message: str) -> dict[str, object]:
         "type": "log",
         "data": {"level": "info", "message": message},
     }
+
+
+def _event_line(payload: dict[str, object]) -> bytes:
+    return (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
 
 
 def test_occam_store_imports_in_a_fresh_interpreter_on_this_platform() -> None:
@@ -249,3 +255,179 @@ def test_reader_rejects_corruption_in_the_middle_of_a_log(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="line 2"):
         EventReader(run_dir).read(live=True, retries=3, retry_interval=0)
+
+
+def test_event_cursor_parses_partial_appends_without_replaying_the_prefix(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "cursor_chunks"
+    run_dir.mkdir()
+    with EventWriter(run_dir, run_id="cursor_test") as writer:
+        writer.append(_log_event("first"))
+
+    cursor = EventCursor(run_dir)
+    initial = cursor.read(live=True, retries=0)
+    assert [event.seq for event in initial] == [0]
+
+    line = _event_line(
+        {
+            "ts": "2026-09-06T00:00:01Z",
+            "run_id": "cursor_test",
+            "seq": 1,
+            "type": "log",
+            "data": {"level": "info", "message": "second"},
+        }
+    )
+    split_at = len(line) // 2
+    with (run_dir / "events.jsonl").open("ab") as handle:
+        handle.write(line[:split_at])
+        handle.flush()
+
+    assert cursor.read(live=True, retries=0) == []
+    assert cursor.last_read_had_incomplete_trailing_line
+    assert cursor.last_read_bytes == split_at
+    assert cursor.events_parsed == 1
+
+    with (run_dir / "events.jsonl").open("ab") as handle:
+        handle.write(line[split_at:])
+        handle.flush()
+
+    completed = cursor.read(live=True, retries=0)
+    assert [event.seq for event in completed] == [1]
+    assert not cursor.last_read_had_incomplete_trailing_line
+    assert cursor.last_read_bytes == len(line) - split_at
+    assert cursor.events_parsed == 2
+    assert cursor.read(live=True, retries=0) == []
+    assert cursor.last_read_bytes == 0
+
+
+def test_event_cursor_retries_a_partial_append_until_the_line_is_complete(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "cursor_retry"
+    run_dir.mkdir()
+    with EventWriter(run_dir, run_id="cursor_test") as writer:
+        writer.append(_log_event("first"))
+
+    cursor = EventCursor(run_dir)
+    cursor.read(live=True, retries=0)
+    line = _event_line(
+        {
+            "ts": "2026-09-06T00:00:01Z",
+            "run_id": "cursor_test",
+            "seq": 1,
+            "type": "log",
+            "data": {"level": "info", "message": "second"},
+        }
+    )
+    split_at = len(line) // 2
+    with (run_dir / "events.jsonl").open("ab") as handle:
+        handle.write(line[:split_at])
+        handle.flush()
+
+    def finish_append() -> None:
+        time.sleep(0.03)
+        with (run_dir / "events.jsonl").open("ab") as handle:
+            handle.write(line[split_at:])
+            handle.flush()
+
+    finisher = threading.Thread(target=finish_append)
+    finisher.start()
+    try:
+        completed = cursor.read(live=True, retries=20, retry_interval=0.01)
+    finally:
+        finisher.join()
+
+    assert [event.seq for event in completed] == [1]
+    assert not cursor.last_read_had_incomplete_trailing_line
+    assert cursor.events_parsed == 2
+
+
+def test_event_cursor_idle_poll_budget_is_constant_after_231_event_prefix() -> None:
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "demo_run1"
+    cursor = EventCursor(fixture)
+    events = cursor.read(live=True, retries=0)
+    prefix_bytes = cursor.bytes_read
+
+    for _ in range(32):
+        assert cursor.read(live=True, retries=0) == []
+        assert cursor.last_read_bytes == 0
+        assert cursor.last_read_events == 0
+
+    assert len(events) == 231
+    assert cursor.bytes_read == prefix_bytes
+    assert cursor.events_parsed == 231
+
+
+def test_event_cursor_rejects_truncation_instead_of_resetting(tmp_path: Path) -> None:
+    run_dir = tmp_path / "cursor_truncated"
+    run_dir.mkdir()
+    source = Path(__file__).resolve().parents[1] / "fixtures" / "demo_run1" / "events.jsonl"
+    (run_dir / "events.jsonl").write_bytes(source.read_bytes())
+    cursor = EventCursor(run_dir)
+    cursor.read(live=True, retries=0)
+
+    path = run_dir / "events.jsonl"
+    path.write_bytes(path.read_bytes()[: cursor.offset // 2])
+    with pytest.raises(ValueError, match="truncated"):
+        cursor.read(live=True, retries=0)
+
+
+def test_event_cursor_rejects_replacement_instead_of_resetting(tmp_path: Path) -> None:
+    run_dir = tmp_path / "cursor_replaced"
+    run_dir.mkdir()
+    source = Path(__file__).resolve().parents[1] / "fixtures" / "demo_run1" / "events.jsonl"
+    path = run_dir / "events.jsonl"
+    path.write_bytes(source.read_bytes())
+    cursor = EventCursor(run_dir)
+    cursor.read(live=True, retries=0)
+
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(source.read_bytes())
+    os.replace(replacement, path)
+    with pytest.raises(ValueError, match="replaced"):
+        cursor.read(live=True, retries=0)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [("seq", 2, "expected 1"), ("run_id", "other", "changes run_id")],
+)
+def test_event_cursor_keeps_sequence_and_run_id_checks_across_chunks(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    run_dir = tmp_path / f"cursor_{field}"
+    run_dir.mkdir()
+    with EventWriter(run_dir, run_id="cursor_test") as writer:
+        writer.append(_log_event("first"))
+    cursor = EventCursor(run_dir)
+    cursor.read(live=True, retries=0)
+
+    payload: dict[str, object] = {
+        "ts": "2026-09-06T00:00:01Z",
+        "run_id": "cursor_test",
+        "seq": 1,
+        "type": "log",
+        "data": {"level": "info", "message": "second"},
+    }
+    payload[field] = value
+    with (run_dir / "events.jsonl").open("ab") as handle:
+        handle.write(_event_line(payload))
+
+    with pytest.raises(ValueError, match=message):
+        cursor.read(live=True, retries=0)
+
+
+def test_event_cursor_preserves_strict_middle_corruption_on_initial_read(tmp_path: Path) -> None:
+    run_dir = tmp_path / "cursor_corruption"
+    run_dir.mkdir()
+    with EventWriter(run_dir, run_id="cursor_test") as writer:
+        writer.append(_log_event("first"))
+    with (run_dir / "events.jsonl").open("ab") as handle:
+        handle.write(b"not-json\n")
+
+    with pytest.raises(ValueError, match="line 2"):
+        EventCursor(run_dir).read(live=True, retries=0)

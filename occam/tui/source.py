@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from occam.core.models import Event, State
-from occam.store.reader import EventReader
+from occam.store.reader import EventCursor, EventReader
 
 EventSink = Callable[[Sequence[Event]], None]
 
@@ -284,11 +284,13 @@ class LiveSource(EventSource):
         self.follow = follow
         self.incomplete_timeout_s = incomplete_timeout_s
         self._reader = EventReader(self.run_dir)
+        self._cursor = EventCursor(self.run_dir)
         if not self._reader.events_path.exists() and not self._reader.state_path.exists():
             raise FileNotFoundError(f"event log not found: {self._reader.events_path}")
         self._finished = asyncio.Event()
         self._start_seq = 0
         self._initial_events: tuple[Event, ...] = ()
+        self._pending_events: tuple[Event, ...] = ()
         self._status: str | None = None
         self._incomplete_since: float | None = None
         self._stop_on_error = False
@@ -340,15 +342,16 @@ class LiveSource(EventSource):
             return None
         self._start_seq = max(0, state.last_seq + 1)
         self._initial_events = ()
+        self._pending_events = ()
         if self._reader.events_path.exists():
             try:
-                self._initial_events = tuple(self._reader.read(live=True))
+                self._initial_events = tuple(self._cursor.read(live=True))
             except (OSError, ValueError) as exc:
                 # Keep the snapshot available for first paint, but make the
                 # malformed log visible and let ``run`` finish the status path.
                 self._set_error(f"event log: {exc}", stop=True)
             else:
-                if self._reader.last_read_had_incomplete_trailing_line:
+                if self._cursor.last_read_had_incomplete_trailing_line:
                     self._mark_incomplete()
                 elif not self._initial_events and state.last_seq >= 0:
                     self._set_error("state snapshot is ahead of an empty event log", stop=True)
@@ -358,6 +361,9 @@ class LiveSource(EventSource):
                         f"{self._initial_events[-1].seq}",
                         stop=True,
                     )
+                self._pending_events = tuple(
+                    event for event in self._initial_events if event.seq >= self._start_seq
+                )
 
         if (
             state.completed
@@ -387,16 +393,28 @@ class LiveSource(EventSource):
         # truth and playback starts at zero.
         next_seq = self._start_seq
         try:
+            if self._pending_events:
+                pending = self._pending_events
+                self._pending_events = ()
+                fresh = [event for event in pending if event.seq >= next_seq]
+                if fresh:
+                    next_seq = fresh[-1].seq + 1
+                    sink(fresh)
+                    if (
+                        any(event.type == "run.completed" for event in fresh)
+                        and not self._cursor.last_read_had_incomplete_trailing_line
+                    ):
+                        return
             while True:
                 try:
-                    events = await asyncio.to_thread(self._reader.read, live=True)
+                    events = await asyncio.to_thread(self._cursor.read, live=True)
                 except (OSError, ValueError) as exc:
                     # A malformed middle/trailing line is not a transient
-                    # partial write. Stop visibly; EventReader remains strict.
+                    # partial write. Stop visibly; the cursor remains strict.
                     self._set_error(f"event log: {exc}", stop=True)
                     break
 
-                incomplete = self._reader.last_read_had_incomplete_trailing_line
+                incomplete = self._cursor.last_read_had_incomplete_trailing_line
                 fresh = [event for event in events if event.seq >= next_seq]
                 if fresh:
                     next_seq = fresh[-1].seq + 1
