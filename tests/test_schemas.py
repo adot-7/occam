@@ -321,6 +321,49 @@ def test_full_repeat_matches_the_configured_ablation_subset() -> None:
                 assert disagreements / len(repeat_cases) == 0.10
 
 
+def _event_position(events, generation: int, event_type: str, **fields: object) -> int:
+    return next(
+        index
+        for index, event in enumerate(events)
+        if event.type == event_type
+        and event.data.get("generation") == generation
+        and all(event.data.get(key) == value for key, value in fields.items())
+    )
+
+
+def test_fixture_generation_events_follow_the_canonical_ablation_order() -> None:
+    """Noise is measured before the optional baseline and ablation table."""
+
+    for fixture in FIXTURES:
+        events = EventReader(fixture).read()
+        generations = sorted(
+            {event.data["generation"] for event in events if "generation" in event.data}
+        )
+        for generation in generations:
+            full_completed = _event_position(
+                events, generation, "execution.completed", variant="full"
+            )
+            repeat_started = _event_position(
+                events, generation, "execution.started", variant="full_repeat"
+            )
+            repeat_completed = _event_position(
+                events, generation, "execution.completed", variant="full_repeat"
+            )
+            baseline = _event_position(events, generation, "baseline.completed")
+            ablation_started = _event_position(events, generation, "ablation.started")
+            ablation_completed = _event_position(events, generation, "ablation.completed")
+            metrics = _event_position(events, generation, "metrics.snapshot")
+            rows = [
+                index
+                for index, event in enumerate(events)
+                if event.type == "ablation.role" and event.data.get("generation") == generation
+            ]
+
+            assert full_completed < repeat_started < repeat_completed < baseline
+            assert baseline < ablation_started < ablation_completed < metrics
+            assert all(ablation_started < row < ablation_completed for row in rows)
+
+
 def test_noise_floor_is_consistent_across_ablation_started_and_metrics() -> None:
     """One noise floor, three places it shows up, all of which must agree.
 
