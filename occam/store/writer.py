@@ -2,19 +2,50 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
+import sys
 import tempfile
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from occam.core.models import Event
 from occam.store.reader import EventReader
 from occam.store.reducer import reduce, state_json_bytes
 from occam.store.schema import validate_event, validate_state
+
+if sys.platform == "win32":  # pragma: no cover - platform specific
+    import msvcrt
+
+    def _lock(handle: IO[str]) -> None:
+        """Take an exclusive lock on the first byte of the lock file."""
+
+        handle.seek(0)
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                # LK_LOCK gives up after ~10s; keep waiting like flock does.
+                time.sleep(0.05)
+
+    def _unlock(handle: IO[str]) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:  # pragma: no cover - platform specific
+    import fcntl
+
+    def _lock(handle: IO[str]) -> None:
+        """Take an exclusive lock on the whole lock file."""
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+    def _unlock(handle: IO[str]) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class EventWriter:
@@ -89,11 +120,11 @@ class EventWriter:
 
         if self._closed:
             raise ValueError("event writer is closed")
-        fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+        _lock(self._lock_handle)
         try:
             yield
         finally:
-            fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
+            _unlock(self._lock_handle)
 
     def write(self, event: Event | Mapping[str, Any]) -> Event:
         """Compatibility alias for callers that use ``write``."""

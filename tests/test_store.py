@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +16,28 @@ import pytest
 from occam.store.reader import EventReader
 from occam.store.writer import EventWriter
 
+# One process's worth of appends, run in a real subprocess so the writer's file
+# lock is exercised across processes rather than across threads of one process.
+_APPENDER = """
+import sys
+
+from occam.store.writer import EventWriter
+
+run_dir, run_id, worker, count = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+writer = EventWriter(run_dir, run_id=run_id)
+try:
+    for index in range(count):
+        writer.append(
+            {
+                "ts": "2026-09-05T00:00:00Z",
+                "type": "log",
+                "data": {"level": "info", "message": f"{worker}-{index}"},
+            }
+        )
+finally:
+    writer.close()
+"""
+
 
 def _log_event(message: str) -> dict[str, object]:
     return {
@@ -20,6 +45,66 @@ def _log_event(message: str) -> dict[str, object]:
         "type": "log",
         "data": {"level": "info", "message": message},
     }
+
+
+def test_occam_store_imports_in_a_fresh_interpreter_on_this_platform() -> None:
+    """``occam.store`` must import everywhere the engine and TUI run.
+
+    A fresh interpreter is the point: an already-imported module would hide a
+    top-level platform-only import, which is exactly how a POSIX-only ``fcntl``
+    import reached main and made three test modules uncollectable on Windows.
+    """
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import occam.store; print(occam.store.EventWriter.__name__)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "EventWriter"
+
+
+def test_concurrent_processes_append_without_interleaving_or_corruption(tmp_path: Path) -> None:
+    """Two processes appending at once must produce one clean, ordered log.
+
+    Threads share the writer's lock handle; separate processes do not, so this
+    is the case the file lock actually exists for.
+    """
+
+    run_dir = tmp_path / "cross_process"
+    run_dir.mkdir()
+    script = tmp_path / "appender.py"
+    script.write_text(textwrap.dedent(_APPENDER), encoding="utf-8")
+    per_worker = 8
+
+    processes = [
+        subprocess.Popen(
+            [sys.executable, str(script), str(run_dir), "concurrent_test", worker, str(per_worker)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for worker in ("alpha", "beta")
+    ]
+    for process in processes:
+        _, stderr = process.communicate(timeout=120)
+        assert process.returncode == 0, stderr
+
+    lines = (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2 * per_worker
+    # Every line is whole: no torn or interleaved writes.
+    payloads = [json.loads(line) for line in lines]
+    assert [payload["seq"] for payload in payloads] == list(range(2 * per_worker))
+    assert {payload["data"]["message"] for payload in payloads} == {
+        f"{worker}-{index}" for worker in ("alpha", "beta") for index in range(per_worker)
+    }
+
+    events = EventReader(run_dir).read()
+    assert [event.seq for event in events] == list(range(2 * per_worker))
+    assert json.loads((run_dir / "state.json").read_text(encoding="utf-8"))["last_seq"] == (
+        2 * per_worker - 1
+    )
 
 
 def test_preopened_writers_allocate_distinct_sequences(tmp_path: Path) -> None:
