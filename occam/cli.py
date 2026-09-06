@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
+from occam.memory.lessons import LessonStore, LessonStoreError
 from occam.store.reader import EventReader
 from occam.store.reducer import reduce, state_json_bytes
 from occam.store.schema import validate_state
@@ -27,12 +28,46 @@ app = typer.Typer(
     help="Occam architecture engineering tools.",
 )
 llm_app = typer.Typer(add_completion=False, help="LLM provider utilities.")
+lessons_app = typer.Typer(add_completion=False, help="Read and reset learned lessons.")
 app.add_typer(llm_app, name="llm")
+app.add_typer(lessons_app, name="lessons")
 
 
 @app.callback()
 def _root() -> None:
     """Group Occam's subcommands."""
+
+
+@lessons_app.command("show")
+def lessons_show(
+    memory: Annotated[
+        Path,
+        typer.Option("--memory", help="Memory namespace containing lessons.jsonl."),
+    ],
+) -> None:
+    """Print the deterministic Markdown view of a lesson namespace."""
+
+    try:
+        markdown = LessonStore(memory).show()
+    except LessonStoreError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--memory") from exc
+    typer.echo(markdown, nl=False)
+
+
+@lessons_app.command("reset")
+def lessons_reset(
+    memory: Annotated[
+        Path,
+        typer.Option("--memory", help="Memory namespace containing lessons.jsonl."),
+    ],
+) -> None:
+    """Clear exactly one lesson namespace for a clean run."""
+
+    try:
+        removed = LessonStore(memory).reset()
+    except LessonStoreError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--memory") from exc
+    typer.echo(f"reset {memory}: removed {removed} lesson(s)")
 
 
 @app.command("validate")

@@ -29,6 +29,8 @@ All notable changes to Occam are documented here.
   trace, the event log, or a fixture.
 - WP-04 `fan_out`, the in-role multi-agent primitive: bounded concurrency, results in
   subtask order, one failing branch does not fail the batch.
+- WP-06 architect, immutable mutation lineage, and validated JSONL/Markdown lessons
+  memory, including `occam lessons show|reset`.
 - WP-07 read-only Textual shell (`occam/tui/`): header, lineage tree, diagnosis
   feed, layout skeleton, keymap, palette, and `update_view` panel seams for WP-09.
 - WP-07 replay driver: `occam replay <run_dir> [--speed] [--to-gen] [--at] [--pause]`

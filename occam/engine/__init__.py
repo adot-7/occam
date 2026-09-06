@@ -1,5 +1,13 @@
-"""Engine modules. The DAG executor lands in WP-05; the rest follow it."""
+"""Engine modules shared by architecture proposal and execution."""
 
+from occam.engine.architect import (
+    ARCHITECT_MODEL_KEY,
+    DOMAIN_RULE_HEADING,
+    Architect,
+    ArchitectContext,
+    ArchitectError,
+    propose_architecture,
+)
 from occam.engine.executor import (
     ArchitectureError,
     CycleError,
@@ -14,14 +22,40 @@ from occam.engine.executor import (
     validate_architecture,
     wilson_ci,
 )
+from occam.engine.mutate import (
+    PRUNABLE_VERDICTS,
+    Mutation,
+    MutationApplication,
+    MutationError,
+    MutationType,
+    apply_architecture_mutation,
+    apply_mutation,
+    mutate,
+    revert_mutation,
+)
 
 __all__ = [
+    "ARCHITECT_MODEL_KEY",
     "ArchitectureError",
+    "Architect",
+    "ArchitectContext",
+    "ArchitectError",
     "CycleError",
+    "DOMAIN_RULE_HEADING",
     "Executor",
     "ExecutorError",
     "ToolBinding",
+    "Mutation",
+    "MutationApplication",
+    "MutationError",
+    "MutationType",
+    "PRUNABLE_VERDICTS",
+    "apply_architecture_mutation",
+    "apply_mutation",
     "descendants",
+    "mutate",
+    "propose_architecture",
+    "revert_mutation",
     "normalize_registry",
     "resolve_grader",
     "sentinel_for",
