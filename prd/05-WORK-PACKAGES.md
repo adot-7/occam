@@ -9,7 +9,7 @@ Two humans (H1 engine, H2 data + TUI) plus AO workers. One WP = one AO session =
 ### WP-01b — Schema patch for v3  **[H1, ≤1h, first]**
 Add `Lesson` model; events `lesson.written`, `reliability.completed`; fields `run.started.{run_name,memory_ns,lessons_loaded}`, `metrics.snapshot.{tool_calls_per_case,reliability_pass3}`, `CaseResult.sub_results`. Extend `fixtures/demo_run` → **two fixtures**: `fixtures/demo_run1` (5 gens, holiday failures at g0, witness prune, 2 lessons written, pass³) and `fixtures/demo_run2` (lessons loaded, g0 mostly passing, plateau at g1, compare.json). Hand-authored; realistic numbers from `08`.
 - [ ] Both fixtures validate; reducer deterministic
-- [ ] `occam replay fixtures/demo_run2` header shows `lessons loaded 2`
+- [ ] `occam replay fixtures/demo_run2` header shows `lessons loaded 3`
 
 ### WP-02 — LLM layer  **[H1, ≤1.5h]** (unchanged from v1)
 `models.yaml` with `worker_fast` (TensorMux GLM-4.7-Flash), `worker_alt` (GPT-5 nano), `architect` (Sonnet 5). Cache, rate limiter, cost accounting incl. list-rate-equivalent.

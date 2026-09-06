@@ -4,12 +4,6 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 
 ## Unresolved (as of 2026-09-06 04:00 IST)
 
-### 2026-09-06 — WP-01b fixture and design-reference ambiguities
-
-- **Run-2 lesson count:** WP-01b acceptance says `fixtures/demo_run2` should show `lessons loaded 2`, while `prd/08-END-TO-END-WALKTHROUGH.md` says `run.started.lessons_loaded` is 3 and the run-2 comparison reports `3 / 0`. Which count should the canonical fixture and acceptance tests use?
-- **Design reference filename:** the task request names `design/figma-v2.png`, but `main` contains `design/figma.png`. Should the existing filename remain authoritative, or is a rename/addition expected? This WP will not modify design files.
-- **Benchmark citation discrepancy:** the v3 instructions say SMFR/BFCL/MGSM/Dodo benchmark references are gone, but `prd/07-CITATIONS.md` still contains SMFR, BFCL, and MGSM references. Should the v3 instruction or the existing citations file be treated as authoritative? This WP will not alter `prd/07`.
-
 - **TensorMux rate limit** — still unpublished. Start at rpm 60, raise if no 429s.
 - **List-rate equivalent for GLM-4.7-Flash.** TensorMux publishes no rate card (`/pricing` 404). Using Cloudflare Workers AI's resale price ($0.06/$0.40 per MTok) as the labelled equivalent. If TensorMux gives a number, replace it in one place (`models.yaml`).
 - **Sonnet 5 price** — Anthropic pages contradict ($2/$10 vs $3/$15 from Sept 1 2026). Immaterial to the demo (few architect calls); recheck before quoting publicly.
@@ -19,6 +13,11 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 - **GLM thinking toggle.** Test whether `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` (vLLM convention) or `extra_body={"thinking": {"type": "disabled"}}` (Z.ai convention) suppresses the `reasoning` field through TensorMux. If either works, expose it as a per-role flag `thinking: on|off` — a cheap, honest cost/latency lever (and optionally a mutation type `set_thinking`).
 
 ## Resolved
+- **2026-09-06 — WP-01b fixture and design-reference decisions:**
+  - **Run-2 lesson count:** resolved to 3, matching `prd/08-END-TO-END-WALKTHROUGH.md` and lessons L1, D1, and L2. The WP-01b acceptance wording of 2 is corrected; the canonical fixture and acceptance evidence use 3.
+  - **Design reference filename:** resolved to `design/figma.png`; it is the intended visual target and there is no missing `figma-v2` asset. No design file was changed.
+  - **Benchmark citation discrepancy:** SMFR, BFCL, and MGSM entries in `prd/07-CITATIONS.md` intentionally remain as research foundation, not active benchmarks. The citations file was left unchanged.
+
 - **Neatlogs end-to-end: CONFIRMED 2026-09-06 05:32** on 1.4.21 — `case.smoke` (WORKFLOW) → `tool.fx_rate` (TOOL, manual, 25µs) → auto-captured `glm-4-7-flash` LLM span with token count. Manual spans nest under auto-instrumented ones with no extra wiring. `flush()` returned True.
 - **GLM-4.7-Flash reasons before answering.** With `max_tokens=5` the response `content` was `None` — the budget went to the hidden `reasoning` field. Rules for the executor: (1) never set `max_tokens` below ~1024 for worker roles (use 2048 default); (2) if `content` is None/empty and `reasoning` is present and `finish_reason == "length"`, treat as TRUNCATED, not as an empty answer — retry once with a larger budget, then fail the case; (3) cost = `usage.completion_tokens` verbatim (includes reasoning).
 - **TensorMux native tool calling: CONFIRMED 2026-09-06 05:20** with the real key — vLLM backend (`vllm-0.25.1`), OpenAI-shaped `tools`, response has `tool_calls[0].function.{name,arguments}` (arguments is a JSON string), `finish_reason: "tool_calls"`, full `usage` block. Executor uses native tools. **Note:** the model also returns a `reasoning` field; its tokens are billed inside `completion_tokens` (152 tokens for a one-line tool call) — cost accounting must use `usage.completion_tokens` as-is, not count visible output.

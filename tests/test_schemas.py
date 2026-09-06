@@ -113,6 +113,17 @@ def test_core_architecture_model_matches_fixture_contract() -> None:
     assert architecture.control == "deterministic"
 
 
+def test_run2_acceptance_evidence_records_three_loaded_lessons() -> None:
+    compare = json.loads((RUN2 / "compare.json").read_text(encoding="utf-8"))
+    assert compare["run2"]["lessons_loaded"] == 3
+    state = reduce(EventReader(RUN2).read())
+    assert [lesson.id for lesson in state.lessons_loaded] == [
+        "lesson_fx_rate_date",
+        "lesson_bank_fee",
+        "lesson_fx_series",
+    ]
+
+
 def test_metrics_snapshot_has_the_complete_metrics_contract() -> None:
     metrics_event = next(event for event in EventReader(RUN1) if event.type == "metrics.snapshot")
     metrics = MetricsSnapshot.model_validate(metrics_event.data)
