@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
-from occam.memory.lessons import LessonStore, LessonStoreError
 # Initialize before importing any command implementation that could construct
 # an OpenAI provider.  The provider itself remains lazy for library users.
 from occam.llm.tracing import initialize as initialize_tracing
 from occam.llm.tracing import shutdown as shutdown_tracing
+from occam.memory.lessons import LessonStore, LessonStoreError
 from occam.store.reader import EventReader
 from occam.store.reducer import reduce, state_json_bytes
 from occam.store.schema import validate_state
