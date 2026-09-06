@@ -17,6 +17,8 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Occam architecture engineering tools.",
 )
+llm_app = typer.Typer(add_completion=False, help="LLM provider utilities.")
+app.add_typer(llm_app, name="llm")
 
 
 @app.callback()
@@ -59,6 +61,64 @@ def validate_run(
         f"deterministic: yes ({len(first_bytes)} state bytes; "
         f"derived state schema validated; {snapshot_message})"
     )
+
+
+@llm_app.command("ping")
+def llm_ping(
+    model_key: Annotated[str, typer.Argument(help="Configured model key to probe")],
+) -> None:
+    """Make a completion and verify native function calling for one model."""
+
+    # Keep this import inside the command.  Provider modules import their SDKs
+    # lazily so WP-15 can initialise Neatlogs before openai is imported.
+    from occam.llm import LLMClient, LLMError, MissingCredentialsError, load_model_configs
+
+    try:
+        configs = load_model_configs()
+        if model_key not in configs:
+            available = ", ".join(sorted(configs))
+            raise typer.BadParameter(f"unknown model key {model_key!r}; choose from {available}")
+        config = configs[model_key]
+        client = LLMClient(configs)
+        completion = client.complete(
+            model_key,
+            [{"role": "user", "content": "Call ping_tool with value 'ok'."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ping_tool",
+                        "description": "A no-op health check function.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                            "required": ["value"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+        )
+    except MissingCredentialsError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except LLMError as exc:
+        typer.echo(f"LLM ping failed: {type(exc).__name__}", err=True)
+        raise typer.Exit(code=2) from exc
+    except (OSError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(f"model: {model_key} ({config.model})")
+    typer.echo(
+        f"completion: ok; tokens_in={completion.tokens_in}; "
+        f"tokens_out={completion.tokens_out}; cost_usd={completion.cost_usd:.8f}; "
+        f"cost_basis={completion.cost_label}; cached={completion.cached}"
+    )
+    if not completion.tool_calls:
+        typer.echo("native_tool_calls: no", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"native_tool_calls: yes ({len(completion.tool_calls)})")
 
 
 def main() -> None:
