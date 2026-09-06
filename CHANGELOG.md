@@ -23,9 +23,10 @@ All notable changes to Occam are documented here.
   `(ToolSpec, callable)` pairs, with deliberately plain base descriptions, the
   architect-time `tool_note` append hook, and per-call latency/bytes/status/cached
   accounting for successful and failed calls alike.
-- WP-04 `python_exec` sandbox: isolated subprocess, wall-clock timeout, neutered
-  sockets, an allow-list import guard, and an environment allow-list so the child
-  cannot read the engine's API keys into a trace, the event log, or a fixture.
+- WP-04 `python_exec` calculation surface: isolated subprocess, wall-clock
+  timeout, a strict AST capability evaluator, and an explicit environment
+  allow-list so submitted calculations cannot read the engine's API keys into a
+  trace, the event log, or a fixture.
 - WP-04 `fan_out`, the in-role multi-agent primitive: bounded concurrency, results in
   subtask order, one failing branch does not fail the batch.
 

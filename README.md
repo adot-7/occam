@@ -6,9 +6,10 @@ The FX calculator's `python_exec` tool runs in a short-lived child with a
 sanitized environment, bounded timeout/output, and an AST capability evaluator.
 Submitted source is parsed and interpreted; it is never compiled or executed as
 Python. The evaluator exposes only the arithmetic, `Decimal`, date/time, JSON,
-and small standard-library capabilities used by the task. Filesystem, process,
-network, import, builtin, callable, and interpreter-introspection capabilities
-are absent, so unsupported routes fail closed before they can run. CPython may
+and small standard-library capabilities used by the task. Filesystem-, process-,
+and network-capable modules or builtins, arbitrary callable dispatch, and
+interpreter introspection are absent, so unsupported routes fail closed before
+they can run. CPython may
 synthesize `LC_CTYPE` while starting a POSIX child; that key is not passed
 through by Occam and is not an application secret.
 

@@ -6,8 +6,9 @@ allow-listed AST; it never compiles or executes the submitted Python.  It gets
 an explicit environment allow-list and capability wrappers for Decimal, JSON,
 date/time, math, and ordinary arithmetic.  Timeout, bounded output, a
 temporary working directory, and strict value/step limits remain defense in
-depth.  There are no user-visible modules, builtins, Python frames, or
-callable objects that could reach the filesystem, a process, or the network.
+depth.  The user-visible modules, builtins, Python frames, and callable
+wrappers are capability-limited; none can reach the filesystem, a process, or
+the network.
 
 The boundary is not perfect host isolation.  This module must not be described
 as safe for arbitrary hostile Python: unsupported syntax is rejected, but a
