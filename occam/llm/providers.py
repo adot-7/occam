@@ -457,11 +457,13 @@ class AnthropicProvider:
         temperature: float = 0.0,
     ) -> ProviderResponse:
         system, converted_messages = _anthropic_messages(messages)
+        # Current Anthropic models (e.g. claude-sonnet-5) removed sampling
+        # controls; temperature/top_p/top_k return HTTP 400. `temperature`
+        # stays in the signature so callers are unchanged, but is not sent.
         request: dict[str, Any] = {
             "model": config.model,
             "max_tokens": max_tokens,
             "messages": converted_messages,
-            "temperature": temperature,
         }
         if system:
             request["system"] = system

@@ -457,11 +457,68 @@ def test_anthropic_adapter_maps_system_tools_and_native_tool_use() -> None:
     )
 
     assert requests[0]["system"] == "system"
-    assert requests[0]["temperature"] == 0.0
+    assert "temperature" not in requests[0]
     assert requests[0]["tools"][0]["input_schema"] == {"type": "object"}
     assert requests[0]["tool_choice"] == {"type": "auto"}
     assert result.tool_calls[0]["function"]["name"] == "fx_rate"
     assert result.tokens_out == 4
+
+
+def test_anthropic_provider_never_sends_sampling_params() -> None:
+    # Current Anthropic models (e.g. claude-sonnet-5) reject temperature,
+    # top_p, and top_k with HTTP 400 - the adapter must never send them.
+    requests: list[dict[str, Any]] = []
+
+    class Messages:
+        def create(self, **request: Any) -> Any:
+            requests.append(request)
+            return {
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+
+    provider = AnthropicProvider(client=SimpleNamespace(messages=Messages()))
+    provider.complete(
+        _config(provider="anthropic"),
+        [{"role": "user", "content": "hello"}],
+        tools=None,
+        response_schema=None,
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    assert "temperature" not in requests[0]
+    assert "top_p" not in requests[0]
+    assert "top_k" not in requests[0]
+
+
+def test_openai_compatible_provider_still_sends_temperature_zero() -> None:
+    # The worker lane (TensorMux/GLM, gpt-5-nano) is OpenAI-shaped and still
+    # accepts and requires temperature 0 for determinism.
+    requests: list[dict[str, Any]] = []
+
+    class Completions:
+        def create(self, **request: Any) -> Any:
+            requests.append(request)
+            return {
+                "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }
+
+    provider = OpenAICompatibleProvider(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    )
+    provider.complete(
+        _config(),
+        [{"role": "user", "content": "hello"}],
+        tools=None,
+        response_schema=None,
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    assert requests[0]["temperature"] == 0.0
 
 
 def test_anthropic_adapter_preserves_multi_turn_text_and_correlated_tool_blocks() -> None:
@@ -582,7 +639,7 @@ def test_anthropic_provider_sends_native_json_schema_payload() -> None:
         max_tokens=2048,
     )
 
-    assert requests[0]["temperature"] == 0.0
+    assert "temperature" not in requests[0]
     assert requests[0]["output_config"] == {"format": {"type": "json_schema", "schema": schema}}
     assert "response_format" not in requests[0]
 
