@@ -180,6 +180,12 @@ class OpenAICompatibleProvider:
         self._clients: dict[tuple[str | None, str], Any] = {}
 
     def _client_for(self, config: ModelConfig) -> Any:
+        # Initialize before either a supplied factory or the SDK import can
+        # construct an OpenAI-compatible client.  A preconstructed client is
+        # returned unchanged because it cannot be instrumented retroactively.
+        from occam.llm.tracing import initialize
+
+        initialize()
         if self._client is not None:
             return self._client
         if self._client_factory is not None:

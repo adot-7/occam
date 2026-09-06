@@ -5,6 +5,17 @@ intentional: WP-15 initialises Neatlogs before importing ``openai`` so that its
 automatic instrumentation can see the SDK import.
 """
 
+# This import must stay ahead of the provider imports below.  It initializes
+# Neatlogs (when configured) before the provider's lazy ``openai`` import.
+from occam.llm.tracing import (  # noqa: I001
+    flush,
+    initialize,
+    is_enabled,
+    set_span_attributes,
+    shutdown,
+    span,
+    trace_context,
+)
 from occam.llm.cache import DiskCache
 from occam.llm.client import (
     Completion,
@@ -44,6 +55,9 @@ __all__ = [
     "ConfigurationError",
     "CostBreakdown",
     "DiskCache",
+    "flush",
+    "initialize",
+    "is_enabled",
     "LLMClient",
     "LLMError",
     "MissingCredentialsError",
@@ -54,6 +68,10 @@ __all__ = [
     "ProviderError",
     "ProviderResponse",
     "RetryPolicy",
+    "set_span_attributes",
+    "shutdown",
+    "span",
+    "trace_context",
     "TruncatedCompletionError",
     "complete",
     "calculate_cost",

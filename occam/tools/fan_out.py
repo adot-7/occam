@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 DEFAULT_MAX_WORKERS = 4
 DEFAULT_MAX_SUBTASKS = 16
@@ -54,8 +55,15 @@ def fan_out(
     if not items:
         return []
 
+    # ``Context`` instances cannot be entered concurrently.  Copy the parent
+    # context once per branch, before submitting work, so each worker gets the
+    # caller's tracing metadata and can safely mutate its own context.
+    contexts = [copy_context() for _ in items]
     with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as pool:
-        futures = [pool.submit(runner, item) for item in items]
+        futures = [
+            pool.submit(context.run, runner, item)
+            for context, item in zip(contexts, items, strict=True)
+        ]
         return [_settle(future.result, index) for index, future in enumerate(futures)]
 
 
