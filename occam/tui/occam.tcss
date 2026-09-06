@@ -174,21 +174,40 @@ Tree.view-panel {
 
 #architecture {
     height: 1fr;
-    min-height: 10;
+    min-height: 8;
     background: $bg-panel;
 }
 
 #generation-metrics {
-    height: 12;
-    min-height: 9;
+    height: 10;
+    min-height: 8;
     background: $bg-panel;
 }
 
 #lessons {
     height: 1fr;
-    min-height: 12;
+    min-height: 8;
     background: $bg-panel;
     overflow-y: auto;
+}
+
+Button.lesson-evidence {
+    width: 1fr;
+    height: 2;
+    min-height: 1;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    background: $bg-panel;
+    color: $text;
+    border: none;
+    content-align: left top;
+    text-align: left;
+}
+
+Button.lesson-evidence:focus {
+    background: $bg-selected;
+    color: $text-bright;
+    text-style: bold;
 }
 
 #baseline {

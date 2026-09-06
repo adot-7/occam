@@ -21,17 +21,19 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Static
+from textual.widgets import Button, Static
 
-from occam.core.models import Event, State
+from occam.core.models import Event, Lesson, State
 from occam.tui.feed import StateFeed
 from occam.tui.palette import AMBER, AMBER_HI, CYAN, DIM, FG, FG_BRIGHT, GREEN, RED
 from occam.tui.panels import (
     PANEL_TYPES,
+    CaseSelectionChanged,
     CasesPanel,
     DiagnosisFeed,
     FooterBar,
     HeaderBar,
+    LessonEvidenceRequested,
     LineagePanel,
     ViewPanel,
 )
@@ -96,10 +98,18 @@ class CaseInspector(ModalScreen[None]):
         Binding("escape,q", "dismiss", "close", show=False),
     ]
 
-    def __init__(self, view: RunView, case_id: str, *, highlight: bool = False) -> None:
+    def __init__(
+        self,
+        view: RunView,
+        case_id: str | None,
+        *,
+        lesson: Lesson | None = None,
+        highlight: bool = False,
+    ) -> None:
         super().__init__()
         self.view = view
         self.case_id = case_id
+        self.lesson = lesson
         self.highlight = highlight
 
     def compose(self) -> ComposeResult:
@@ -109,24 +119,62 @@ class CaseInspector(ModalScreen[None]):
         self.query_one("#inspector-body", Static).update(self.render_inspector())
 
     def render_inspector(self) -> Text:
-        case = self.view.case(self.case_id) or {"case_id": self.case_id}
+        case = self.view.case(self.case_id)
         selected = self.view.selected
         text = Text()
         text.append("CASE INSPECTOR", style=f"bold {CYAN}")
         if selected is not None:
             text.append(f"  {selected.label}", style=DIM)
         text.append("\n\n", style=DIM)
-        text.append(f"{self.case_id}  ", style=f"bold {FG_BRIGHT}")
-        passed = bool(case.get("passed"))
-        text.append("PASS\n" if passed else "FAIL\n", style=GREEN if passed else RED)
+        if case is None:
+            text.append("case trace unavailable  ", style=f"bold {AMBER}")
+            text.append("(not present in this run's event projection)\n", style=DIM)
+        else:
+            text.append(f"{self.case_id}  ", style=f"bold {FG_BRIGHT}")
+            passed = bool(case.get("passed"))
+            text.append("PASS\n" if passed else "FAIL\n", style=GREEN if passed else RED)
         text.append(
-            f"cost {_money(case.get('cost_usd'))}  ·  latency {case.get('latency_s', '—')}s\n",
+            f"cost {_money(case.get('cost_usd') if case else None)}  ·  "
+            f"latency {case.get('latency_s', '—') if case else '—'}s\n",
             style=FG,
         )
-        self._append_sub_results(text, case)
-        self._append_optional_payload(text, case)
+        if self.lesson is not None:
+            self._append_lesson_evidence(text, self.lesson, case)
+        if case is not None:
+            self._append_sub_results(text, case)
+            self._append_optional_payload(text, case)
         self._append_tool_trace(text, case)
         return text
+
+    @staticmethod
+    def _append_lesson_evidence(text: Text, lesson: Lesson, case: dict[str, Any] | None) -> None:
+        text.append("\nLESSON EVIDENCE\n", style=f"bold {CYAN}")
+        badge = "tool_note" if lesson.kind == "tool_note" else "domain_rule"
+        text.append(f"{lesson.id}  [{badge}]", style=f"bold {AMBER}")
+        if lesson.tool:
+            text.append(f"  tool={lesson.tool}", style=CYAN)
+        text.append("\n", style=FG)
+        text.append(f"{lesson.text}\n", style=FG)
+        evidence = lesson.evidence if isinstance(lesson.evidence, dict) else {}
+        case_ids = evidence.get("case_ids") or []
+        trace_refs = evidence.get("trace_refs") or []
+        text.append(
+            f"evidence cases  {', '.join(str(item) for item in case_ids) or 'unavailable'}\n",
+            style=FG if case_ids else DIM,
+        )
+        text.append(
+            f"trace refs  {', '.join(str(item) for item in trace_refs) or 'unavailable'}\n",
+            style=FG if trace_refs else DIM,
+        )
+        if case is not None:
+            text.append(f"linked case  {case.get('case_id', 'unavailable')}\n", style=GREEN)
+        elif case_ids:
+            text.append(
+                "linked case trace  unavailable in this run's compact event projection\n",
+                style=DIM,
+            )
+        else:
+            text.append("linked case trace  unavailable (evidence.case_ids absent)\n", style=DIM)
 
     @staticmethod
     def _append_sub_results(text: Text, case: dict[str, Any]) -> None:
@@ -146,8 +194,14 @@ class CaseInspector(ModalScreen[None]):
             if value is not None:
                 text.append(f"{label}  {_clip(value, 120)}\n", style=FG)
 
-    def _append_tool_trace(self, text: Text, case: dict[str, Any]) -> None:
+    def _append_tool_trace(self, text: Text, case: dict[str, Any] | None) -> None:
         text.append("\nTOOL RESPONSE HIGHLIGHT\n", style=f"bold {AMBER}")
+        if case is None:
+            text.append(
+                "unavailable — no linked case/tool trace is recorded in this run.\n",
+                style=DIM,
+            )
+            return
         calls = _tool_calls(case)
         if not calls:
             text.append(
@@ -265,6 +319,7 @@ class OccamApp(App[None]):
         self.feed = StateFeed()
         self.compare = self._load_compare()
         self.selected_generation: int | None = None
+        self.selected_case_id: str | None = None
         self.pinned_generation = False
         self.view = self._build_view()
 
@@ -332,10 +387,29 @@ class OccamApp(App[None]):
     def on_inspect_requested(self, message: InspectRequested) -> None:
         self.open_case_inspector(message.case_id)
 
+    def on_case_selection_changed(self, message: CaseSelectionChanged) -> None:
+        self.selected_case_id = message.case_id
+        self.refresh_view()
+
+    def on_lesson_evidence_requested(self, message: LessonEvidenceRequested) -> None:
+        self.open_lesson_evidence(message.lesson_id)
+
+    def on_button_pressed(self, message: Button.Pressed) -> None:
+        button_id = message.button.id or ""
+        if not button_id.startswith("lesson-evidence-"):
+            return
+        try:
+            index = int(button_id.rsplit("-", 1)[-1])
+        except ValueError:
+            return
+        if 0 <= index < len(self.view.lessons):
+            self.open_lesson_evidence(self.view.lessons[index].id)
+
     def _build_view(self) -> RunView:
         return RunView(
             self.feed.state,
             selected_generation=self.selected_generation if self.pinned_generation else None,
+            selected_case_id=self.selected_case_id,
             mode=self.source.mode,
             speed=getattr(self.source, "speed", 1.0),
             paused=getattr(self.source, "paused", False),
@@ -348,6 +422,7 @@ class OccamApp(App[None]):
     def refresh_view(self) -> None:
         self.view = self._build_view()
         self.selected_generation = self.view.selected_generation
+        self.selected_case_id = self.view.selected_case_id
         for panel in self.query(".view-panel"):
             if isinstance(panel, ViewPanel):
                 panel.update_view(self.view)
@@ -358,10 +433,21 @@ class OccamApp(App[None]):
         self.refresh_view()
 
     def action_prev_generation(self) -> None:
+        if self._move_focused_case(-1):
+            return
         self._step_generation(-1)
 
     def action_next_generation(self) -> None:
+        if self._move_focused_case(1):
+            return
         self._step_generation(1)
+
+    def _move_focused_case(self, delta: int) -> bool:
+        focused = self.focused
+        if not isinstance(focused, CasesPanel):
+            return False
+        focused.move_cursor(delta)
+        return True
 
     def _step_generation(self, delta: int) -> None:
         numbers = self.view.generation_numbers
@@ -416,20 +502,33 @@ class OccamApp(App[None]):
         panel.display = not panel.display
 
     def action_inspect(self) -> None:
-        try:
-            case_id = self.query_one(CasesPanel).selected_case_id
-        except NoMatches:
-            case_id = None
-        self.open_case_inspector(case_id)
+        self.open_case_inspector()
 
     def open_case_inspector(self, case_id: str | None = None) -> None:
-        if case_id is None and self.view.selected is not None:
-            selected = self.view.selected.selected_case
+        if case_id is None:
+            selected = self.view.selected_case
             case_id = str(selected.get("case_id")) if selected else None
         if case_id is None:
             self.notify("No case is available for inspection.", severity="warning", timeout=2)
             return
         self.push_screen(CaseInspector(self.view, case_id))
+
+    def open_lesson_evidence(self, lesson_id: str) -> None:
+        lesson = next((item for item in self.view.lessons if item.id == lesson_id), None)
+        if lesson is None:
+            self.notify("Lesson evidence is not available.", severity="warning", timeout=2)
+            return
+        evidence = lesson.evidence if isinstance(lesson.evidence, dict) else {}
+        case_ids = evidence.get("case_ids") or []
+        case_id = next(
+            (
+                str(candidate)
+                for candidate in case_ids
+                if self.view.case(str(candidate)) is not None
+            ),
+            None,
+        )
+        self.push_screen(CaseInspector(self.view, case_id, lesson=lesson, highlight=True))
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())

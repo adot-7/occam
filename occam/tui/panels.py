@@ -14,7 +14,8 @@ from typing import Any, Protocol, runtime_checkable
 from rich.console import RenderableType
 from rich.text import Text
 from textual.events import Key
-from textual.widgets import DataTable, ProgressBar, RichLog, Static, Tree
+from textual.message import Message
+from textual.widgets import Button, DataTable, ProgressBar, RichLog, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from occam.core.models import Event
@@ -47,6 +48,22 @@ class ViewPanel(Protocol):
     """Anything the app repaints when the reduced state changes."""
 
     def update_view(self, view: RunView) -> None: ...
+
+
+class CaseSelectionChanged(Message):
+    """The case cursor moved and the app should rebuild its shared view."""
+
+    def __init__(self, case_id: str | None) -> None:
+        super().__init__()
+        self.case_id = case_id
+
+
+class LessonEvidenceRequested(Message):
+    """Open the selected lesson's evidence in the read-only inspector."""
+
+    def __init__(self, lesson_id: str) -> None:
+        super().__init__()
+        self.lesson_id = lesson_id
 
 
 def _money(value: float | None) -> str:
@@ -428,6 +445,7 @@ class CasesPanel(Panel):
         super().__init__(*args, **kwargs)
         self._case_ids: list[str] = []
         self._cursor = 0
+        self._view: RunView | None = None
 
     def compose(self):
         yield Static(id="cases-grid")
@@ -469,12 +487,16 @@ class CasesPanel(Panel):
         return text
 
     def update_view(self, view: RunView) -> None:
+        self._view = view
         self.border_title = self.panel_title(view)
         generation = view.selected
         cases = generation.cases if generation is not None else []
         old_id = self.selected_case_id
         self._case_ids = [str(case.get("case_id", "?")) for case in cases]
-        if old_id in self._case_ids:
+        shared_id = view.selected_case_id
+        if shared_id in self._case_ids:
+            self._cursor = self._case_ids.index(shared_id)
+        elif old_id in self._case_ids:
             self._cursor = self._case_ids.index(old_id)
         else:
             failed = next((index for index, case in enumerate(cases) if not case.get("passed")), 0)
@@ -495,6 +517,7 @@ class CasesPanel(Panel):
         generation = view.selected
         if generation is None:
             return Text("", style=DIM)
+        selected = self.selected_case_id
         text = Text()
         for index, case in enumerate(generation.cases):
             case_id = str(case.get("case_id", "?"))
@@ -502,10 +525,8 @@ class CasesPanel(Panel):
             colour = GREEN if passed else RED
             marker = "✓" if passed else "✗"
             text.append(
-                f"[{marker}]" if case_id == self.selected_case_id else f" {marker} ",
-                style=(
-                    f"bold {colour} on {SELECTED}" if case_id == self.selected_case_id else colour
-                ),
+                f"[{marker}]" if case_id == selected else f" {marker} ",
+                style=(f"bold {colour} on {SELECTED}" if case_id == selected else colour),
             )
             if index != len(generation.cases) - 1:
                 text.append(" ", style=DIM)
@@ -537,16 +558,42 @@ class CasesPanel(Panel):
         if event.key in {"up", "left"}:
             self._cursor = max(0, self._cursor - 1)
             event.stop()
-            self.refresh()
+            self._selection_changed()
         elif event.key in {"down", "right"}:
             self._cursor = min(len(self._case_ids) - 1, self._cursor + 1)
             event.stop()
-            self.refresh()
+            self._selection_changed()
         elif event.key == "enter":
             event.stop()
-            action = getattr(self.app, "action_inspect", None)
+            self._selection_changed()
+            action = getattr(self.app, "open_case_inspector", None)
             if action is not None:
-                action()
+                action(self.selected_case_id)
+
+    def move_cursor(self, delta: int) -> None:
+        """Move the case cursor for app-level arrow bindings."""
+
+        if not self._case_ids:
+            return
+        self._cursor = max(0, min(len(self._case_ids) - 1, self._cursor + delta))
+        self._selection_changed()
+
+    def _selection_changed(self) -> None:
+        if self._view is None:
+            return
+        self.update(self.render_view(self._view))
+        try:
+            cases = self._view.selected.cases if self._view.selected is not None else []
+            selected = next(
+                (case for case in cases if case.get("case_id") == self.selected_case_id), None
+            )
+            self.query_one("#cases-grid", Static).update(self._grid(self._view))
+            self.query_one("#cases-detail", Static).update(
+                self._case_detail(selected) if selected else ""
+            )
+        except Exception:  # pragma: no cover - only possible before child mount.
+            pass
+        self.post_message(CaseSelectionChanged(self.selected_case_id))
 
 
 class CaseEvidencePanel(Panel):
@@ -562,7 +609,7 @@ class CaseEvidencePanel(Panel):
 
     def render_view(self, view: RunView) -> RenderableType:
         generation = view.selected
-        case = generation.selected_case if generation is not None else None
+        case = view.selected_case
         if generation is None or case is None:
             return Text("select a case to inspect", style=DIM)
 
@@ -707,6 +754,21 @@ class LessonsPanel(Panel):
     """Loaded/written lessons with their evidence pointers visible."""
 
     title_text = "LESSONS"
+    MAX_LESSON_ROWS = 8
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._view: RunView | None = None
+        self._cursor = 0
+
+    def compose(self):
+        for index in range(self.MAX_LESSON_ROWS):
+            yield Button(
+                "",
+                id=f"lesson-evidence-{index}",
+                classes="lesson-evidence",
+                variant="default",
+            )
 
     def panel_title(self, view: RunView) -> str:
         loaded = len(view.lessons_loaded)
@@ -719,25 +781,78 @@ class LessonsPanel(Panel):
         loaded_ids = {lesson.id for lesson in view.lessons_loaded}
         text = Text()
         for index, lesson in enumerate(view.lessons):
-            loaded = lesson.id in loaded_ids
-            badge = "tool" if lesson.kind == "tool_note" else "rule"
-            badge_colour = CYAN if badge == "tool" else AMBER
-            text.append(f"[{badge}] ", style=badge_colour)
-            if lesson.tool:
-                text.append(f"{lesson.tool}  ", style=f"bold {badge_colour}")
-            text.append("● loaded" if loaded else "+ written", style=GREEN if loaded else DIM)
-            text.append("\n", style=DIM)
-            text.append(f"  {lesson.text}\n", style=FG)
-            born = lesson.born
-            evidence = lesson.evidence.get("case_ids", [])
-            text.append(
-                f"  born {born.get('run_id', '—')}·g{born.get('generation', '—')}  ·  "
-                f"evidence ▸ {', '.join(str(item) for item in evidence[:3]) or '—'}\n",
-                style=DIM,
-            )
+            text.append(self._lesson_row(lesson, lesson.id in loaded_ids))
             if index != len(view.lessons) - 1:
                 text.append("\n", style=WIRE)
         return text
+
+    def update_view(self, view: RunView) -> None:
+        self._view = view
+        self._cursor = min(self._cursor, max(0, len(view.lessons) - 1))
+        self.border_title = self.panel_title(view)
+        self.update(self.render_view(view))
+        for index in range(self.MAX_LESSON_ROWS):
+            try:
+                button = self.query_one(f"#lesson-evidence-{index}", Button)
+            except Exception:  # pragma: no cover - only possible before child mount.
+                return
+            if index >= len(view.lessons):
+                button.display = False
+                continue
+            button.display = True
+            lesson = view.lessons[index]
+            button.label = self._evidence_row(lesson)
+
+    @staticmethod
+    def _lesson_row(lesson: Any, loaded: bool) -> Text:
+        badge = "tool" if lesson.kind == "tool_note" else "rule"
+        badge_colour = CYAN if badge == "tool" else AMBER
+        text = Text()
+        text.append(f"[{badge}] ", style=badge_colour)
+        if lesson.tool:
+            text.append(f"{lesson.tool}  ", style=f"bold {badge_colour}")
+        text.append("● loaded" if loaded else "+ written", style=GREEN if loaded else DIM)
+        text.append("\n", style=DIM)
+        text.append(f"  {lesson.text}\n", style=FG)
+        born = lesson.born
+        evidence = lesson.evidence.get("case_ids", [])
+        refs = lesson.evidence.get("trace_refs", [])
+        evidence_text = ", ".join(str(item) for item in evidence[:3]) if evidence else "unavailable"
+        text.append(
+            f"  born {born.get('run_id', '—')}·g{born.get('generation', '—')}  ·  "
+            f"evidence ▸ {evidence_text}",
+            style=DIM if evidence else RED,
+        )
+        if refs:
+            text.append(f"  ·  trace ▸ {', '.join(str(item) for item in refs[:2])}", style=DIM)
+        return text
+
+    @staticmethod
+    def _evidence_row(lesson: Any) -> Text:
+        evidence = lesson.evidence.get("case_ids", [])
+        available = bool(evidence)
+        label = ", ".join(str(item) for item in evidence[:3]) if available else "unavailable"
+        text = Text("↗ evidence ▸ ", style=f"bold {CYAN}" if available else DIM)
+        text.append(label, style=FG if available else RED)
+        return text
+
+    def on_key(self, event: Key) -> None:
+        if self._view is None or not self._view.lessons:
+            return
+        if event.key == "up":
+            self._cursor = max(0, self._cursor - 1)
+            event.stop()
+        elif event.key == "down":
+            self._cursor = min(len(self._view.lessons) - 1, self._cursor + 1)
+            event.stop()
+        elif event.key == "enter":
+            event.stop()
+            self._emit_lesson()
+
+    def _emit_lesson(self) -> None:
+        if self._view is None or not self._view.lessons:
+            return
+        self.post_message(LessonEvidenceRequested(self._view.lessons[self._cursor].id))
 
 
 class ComparePanel(Panel):
@@ -921,6 +1036,7 @@ __all__ = [
     "AblationPanel",
     "ArchitecturePanel",
     "BaselinePanel",
+    "CaseSelectionChanged",
     "CasesPanel",
     "CaseEvidencePanel",
     "ComparePanel",
@@ -930,6 +1046,7 @@ __all__ = [
     "HeaderBar",
     "LessonsPanel",
     "LineagePanel",
+    "LessonEvidenceRequested",
     "MetricsStrip",
     "Panel",
     "StructuralFidelityPanel",

@@ -19,7 +19,7 @@ from occam.core.models import Event, GenerationState, State
 from occam.store.reader import EventReader
 from occam.store.reducer import Reduction, reduce, state_json_bytes
 from occam.store.writer import EventWriter
-from occam.tui.app import OccamApp
+from occam.tui.app import CaseInspector, OccamApp
 from occam.tui.panels import AblationPanel, DiagnosisFeed, HeaderBar
 from occam.tui.source import (
     LiveSource,
@@ -66,8 +66,13 @@ def _drive(scenario: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any) -
     return asyncio.run(scenario(*args, **kwargs))
 
 
-async def _run_app(app: OccamApp, body: Callable[[Any], Awaitable[Any]]) -> Any:
-    async with app.run_test() as pilot:
+async def _run_app(
+    app: OccamApp,
+    body: Callable[[Any], Awaitable[Any]],
+    *,
+    size: tuple[int, int] = (80, 24),
+) -> Any:
+    async with app.run_test(size=size) as pilot:
         return await body(pilot)
 
 
@@ -161,6 +166,94 @@ def test_wp09_run2_surfaces_lessons_compare_and_diagnosis() -> None:
     assert "run2 g0 0.85" in compare
     assert diagnosis_lines == 3
     assert has_lesson
+
+
+def test_wp09_case_cursor_updates_trace_and_inspector() -> None:
+    async def scenario() -> tuple[str, str, str]:
+        source = _replay(RUN1, to_gen=0, at="lesson.written", paused=True)
+        app = OccamApp(RUN1, source=source)
+
+        async def body(pilot: Any) -> tuple[str, str, str]:
+            await pilot.pause()
+            await asyncio.sleep(0)
+            app.query_one("#cases").focus()
+            await pilot.press("right")
+            await pilot.pause()
+            await asyncio.sleep(0)
+            trace = app.query_one("#evidence").renderable.plain
+            await pilot.press("enter")
+            await pilot.pause()
+            await asyncio.sleep(0)
+            inspector = app.screen.query_one("#inspector-body").renderable.plain
+            return app.view.selected_case_id or "", trace, inspector
+
+        return await _run_app(app, body, size=(160, 50))
+
+    selected, trace, inspector = _drive(scenario)
+    assert selected == "fxa_004"
+    assert trace.startswith("fxa_004")
+    assert "fxa_004  FAIL" in inspector
+
+
+def test_wp09_lesson_evidence_button_opens_linked_case_inspector() -> None:
+    async def scenario() -> str:
+        source = _replay(RUN1, to_gen=0, at="lesson.written", paused=True)
+        app = OccamApp(RUN1, source=source)
+
+        async def body(pilot: Any) -> str:
+            await pilot.pause()
+            await asyncio.sleep(0)
+            assert await pilot.click("#lesson-evidence-0", offset=(1, 1))
+            await pilot.pause()
+            await asyncio.sleep(0)
+            assert isinstance(app.screen, CaseInspector)
+            return app.screen.query_one("#inspector-body").renderable.plain
+
+        return await _run_app(app, body, size=(160, 50))
+
+    inspector = _drive(scenario)
+    assert "LESSON EVIDENCE" in inspector
+    assert "The response's rate_date" in inspector
+    assert "evidence cases  fxa_003" in inspector
+    assert "linked case  fxa_003" in inspector
+
+
+def test_wp09_loaded_lesson_without_local_case_is_explicitly_unavailable() -> None:
+    async def scenario() -> str:
+        source = _replay(RUN2, at="diagnosis.emitted", paused=True)
+        app = OccamApp(RUN2, source=source)
+
+        async def body(pilot: Any) -> str:
+            await pilot.pause()
+            await asyncio.sleep(0)
+            assert await pilot.click("#lesson-evidence-0", offset=(1, 1))
+            await pilot.pause()
+            await asyncio.sleep(0)
+            return app.screen.query_one("#inspector-body").renderable.plain
+
+        return await _run_app(app, body, size=(160, 50))
+
+    inspector = _drive(scenario)
+    assert "The response's rate_date" in inspector
+    assert "evidence cases  fxa_003" in inspector
+    assert "case trace unavailable" in inspector
+    assert "no linked case/tool trace is recorded" in inspector
+
+
+def test_wp09_recorded_tool_dates_are_highlighted_verbatim() -> None:
+    state = reduce(_events(RUN1))
+    case = state.generations["g000"].executions["full"]["cases"][2]
+    case["tool_calls"] = [
+        {
+            "tool": "fx_rate",
+            "requested_date": "2026-04-04",
+            "response": {"rate_date": "2026-04-02", "rate": 1.11},
+        }
+    ]
+    text = CaseInspector(RunView(state, selected_generation=0), "fxa_003").render_inspector().plain
+
+    assert "requested_date 2026-04-04  →  rate_date 2026-04-02" in text
+    assert "rate: 1.11" in text
 
 
 @pytest.mark.parametrize("run_dir", FIXTURES, ids=lambda path: path.name)

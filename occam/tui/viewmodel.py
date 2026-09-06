@@ -195,6 +195,7 @@ class RunView:
         state: State | None,
         *,
         selected_generation: int | None = None,
+        selected_case_id: str | None = None,
         mode: str = "live",
         speed: float = 1.0,
         paused: bool = False,
@@ -227,6 +228,7 @@ class RunView:
             for snapshot in (state.generations.values() if state else ())
         }
         self.selected_generation = self._resolve_selection(selected_generation)
+        self.selected_case_id = self._resolve_case_selection(selected_case_id)
 
     def _resolve_selection(self, requested: int | None) -> int | None:
         if requested is not None and requested in self._generations:
@@ -236,6 +238,17 @@ class RunView:
         if self._generations:
             return max(self._generations)
         return None
+
+    def _resolve_case_selection(self, requested: str | None) -> str | None:
+        generation = self.selected
+        if generation is None:
+            return None
+        if requested is not None and any(
+            str(case.get("case_id")) == requested for case in generation.cases
+        ):
+            return requested
+        selected = generation.selected_case
+        return str(selected.get("case_id")) if selected else None
 
     # -- generations ---------------------------------------------------
 
@@ -255,6 +268,16 @@ class RunView:
     @property
     def selected(self) -> GenerationView | None:
         return self.generation(self.selected_generation)
+
+    @property
+    def selected_case(self) -> dict[str, Any] | None:
+        """The case highlighted by the shared case cursor."""
+
+        if self.selected_case_id is not None:
+            selected = self.case(self.selected_case_id)
+            if selected is not None:
+                return selected
+        return self.selected.selected_case if self.selected is not None else None
 
     def case(self, case_id: str | None) -> dict[str, Any] | None:
         """Return a selected case without making panels know execution storage."""
