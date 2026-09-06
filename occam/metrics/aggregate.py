@@ -158,8 +158,8 @@ def role_cost_shares(
     total = math.fsum(weights.values())
     if total <= 0.0:
         raise ValueError(
-            "cannot compute role cost shares: the full run has no positive "
-            "displayed RoleTrace.cost_usd"
+            "cannot compute role cost shares: undefined because the full run has no "
+            "positive displayed RoleTrace.cost_usd (accounting invariant violation)"
         )
     return {key: weights[key] / total for key in keys}
 

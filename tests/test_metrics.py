@@ -158,7 +158,7 @@ def test_cost_share_requires_positive_displayed_role_trace_costs() -> None:
             )
         ],
     )
-    with pytest.raises(ValueError, match="no positive displayed RoleTrace.cost_usd"):
+    with pytest.raises(ValueError, match="undefined.*invariant violation"):
         role_cost_shares(unpriced, ["r_a", "r_b"])
     assert role_cost_shares(unpriced, []) == {}
 
