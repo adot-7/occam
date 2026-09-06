@@ -58,6 +58,7 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 - **`ruff format --check .` fails on 38 pre-existing files in an AO Windows worktree.** The committed blobs are LF and format-clean (verified by running ruff against a `git archive` export), but the worktree checkout has CRLF while `pyproject.toml` sets `line-ending = "lf"`. Not a repo content bug, but it makes the standard verification command unusable in an AO worktree; a `.gitattributes` with `*.py text eol=lf` would settle it.
 - **`fcntl` on Windows — seconding the WP-03 item above.** It is worse than `tests/test_packaging.py`: `occam/store/__init__.py` re-exports `EventWriter`, so *every* test module that reaches the store fails at collection and `pytest -q` collects nothing at all. Fix is a small cross-platform advisory-lock shim (`msvcrt.locking` on win32, `fcntl.flock` elsewhere). Left to a WP-01 owner rather than widened into WP-04; WP-04's full-suite evidence was gathered behind a local, uncommitted shim.
 - **`wasted_calls` — resolved, see Resolved below.** Dropped from the PRD rather than defined.
+
 ## 2026-09-06 — WP-07 (TUI shell + replay): PRD notes for the orchestrator
 
 Two PRD notes, neither blocking:

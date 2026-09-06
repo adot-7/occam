@@ -68,7 +68,7 @@ def fast_forward_index(
             continue
         if to_gen is not None:
             generation = _generation_of(event)
-            if generation is not None and generation != to_gen:
+            if generation != to_gen:
                 continue
         return index
     scope = "" if to_gen is None else f" within generation {to_gen}"
@@ -157,6 +157,9 @@ class ReplaySource(EventSource):
 
     def pause(self) -> None:
         self._paused = True
+        # Interrupt an in-flight inter-event delay so pause takes effect at the
+        # current frame rather than after the next (possibly capped) gap.
+        self._wake.set()
 
     def resume(self) -> None:
         self._paused = False
@@ -207,6 +210,27 @@ class ReplaySource(EventSource):
         gap = max(0.0, min(gap, self.options.max_gap_s))
         return gap / self._speed
 
+    async def _wait_delay(self, delay: float) -> bool:
+        """Wait for a gap, returning whether a transport signal interrupted it."""
+
+        if delay <= 0:
+            return False
+        self._wake.clear()
+        sleeper = asyncio.ensure_future(self._sleep(delay))
+        wake = asyncio.create_task(self._wake.wait())
+        try:
+            done, pending = await asyncio.wait((sleeper, wake), return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            return wake in done
+        finally:
+            for task in (sleeper, wake):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sleeper, wake, return_exceptions=True)
+
     async def run(self, sink: EventSink) -> None:
         head = self.fast_forward_to + 1
         if head:
@@ -218,8 +242,8 @@ class ReplaySource(EventSource):
             stepped = await self._gate()
             if not stepped:
                 delay = self._delay(index)
-                if delay > 0:
-                    await self._sleep(delay)
+                if await self._wait_delay(delay) and self._paused:
+                    continue
             sink([self._events[index]])
             self.emitted = index + 1
             index += 1
@@ -245,6 +269,7 @@ class LiveSource(EventSource):
         if not self._reader.events_path.exists() and not self._reader.state_path.exists():
             raise FileNotFoundError(f"event log not found: {self._reader.events_path}")
         self._finished = asyncio.Event()
+        self._start_seq = 0
 
     @property
     def finished(self) -> bool:
@@ -254,15 +279,27 @@ class LiveSource(EventSource):
         """Load ``state.json`` for an instant first paint when it exists."""
 
         try:
-            return self._reader.load_state()
+            state = self._reader.load_state()
         except (OSError, ValueError):
             return None
+        self._start_seq = max(0, state.last_seq + 1)
+        if state.completed:
+            # A normal finished run has a snapshot at the log head.  There is
+            # nothing left to tail, so a default ``occam tui --run`` must not
+            # poll forever waiting for a second ``run.completed`` event.
+            self._finished.set()
+        return state
 
     async def wait_finished(self) -> None:
         await self._finished.wait()
 
     async def run(self, sink: EventSink) -> None:
-        next_seq = 0
+        if self._finished.is_set():
+            return
+        # ``initial_state`` primes the app's reducer to this sequence.  If no
+        # snapshot was available, the full event log is the only source of
+        # truth and playback starts at zero.
+        next_seq = self._start_seq
         while True:
             events = await asyncio.to_thread(self._reader.read, live=True)
             fresh = [event for event in events if event.seq >= next_seq]

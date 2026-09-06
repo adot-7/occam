@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 from occam.cli import app as cli_app
 from occam.core.models import Event
 from occam.store.reader import EventReader
-from occam.store.reducer import reduce, state_json_bytes
+from occam.store.reducer import Reduction, reduce, state_json_bytes
 from occam.tui.app import OccamApp
 from occam.tui.panels import DiagnosisFeed, HeaderBar
 from occam.tui.source import (
@@ -26,6 +26,7 @@ from occam.tui.source import (
     ReplayTargetNotFound,
     fast_forward_index,
 )
+from occam.tui.viewmodel import RunView
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN1 = ROOT / "fixtures" / "demo_run1"
@@ -115,6 +116,58 @@ def test_live_attach_reproduces_the_same_state_as_replay(run_dir: Path) -> None:
     assert _drive(scenario) == state_json_bytes(reduce(_events(run_dir)))
 
 
+def test_incremental_reducer_continues_from_a_snapshot() -> None:
+    events = _events(RUN1)
+    checkpoint = 15
+    reduction = Reduction()
+
+    assert reduction.prime(reduce(events[:checkpoint])).last_seq == checkpoint - 1
+    actual = reduction.extend(events[checkpoint:])
+
+    assert reduction.last_seq == len(events) - 1
+    assert state_json_bytes(actual) == state_json_bytes(reduce(events))
+
+
+def test_live_tail_starts_after_the_loaded_snapshot(tmp_path: Path) -> None:
+    events = _events(RUN1)
+    checkpoint = 15
+    run_dir = tmp_path / "stale-snapshot"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_bytes((RUN1 / "events.jsonl").read_bytes())
+    (run_dir / "state.json").write_bytes(state_json_bytes(reduce(events[:checkpoint])))
+
+    async def scenario() -> tuple[list[int], bool]:
+        source = LiveSource(run_dir, follow=False, poll_interval=0)
+        loaded = source.initial_state()
+        received: list[int] = []
+
+        await source.run(lambda batch: received.extend(event.seq for event in batch))
+        return received, loaded is not None
+
+    received, loaded = _drive(scenario)
+    assert loaded
+    assert received == list(range(checkpoint, len(events)))
+
+
+def test_live_attach_to_a_completed_snapshot_does_not_poll_forever(tmp_path: Path) -> None:
+    run_dir = tmp_path / "completed"
+    run_dir.mkdir()
+    events = _events(RUN1)
+    (run_dir / "events.jsonl").write_bytes((RUN1 / "events.jsonl").read_bytes())
+    (run_dir / "state.json").write_bytes(state_json_bytes(reduce(events)))
+
+    async def scenario() -> tuple[bool, list[int]]:
+        source = LiveSource(run_dir)
+        assert source.initial_state() is not None
+        received: list[int] = []
+        await asyncio.wait_for(source.run(lambda batch: received.extend(e.seq for e in batch)), 1)
+        return source.finished, received
+
+    finished, received = _drive(scenario)
+    assert finished
+    assert received == []
+
+
 def test_to_gen_fast_forwards_to_the_first_event_of_that_generation() -> None:
     events = _events(RUN1)
     index = fast_forward_index(events, to_gen=3)
@@ -187,6 +240,9 @@ def test_at_and_to_gen_reject_targets_that_are_not_in_the_log() -> None:
     with pytest.raises(ReplayTargetNotFound):
         # demo_run2 has no lesson.written at all, let alone inside generation 1.
         fast_forward_index(events, to_gen=1, at="lesson.written")
+    with pytest.raises(ReplayTargetNotFound):
+        # Run completion is outside any generation and must not escape --to-gen.
+        fast_forward_index(events, to_gen=1, at="run.completed")
 
 
 def test_pause_starts_paused_and_step_advances_exactly_one_event() -> None:
@@ -220,6 +276,39 @@ def test_pause_starts_paused_and_step_advances_exactly_one_event() -> None:
     assert paused == still_paused == index + 1
     assert stepped == index + 2
     assert resumed == len(events)
+
+
+def test_pause_interrupts_an_in_flight_replay_delay() -> None:
+    async def scenario() -> list[int]:
+        delay_started = asyncio.Event()
+        calls = 0
+
+        async def blocking_sleep(_delay: float) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                delay_started.set()
+                await asyncio.Event().wait()
+
+        source = ReplaySource(RUN1, ReplayOptions(), sleep=blocking_sleep)
+        received: list[int] = []
+        task = asyncio.create_task(source.run(lambda batch: received.extend(e.seq for e in batch)))
+        await asyncio.wait_for(delay_started.wait(), 1)
+        source.pause()
+        await asyncio.sleep(0)
+        assert received == [0]
+
+        source.step()
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if len(received) == 2:
+                break
+        assert received == [0, 1]
+        source.resume()
+        await asyncio.wait_for(task, 2)
+        return received
+
+    assert _drive(scenario) == list(range(len(_events(RUN1))))
 
 
 def test_space_pauses_a_running_replay() -> None:
@@ -303,6 +392,17 @@ def test_demo_run1_header_reports_a_cold_start() -> None:
     assert "run 1" in header
     assert "lessons 0" in header
     assert "REPLAY" in header
+
+
+def test_replay_finished_state_uses_the_done_badge_and_full_generation_cost() -> None:
+    view = RunView(reduce(_events(RUN1)), mode="replay")
+    generation = view.generation(0)
+
+    assert view.mode_badge == "■ DONE"
+    assert generation is not None
+    assert generation.cost_usd == pytest.approx(0.0633)
+    assert generation.total_spend_usd is not None
+    assert generation.total_spend_usd > generation.cost_usd
 
 
 @pytest.mark.parametrize("run_dir", FIXTURES, ids=lambda path: path.name)

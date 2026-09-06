@@ -57,6 +57,20 @@ class Reduction:
         self._state: State | None = None
         self._expected_seq = 0
 
+    def prime(self, state: State) -> State:
+        """Continue reduction from an already validated state snapshot.
+
+        Live followers load ``state.json`` for an instant first paint.  Priming
+        the driver with that snapshot lets the next event be applied directly
+        instead of replaying the entire log from sequence zero.
+        """
+
+        if not isinstance(state, State):
+            raise TypeError("state must be a State")
+        self._state = State.model_validate(state.model_dump(mode="python"))
+        self._expected_seq = self._state.last_seq + 1
+        return self.snapshot()
+
     @property
     def last_seq(self) -> int:
         """Sequence number of the last applied event, or ``-1``."""

@@ -137,9 +137,15 @@ class LineagePanel(Tree[int]):
         for generation in generations:
             node = node.add(self._label(generation, view), data=generation.generation, expand=True)
             if generation.generation == view.selected_generation:
-                # move_cursor, not select_node: a repaint must not look like a
-                # user selection, which would pin the screen to this generation.
-                self.move_cursor(node)
+                # Move the highlight without selecting: a repaint must not
+                # look like a user selection, which would pin the screen to
+                # this generation.  ``move_cursor`` was added after Textual
+                # 0.70; setting the reactive cursor line is its equivalent.
+                move_cursor = getattr(self, "move_cursor", None)
+                if move_cursor is not None:
+                    move_cursor(node)
+                else:  # Textual 0.70 compatibility
+                    self.cursor_line = node.line
 
     @staticmethod
     def _label(generation: GenerationView, view: RunView) -> Text:

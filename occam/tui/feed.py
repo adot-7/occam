@@ -39,15 +39,16 @@ class StateFeed:
     def prime(self, state: State) -> State:
         """Paint a snapshot loaded from ``state.json`` before any event arrives.
 
-        The snapshot is only a first frame; the next :meth:`apply` replaces it
-        with state derived from the events themselves.
+        The incremental reducer is primed with the same sequence number, so a
+        live source can hand us only events written after the snapshot.
         """
 
-        if self._count:
-            return self.state  # type: ignore[return-value]
-        self.state = state
+        if self.state is not None:
+            return self.state
+        self.state = self._reduction.prime(state)
+        self._count = max(0, state.last_seq + 1)
         self.primed = True
-        return state
+        return self.state
 
     def apply(self, events: Sequence[Event]) -> State:
         """Fold a batch of events in and return the new state."""

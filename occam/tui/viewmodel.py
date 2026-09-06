@@ -86,7 +86,20 @@ class GenerationView:
 
     @property
     def cost_usd(self) -> float | None:
-        """Spend attributable to this generation across every variant."""
+        """Cost of the full execution represented by this generation."""
+
+        if self.metrics is not None and "cost_usd" in self.metrics:
+            return float(self.metrics["cost_usd"])
+        execution = self.full_execution
+        if execution is not None and "cost_usd" in execution:
+            return float(execution["cost_usd"])
+        if execution is not None and execution.get("cases"):
+            return sum(float(case.get("cost_usd", 0.0)) for case in execution["cases"])
+        return None
+
+    @property
+    def total_spend_usd(self) -> float | None:
+        """Observed spend for the generation, including repeat and baseline runs."""
 
         total = 0.0
         seen = False
@@ -252,7 +265,7 @@ class RunView:
 
     @property
     def spend_usd(self) -> float:
-        return sum(generation.cost_usd or 0.0 for generation in self.generations)
+        return sum(generation.total_spend_usd or 0.0 for generation in self.generations)
 
     @property
     def completed(self) -> bool:
@@ -279,13 +292,13 @@ class RunView:
 
     @property
     def mode_badge(self) -> str:
+        if self.completed or self.finished:
+            return "■ DONE"
         if self.mode == "replay":
             if self.paused:
                 return "⏸ REPLAY PAUSED"
             speed = f"{self.speed:g}"
             return f"⏵ REPLAY ×{speed}"
-        if self.completed or self.finished:
-            return "■ DONE"
         return "● LIVE"
 
 

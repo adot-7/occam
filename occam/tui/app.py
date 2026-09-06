@@ -169,6 +169,11 @@ class OccamApp(App[None]):
             self.feed.prime(initial)
             self.post_message(StateChanged(initial))
         await self.source.run(self._on_events)
+        if self.feed.state is not None:
+            # Sources set ``finished`` immediately after their final sink call;
+            # repaint once more so the mode badge reflects that transition even
+            # for logs without a run.completed event.
+            self.post_message(StateChanged(self.feed.state))
 
     def _on_events(self, events: Sequence[Event]) -> None:
         """Sink handed to the source; runs on the app's event loop."""
