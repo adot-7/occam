@@ -38,6 +38,8 @@ MAX_ARCHITECT_REPAIR_ATTEMPTS = 1
 _JSON_FENCE = re.compile(r"```(?P<language>[^\r\n`]*)\r?\n(?P<body>.*?)```", re.DOTALL)
 _WRAPPER_MARKERS = frozenset("{}[]`")
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,79}$")
+_SAFE_PROVIDER_FIELD = re.compile(r"^(status|type|code|parameter)=([A-Za-z0-9_.:-]{1,80})$")
+_PROVIDER_FIELDS = ("status", "type", "code", "parameter")
 
 
 class ArchitectError(RuntimeError):
@@ -308,6 +310,37 @@ def _safe_validation_detail(error: ArchitectError, category: str) -> str:
     if not (_SAFE_IDENTIFIER.fullmatch(role_id) and _SAFE_IDENTIFIER.fullmatch(input_name)):
         return ""
     return f"role {role_id} referenced unknown input {input_name}"
+
+
+def _safe_provider_metadata(error: BaseException) -> str | None:
+    """Keep only the client's already-sanitized provider metadata fields."""
+
+    match = re.search(r"provider_error\[([^\]\r\n]*)\]", str(error))
+    if match is None:
+        return None
+    fields: dict[str, str] = {}
+    for raw_field in match.group(1).split(";"):
+        field = raw_field.strip()
+        field_match = _SAFE_PROVIDER_FIELD.fullmatch(field)
+        if field_match is None:
+            return None
+        name, value = field_match.groups()
+        if name in fields:
+            return None
+        fields[name] = value
+    if set(fields) != set(_PROVIDER_FIELDS):
+        return None
+    return (
+        "provider_error[" + "; ".join(f"{name}={fields[name]}" for name in _PROVIDER_FIELDS) + "]"
+    )
+
+
+def _architect_provider_error(error: BaseException) -> ArchitectError:
+    """Normalize provider failures without copying their message or payload."""
+
+    metadata = _safe_provider_metadata(error)
+    suffix = f"; {metadata}" if metadata is not None else ""
+    return ArchitectError(f"architect provider failure: {type(error).__name__}{suffix}")
 
 
 class ArchitectContext:
@@ -629,16 +662,16 @@ class Architect:
                 response_schema=response_schema,
                 temperature=0.0,
             )
-        except TypeError as exc:
+        except TypeError:
             # Keep the public boundary friendly to tiny deterministic test
             # doubles while the production LLMClient always takes the strict
             # response_schema keyword.
             try:
                 return self.llm.complete(self.model_key, messages, None, response_schema)
-            except TypeError:
-                raise ArchitectError(f"architect provider failure: {type(exc).__name__}") from exc
+            except Exception as fallback_exc:  # noqa: BLE001 - normalize provider failures
+                raise _architect_provider_error(fallback_exc) from fallback_exc
         except Exception as exc:  # noqa: BLE001 - normalize provider failures at this boundary
-            raise ArchitectError(f"architect provider failure: {type(exc).__name__}") from exc
+            raise _architect_provider_error(exc) from exc
 
     @staticmethod
     def _completion_text(completion: Any) -> str:

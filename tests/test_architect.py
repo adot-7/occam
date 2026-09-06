@@ -11,7 +11,7 @@ import pytest
 
 from occam.core import Architecture
 from occam.engine.architect import DOMAIN_RULE_HEADING, Architect, ArchitectError
-from occam.llm import LLMClient, ModelConfig, ProviderResponse, RetryPolicy
+from occam.llm import CompletionError, LLMClient, ModelConfig, ProviderResponse, RetryPolicy
 from occam.memory.lessons import LessonStore
 from occam.store.reader import EventReader
 from occam.store.schema import validate_event
@@ -116,6 +116,15 @@ class StubArchitectLLM:
 class FailingArchitectLLM(StubArchitectLLM):
     def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
         raise RuntimeError("sensitive provider payload")
+
+
+class ProviderFailureArchitectLLM(StubArchitectLLM):
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
+        raise CompletionError(self.message)
 
 
 class SequenceArchitectLLM(StubArchitectLLM):
@@ -293,6 +302,41 @@ def test_architect_provider_failure_is_distinct_and_redacted(tmp_path: Path) -> 
         Architect(llm=FailingArchitectLLM(), memory=tmp_path / "memory").propose(TASK)
 
     assert "sensitive provider payload" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("provider_message", "metadata"),
+    [
+        (
+            "completion failed; secret=sk-ant-sensitive; provider_error[status=400; "
+            "type=invalid_request_error; code=unsupported_parameter; parameter=max_tokens]",
+            "provider_error[status=400; type=invalid_request_error; "
+            "code=unsupported_parameter; parameter=max_tokens]",
+        ),
+        (
+            "completion failed; Authorization: Bearer sensitive; provider_error[status=429; "
+            "type=rate_limit_error; code=rate_limit; parameter=unknown]",
+            "provider_error[status=429; type=rate_limit_error; code=rate_limit; parameter=unknown]",
+        ),
+    ],
+)
+def test_architect_propagates_only_safe_provider_metadata(
+    tmp_path: Path,
+    provider_message: str,
+    metadata: str,
+) -> None:
+    with pytest.raises(ArchitectError) as caught:
+        Architect(
+            llm=ProviderFailureArchitectLLM(provider_message),
+            memory=tmp_path / "memory",
+        ).propose(TASK)
+
+    message = str(caught.value)
+    assert metadata in message
+    assert "secret" not in message
+    assert "Bearer" not in message
+    assert "sensitive" not in message
+    assert "completion failed" not in message
 
 
 def test_architect_schema_and_prompt_advertise_only_configured_role_keys(tmp_path: Path) -> None:
