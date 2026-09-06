@@ -2,7 +2,8 @@
 
 ``fx_total`` grades the answer defined by ``prd/02-DATA-AND-TASKS.md`` §1.2: pass
 iff ``|answer - expected.total_inr| <= max(5.00, 0.001 * |expected.total_inr|)``,
-with per-invoice correctness recorded in ``sub_results`` at ₹1 or 0.1%.
+with per-invoice correctness recorded in ``sub_results`` at ₹1 or 0.1%.  The
+answer itself is the last fenced JSON block (`02 §1.2`).
 """
 
 from __future__ import annotations
@@ -68,10 +69,10 @@ class GradeResult(Mapping[str, Any]):
 def fx_total(answer: str | Mapping[str, Any], expected: Mapping[str, Any]) -> GradeResult:
     """Grade an answer against the FX total and per-invoice tolerances (`02 §1.2`).
 
-    The candidate answer is read from the last fenced JSON block, as required by
-    the v3 task contract, falling back to the last line that is a JSON object so
-    the packs' own ``answer_format`` ("Final line: a JSON object ...") is
-    gradeable too.  A malformed answer is a normal failed grade so a run can
+    The contract is the last fenced JSON block, and that is what the packs ask
+    for.  When no fence is present the last line that is a JSON object is read
+    instead — defensive salvage for a model that drops the fence, not part of
+    the contract.  A malformed answer is a normal failed grade so a run can
     continue and record the failure.
     """
 

@@ -319,8 +319,8 @@ def _write_task_yaml(output_dir: Path, pack_name: str) -> None:
             "conventions as stated in each case."
         ),
         "answer_format": (
-            'Final line: a JSON object {"total_inr": <number>, '
-            '"per_invoice": {"<id>": <number>, ...}}'
+            "End your reply with a fenced json code block containing "
+            '{"total_inr": <number>, "per_invoice": {"<id>": <number>, ...}}'
         ),
         "tools": ["fx_rate", "fx_series", "python_exec"],
         "checker": "fx_total",

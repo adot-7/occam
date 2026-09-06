@@ -110,8 +110,9 @@ def test_fx_total_extracts_last_fenced_json_and_records_sub_results() -> None:
     assert result.total_tolerance == 5.0
 
 
-def test_fx_total_reads_the_final_json_line_when_no_fence_is_present() -> None:
-    """The packs' own answer_format asks for a bare final JSON line."""
+def test_fx_total_salvages_a_bare_final_json_line_when_the_fence_is_missing() -> None:
+    """Defensive only: the contract is the fenced block, but a dropped fence
+    must not fail an otherwise correct answer."""
 
     answer = 'Working: booked 100, revalued 105.\n{"total_inr": 5, "per_invoice": {"INV-1": 5}}'
 
