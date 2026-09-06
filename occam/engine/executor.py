@@ -698,6 +698,7 @@ class Executor:
             loop,
             nested_traces,
             nested_trace_guard,
+            use_cache,
         )
         role_tools = (
             normalize_registry(role_registry.bindings(role.tools))
@@ -797,6 +798,7 @@ class Executor:
         loop: asyncio.AbstractEventLoop,
         nested_traces: list[RoleTrace],
         nested_trace_guard: threading.Lock,
+        use_cache: bool,
     ) -> ToolRegistry | None:
         """Create the registry scoped to ``role`` and its prompt runner."""
 
@@ -815,6 +817,7 @@ class Executor:
                     context,
                     index,
                     control,
+                    use_cache=use_cache,
                 ),
                 loop,
             )

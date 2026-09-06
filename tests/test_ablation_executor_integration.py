@@ -11,7 +11,9 @@ from occam.engine.emit import writer_sink
 from occam.engine.executor import Executor
 from occam.store.reader import EventReader
 from occam.store.writer import EventWriter
-from tests.executor_doubles import ScriptedProvider, build_client, text_response
+from occam.tools.fx import FXClient
+from occam.tools.registry import ToolRegistry
+from tests.executor_doubles import ScriptedProvider, build_client, text_response, tool_call_response
 
 
 def _architecture() -> Architecture:
@@ -141,3 +143,57 @@ def test_ablation_uses_fresh_stratified_repeat_and_current_executor_events(tmp_p
     executor.run_variant(architecture, cases, variant="full", generation=3, grader=executor.grader)
     assert provider.count == 0
     writer.close()
+
+
+def test_cache_bypass_reaches_fan_out_role_completions(tmp_path: Path) -> None:
+    registry = ToolRegistry(
+        fx_client=FXClient(cache_dir=tmp_path / "fx_cache"),
+        fan_out_max_workers=2,
+    )
+    provider = ScriptedProvider(
+        lambda call: (
+            tool_call_response([("fan_out", {"subtasks": ["one", "two"]})])
+            if call.user == "### task\nparent"
+            and not any(message["role"] == "tool" for message in call.messages)
+            else text_response(call.user.splitlines()[-1])
+        )
+    )
+    architecture = Architecture(
+        id="fanout",
+        parent_id=None,
+        roles=[
+            Role(
+                id="parent",
+                name="Parent",
+                justification="parallel",
+                model="worker_fast",
+                system_prompt="ROLE: parent",
+                tools=["fan_out"],
+                inputs=["task"],
+                output_key="answer",
+            )
+        ],
+        final_role="parent",
+    )
+    executor = Executor(
+        llm=build_client(provider, tmp_path / "llm_cache"),
+        tools=registry.bindings(),
+        case_concurrency=1,
+        model_concurrency=4,
+    )
+    cases = [Case(id="c1", input="parent", expected={})]
+
+    full = executor.run_variant(architecture, cases, variant="full")
+    assert full.results[0].answer == "parent"
+    assert provider.count == 4  # parent, two branches, parent follow-up
+
+    provider.reset()
+    repeat = executor.run_variant(architecture, cases, variant="full_repeat", use_cache=False)
+    assert repeat.results[0].answer == "parent"
+    assert repeat.results[0].per_role["parent"].cached is False
+    assert provider.count == 4  # bypass includes both nested branch completions
+
+    provider.reset()
+    cached = executor.run_variant(architecture, cases, variant="full")
+    assert cached.results[0].per_role["parent"].cached is True
+    assert provider.count == 0  # the bypass did not replace canonical entries
