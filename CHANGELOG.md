@@ -38,13 +38,12 @@ All notable changes to Occam are documented here.
   fold new events without re-reducing the whole log. Both paths run the same
   transition function; `reduce()` is now defined in terms of it.
 
-- WP-01c contract patch: `ablation.started` now carries the generation's
-  `noise_rate` (required), so the ablation table's noise floor is readable while
-  the table fills instead of only after `metrics.snapshot`; `RoleTrace` gains
-  `billed_cost_usd` and `cost_label` so granted spend is shown at its list-rate
-  equivalent and labelled as such. WP-05 now carries both cost bases from each
-  completion into the role trace, including cache-hit labels. Both fixtures
-  updated; tests cover reducer retention and schema-copy parity.
+- WP-08 ablation engine: noise floor from a `full_repeat` pass, paired divergence
+  and influence, bootstrap influence CIs, the coded verdict rule, structural
+  fidelity, knockout DAG helpers, and the stratified ablation subset.
+- WP-08 metrics package: Wilson pass-rate intervals, cost/token/latency
+  aggregation with p50/p90, tool calls per case, cost shares, and the
+  `metrics.snapshot` builder.
 
 ### Fixed
 
