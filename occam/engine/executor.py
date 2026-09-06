@@ -801,6 +801,9 @@ class Executor:
                 index,
                 control,
                 use_cache=use_cache,
+                generation=generation,
+                variant=variant,
+                trace_attributes=role_attributes,
             )
 
     async def _run_role_impl(
@@ -812,6 +815,9 @@ class Executor:
         control: str,
         *,
         use_cache: bool = True,
+        generation: int = 0,
+        variant: str = "full",
+        trace_attributes: Mapping[str, Any] | None = None,
     ) -> RoleTrace:
         """Run one role's bounded tool-call loop without changing its context."""
 
@@ -828,7 +834,10 @@ class Executor:
             loop,
             nested_traces,
             nested_trace_guard,
-            use_cache,
+            use_cache=use_cache,
+            generation=generation,
+            variant=variant,
+            trace_attributes=trace_attributes,
         )
         role_tools = (
             normalize_registry(role_registry.bindings(role.tools))
@@ -929,6 +938,9 @@ class Executor:
         nested_traces: list[RoleTrace],
         nested_trace_guard: threading.Lock,
         use_cache: bool,
+        generation: int,
+        variant: str,
+        trace_attributes: Mapping[str, Any] | None,
     ) -> ToolRegistry | None:
         """Create the registry scoped to ``role`` and its prompt runner."""
 
@@ -948,6 +960,9 @@ class Executor:
                     index,
                     control,
                     use_cache=use_cache,
+                    generation=generation,
+                    variant=variant,
+                    trace_attributes=trace_attributes,
                 ),
                 loop,
             )

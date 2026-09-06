@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from occam.llm import tracing
 from occam.llm.client import LLMClient
 from occam.llm.config import ModelConfig
 from occam.llm.providers import ProviderResponse
+from occam.tools.fan_out import fan_out
 from occam.tools.fx import FXClient
 
 
@@ -80,6 +82,11 @@ assert 'neatlogs' not in sys.modules
 assert 'openai' not in sys.modules
 with tracing.span('ignored', kind='TOOL') as span:
     assert span is None
+from contextvars import ContextVar
+from occam.tools.fan_out import fan_out
+marker = ContextVar('marker', default=None)
+marker.set('parent')
+assert fan_out(['one', 'two'], runner=lambda _: marker.get()) == ['parent', 'parent']
 assert tracing.flush() is False
 assert tracing.shutdown() is False
 print('no-key-ok')
@@ -297,6 +304,246 @@ def test_completion_and_uncached_fx_spans_carry_context_and_truthful_cache(
     assert series_spans[0].attributes["occam.rate_date"] == "2026-04-01..2026-04-02"
     assert series_spans[0].attributes["occam.cached"] is False
     assert fx.calls[1].cached is True
+
+
+def test_fan_out_propagates_context_to_fx_spans_and_restores_parent(
+    fake_sdk: FakeSDK, tmp_path: Path
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_date = request.url.path.rsplit("/", maxsplit=1)[-1]
+        return httpx.Response(
+            200,
+            json={
+                "base": request.url.params["base"],
+                "date": requested_date,
+                "rates": {request.url.params["symbols"]: 1.1},
+            },
+            request=request,
+        )
+
+    fx = FXClient(
+        cache_dir=tmp_path / "fx-cache",
+        transport=httpx.MockTransport(handler),
+    )
+    context = {
+        "run_id": "run-fanout",
+        "run_name": "fanout-test",
+        "generation": 3,
+        "variant": "full_repeat",
+        "case_id": "case-fanout",
+        "role_id": "r_rates",
+        "role_name": "Rate Fetcher",
+        "justification": "parallel",
+        "model": "worker_fast",
+    }
+    dates = ["2026-04-01", "2026-04-02", "2026-04-03"]
+
+    def runner(requested_date: str) -> str:
+        with tracing.trace_context(sibling=requested_date):
+            return str(fx.fx_rate(requested_date, "EUR", "USD")["rate_date"])
+
+    with tracing.trace_context(context):
+        assert fan_out(dates, runner=runner, max_workers=3) == dates
+        fx.fx_rate("2026-04-04", "EUR", "USD")
+
+    tool_spans = [item for item in fake_sdk.spans if item.name == "tool.fx_rate"]
+    assert len(tool_spans) == 4
+    branch_spans = {
+        item.attributes["occam.sibling"]: item
+        for item in tool_spans
+        if "occam.sibling" in item.attributes
+    }
+    assert set(branch_spans) == set(dates)
+    for requested_date, item in branch_spans.items():
+        assert item.attributes["occam.run_id"] == "run-fanout"
+        assert item.attributes["occam.run_name"] == "fanout-test"
+        assert item.attributes["occam.generation"] == 3
+        assert item.attributes["occam.variant"] == "full_repeat"
+        assert item.attributes["occam.case_id"] == "case-fanout"
+        assert item.attributes["occam.role_id"] == "r_rates"
+        assert item.attributes["occam.role_name"] == "Rate Fetcher"
+        assert item.attributes["occam.justification"] == "parallel"
+        assert item.attributes["occam.model"] == "worker_fast"
+        assert item.attributes["occam.requested_date"] == requested_date
+        assert item.attributes["occam.rate_date"] == requested_date
+        assert item.attributes["occam.cached"] is False
+
+    parent_span = next(item for item in tool_spans if "occam.sibling" not in item.attributes)
+    assert parent_span.attributes["occam.requested_date"] == "2026-04-04"
+    assert "occam.sibling" not in parent_span.attributes
+
+
+def test_fan_out_propagates_context_to_complete_spans_and_isolates_errors(
+    fake_sdk: FakeSDK, tmp_path: Path
+) -> None:
+    class Provider:
+        def complete(self, *_: Any, **__: Any) -> ProviderResponse:
+            return ProviderResponse(text="done", tokens_in=2, tokens_out=3)
+
+    config = ModelConfig(key="worker", provider="fake", model="fake-model", api_key="key")
+    client = LLMClient(
+        {"worker": config},
+        providers={"fake": Provider()},
+        cache_dir=tmp_path / "llm-cache",
+    )
+    context = {
+        "run_id": "run-fanout",
+        "run_name": "fanout-test",
+        "generation": 5,
+        "variant": "ablate:r_rates",
+        "case_id": "case-fanout",
+        "role_id": "r_calc",
+        "role_name": "Calculator",
+        "justification": "deterministic",
+        "model": "worker_fast",
+    }
+    barrier = threading.Barrier(3, timeout=5.0)
+
+    def runner(sibling: str) -> str:
+        with tracing.trace_context(sibling=sibling):
+            barrier.wait()
+            result = client.complete(
+                "worker",
+                [{"role": "user", "content": f"branch {sibling}"}],
+            )
+            if sibling == "bad":
+                raise RuntimeError("branch boom")
+            return result.text
+
+    with tracing.trace_context(context):
+        results = fan_out(["one", "bad", "two"], runner=runner, max_workers=3)
+        parent = client.complete("worker", [{"role": "user", "content": "parent"}])
+
+    assert results == ["done", "[fan_out error on subtask 2: branch boom]", "done"]
+    assert parent.text == "done"
+    completion_spans = [item for item in fake_sdk.spans if item.name == "llm.complete"]
+    assert len(completion_spans) == 4
+    branches = {item.attributes["occam.sibling"]: item for item in completion_spans[:-1]}
+    assert set(branches) == {"one", "bad", "two"}
+    for sibling, item in branches.items():
+        assert item.attributes["occam.run_id"] == "run-fanout"
+        assert item.attributes["occam.run_name"] == "fanout-test"
+        assert item.attributes["occam.generation"] == 5
+        assert item.attributes["occam.variant"] == "ablate:r_rates"
+        assert item.attributes["occam.case_id"] == "case-fanout"
+        assert item.attributes["occam.role_id"] == "r_calc"
+        assert item.attributes["occam.role_name"] == "Calculator"
+        assert item.attributes["occam.justification"] == "deterministic"
+        assert item.attributes["occam.model"] == "fake-model"
+        assert item.attributes["occam.cached"] is False
+        assert item.attributes["occam.sibling"] == sibling
+
+    parent_span = completion_spans[-1]
+    assert parent_span.attributes["occam.run_id"] == "run-fanout"
+    assert parent_span.attributes["occam.generation"] == 5
+    assert "occam.sibling" not in parent_span.attributes
+
+
+def test_executor_fan_out_keeps_context_on_nested_roles(fake_sdk: FakeSDK, tmp_path: Path) -> None:
+    from occam.core.models import Architecture, Case, Role
+    from occam.engine.executor import Executor
+    from occam.store.writer import EventWriter
+    from occam.tools.registry import ToolRegistry
+    from tests.executor_doubles import (
+        ProviderCall,
+        ScriptedProvider,
+        build_client,
+        text_response,
+        tool_call_response,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_date = request.url.path.rsplit("/", maxsplit=1)[-1]
+        return httpx.Response(
+            200,
+            json={
+                "base": request.url.params["base"],
+                "date": requested_date,
+                "rates": {request.url.params["symbols"]: 1.1},
+            },
+            request=request,
+        )
+
+    dates = {"one": "2026-04-01", "two": "2026-04-02"}
+    branch_barrier = threading.Barrier(2, timeout=5.0)
+
+    def provider_handler(call: ProviderCall) -> ProviderResponse:
+        task = call.user.removeprefix("### task\n")
+        has_tool_result = any(message["role"] == "tool" for message in call.messages)
+        if task == "parent":
+            if has_tool_result:
+                return ProviderResponse(text="parent done", tokens_in=2, tokens_out=3)
+            return tool_call_response([("fan_out", {"subtasks": list(dates)})])
+        if task in dates:
+            if not has_tool_result:
+                branch_barrier.wait()
+                return tool_call_response(
+                    [
+                        (
+                            "fx_rate",
+                            {"date": dates[task], "base": "EUR", "symbol": "USD"},
+                        )
+                    ]
+                )
+            return text_response(f"{task} done")
+        raise AssertionError(f"unexpected task: {task!r}")
+
+    registry = ToolRegistry(
+        fx_client=FXClient(
+            cache_dir=tmp_path / "fx-cache",
+            transport=httpx.MockTransport(handler),
+        )
+    )
+    role = Role(
+        id="r_parent",
+        name="Parent",
+        justification="parallel",
+        model="worker_fast",
+        system_prompt="parent",
+        tools=["fan_out", "fx_rate"],
+        inputs=["task"],
+        output_key="answer",
+        max_turns=2,
+    )
+    run_dir = tmp_path / "run"
+    writer = EventWriter(run_dir, run_id="run-nested")
+    try:
+        result = Executor(
+            llm=build_client(ScriptedProvider(provider_handler), tmp_path / "llm-cache"),
+            tools=registry,
+            writer=writer,
+            run_dir=run_dir,
+            run_name="nested-test",
+            case_concurrency=1,
+            model_concurrency=4,
+        ).execute(
+            Architecture(id="g000", parent_id=None, roles=[role], final_role=role.id),
+            [Case(id="case-nested", input="parent", expected=None)],
+            generation=7,
+            variant="full_repeat",
+        )
+    finally:
+        writer.close()
+
+    assert result.results[0].answer == "parent done"
+    spans = [item for item in fake_sdk.spans if item.name in {"llm.complete", "tool.fx_rate"}]
+    completion_spans = [item for item in spans if item.name == "llm.complete"]
+    tool_spans = [item for item in spans if item.name == "tool.fx_rate"]
+    assert len(completion_spans) == 6
+    assert len(tool_spans) == 2
+
+    for item in spans:
+        assert item.attributes["occam.run_id"] == "run-nested"
+        assert item.attributes["occam.run_name"] == "nested-test"
+        assert item.attributes["occam.generation"] == 7
+        assert item.attributes["occam.variant"] == "full_repeat"
+        assert item.attributes["occam.case_id"] == "case-nested"
+        assert item.attributes["occam.role_id"] == "r_parent"
+        assert item.attributes["occam.role_name"] == "Parent"
+        assert item.attributes["occam.justification"] == "parallel"
+
+    assert {item.attributes["occam.requested_date"] for item in tool_spans} == set(dates.values())
+    assert all(item.attributes["occam.cached"] is False for item in spans)
 
 
 def test_executor_propagates_generation_variant_and_role_to_spans(
