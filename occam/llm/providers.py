@@ -394,6 +394,33 @@ def _anthropic_messages(
     return ("\n\n".join(systems) or None), converted
 
 
+# Anthropic's structured-output schema subset rejects numeric-range
+# keywords on integer/number properties (observed live: "output_config
+# .format.schema: For integer type, property minimum is not supported").
+# Only `minimum` has been observed failing; the rest of the family is
+# stripped defensively so the next schema change doesn't re-break this.
+# Dropping these does not weaken validation - the response is still parsed
+# and validated against the real pydantic model client-side, so ge/le
+# bounds remain enforced. Only the provider-facing generation hint shrinks.
+_ANTHROPIC_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset(
+    {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"}
+)
+
+
+def _strip_anthropic_unsupported_schema_keywords(value: Any) -> Any:
+    """Recursively drop numeric-range keywords Anthropic's schema subset rejects."""
+
+    if isinstance(value, Mapping):
+        return {
+            key: _strip_anthropic_unsupported_schema_keywords(nested)
+            for key, nested in value.items()
+            if key not in _ANTHROPIC_UNSUPPORTED_SCHEMA_KEYWORDS
+        }
+    if isinstance(value, list):
+        return [_strip_anthropic_unsupported_schema_keywords(item) for item in value]
+    return value
+
+
 def _anthropic_json_schema(response_schema: Mapping[str, Any]) -> dict[str, Any]:
     """Extract the raw JSON Schema expected by Anthropic ``output_config``."""
 
@@ -403,12 +430,14 @@ def _anthropic_json_schema(response_schema: Mapping[str, Any]) -> dict[str, Any]
             raise ConfigurationError("Anthropic response_schema.json_schema must be a mapping")
         response_schema = nested
     if "name" in response_schema and isinstance(response_schema.get("schema"), Mapping):
-        return dict(response_schema["schema"])
-    if response_schema.get("type") == "json_schema" and isinstance(
+        schema = response_schema["schema"]
+    elif response_schema.get("type") == "json_schema" and isinstance(
         response_schema.get("schema"), Mapping
     ):
-        return dict(response_schema["schema"])
-    return dict(response_schema)
+        schema = response_schema["schema"]
+    else:
+        schema = response_schema
+    return _strip_anthropic_unsupported_schema_keywords(dict(schema))
 
 
 def _supports_output_config(create: Any) -> bool:
