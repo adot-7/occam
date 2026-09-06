@@ -35,17 +35,17 @@ Let R = roles, M = eval cases, A = ablation cases (A ≤ M), K = mean LLM calls 
 | Naive ablation per generation | R × A × R × K (each knockout re-runs all R−1 surviving roles on A cases) |
 | Total naive, G generations | G × [ M·R·K + R²·A·K ] |
 
-Plug in R=5, M=20, A=10, K=2, G=6: full = 200/gen, naive ablation = **500/gen**, total ≈ **4,200 calls**. Groq free tier is 30 req/min → **~2.3 hours** if serialised, and TPM (6,000 tokens/min) bites harder on SMFR's 3.5k-token inputs. That's why "ablation is slow" is a real risk, not a vibe.
+Plug in R=5, M=20, A=10, K=2, G=6: full = 200/gen, naive ablation = **500/gen**, total ≈ **4,200 LLM calls** — plus, in g0 before the range-endpoint lesson, ~17 HTTP tool calls per case. On a gateway with a modest per-minute cap that's **hours** if serialised. With the TensorMux grant the token *budget* isn't the constraint; **wall-clock and per-minute limits are**. That's why "ablation is slow" is a real risk, not a vibe.
 
 **Mitigations, in the order the executor applies them:**
 
 1. **Upstream cache hits.** Knocking out r only invalidates r and its *descendants*. In a 5-role pipeline where r is role 4, roles 1–3 are byte-identical cache hits. Real recomputation per knockout averages ~R/2 roles, halving ablation cost. Requires the content-addressed cache in `01 §5` — this is why it's mandatory, not nice-to-have.
-2. **Ablation subset.** A = 10 of M = 20 (SMFR), 15 of 40 (BFCL, MGSM), stratified by `meta` (e.g. balanced question types). Documented; the TUI shows "ablated on 10/20."
-3. **Concurrency within rate limits.** Independent (case, knockout) pairs run concurrently under the per-model token bucket. Groq's 30 RPM is the ceiling; a second lane (Gemini Flash) roughly doubles throughput. `models.yaml` can assign `worker_alt` to ablation runs specifically.
+2. **Ablation subset.** A = 10 of M = 20, stratified by `meta` (holiday / fee / cross-currency / plain). Documented; the TUI shows "ablated on 10/20."
+3. **Concurrency within rate limits.** Independent (case, knockout) pairs run concurrently under the per-model token bucket. `worker_fast` (TensorMux) is the main lane; `worker_alt` (GPT-5 nano) is a second lane for knockouts. **Tool calls are disk-cached** (`02 §2`), so ablation never touches Frankfurter after the first full run.
 4. **Skip unchanged roles.** After a `rewrite_prompt` on role 2, roles whose prompt *and* upstream inputs are unchanged don't need re-ablation — their knockout result from the previous generation is still valid. Only re-ablate roles whose config or ancestry changed. Big win in later generations.
 5. **Precompute the demo run.** The live demo is a `replay`. Ablation running for 8 minutes is fine in development; it never happens on camera.
 
-Revised estimate with 1–4: **~1,200–1,600 calls for a 6-generation SMFR run ≈ 40–55 min at Groq free-tier RPM, or ~half that with two lanes.** Acceptable. BFCL/MGSM runs are much cheaper (short inputs, K≈1).
+Revised estimate with 1–4: **~1,200–1,600 LLM calls per 5–6-generation run.** At ~60–120 RPM across two lanes that's **~15–30 minutes per run**, all offline for tool calls after g0. Two runs plus pass³ fit comfortably in a working session. Acceptable — and the demo replays a recorded run regardless.
 
 ## 4. Why ablation is noisy, with numbers, and what we do about it
 
@@ -94,7 +94,7 @@ Shown per generation in the metrics strip. Expected to rise across the run as wi
 - Sample k times at temperature 0.7; majority vote on normalised answer (ties → first).
 - `k = clamp(floor(cost_full_gen / cost_single_sample), 1, 9)` — spend the same dollars as the current generation.
 - Report `pass_rate`, `cost_usd`, `latency_s_mean`, `k`, `matched_to_cost_usd`.
-- Metrics strip shows `Δpass = ours − baseline` and `cost_ratio = ours / baseline`. The honest target: **cost_ratio → ≤1 with Δpass ≥ 0** on SMFR (where structure should help), and **cost_ratio ≈ 1, Δpass ≈ 0** on MGSM (where the right answer is "don't be multi-agent").
+- Metrics strip shows `Δpass = ours − baseline` and `cost_ratio = ours / baseline`. The honest target on the FX task: **Δpass clearly > 0** (a single CoT pass mishandles holidays/fees and can't parallelise 16 lookups well) with **cost_ratio trending to ≤ 1** after the witness prune and the range-endpoint lesson.
 
 ## 7. Other metrics (all in `metrics.snapshot`)
 
@@ -112,13 +112,20 @@ Shown per generation in the metrics strip. Expected to rise across the run as wi
 ```
  role                    justification      influence   95% CI          divergence  cost   verdict
  ─────────────────────────────────────────────────────────────────────────────────────────────────
- Transaction Extractor   context_isolation   +0.30     [+0.10, +0.50]     0.80      22%   LOAD-BEARING
- P&L Calculator          parallel            +0.40     [+0.20, +0.60]     0.90      31%   LOAD-BEARING
- Critic                  verification        +0.00     [−0.10, +0.10]     0.10      19%   WITNESS
- Second Opinion          ensemble            −0.10     [−0.30, +0.10]     0.10      21%   WITNESS
- Synthesizer             control             +0.20     [ 0.00, +0.40]     0.60       7%   UNCERTAIN
+ Ledger Parser           context_isolation   +0.40     [+0.20, +0.60]     0.90      14%   LOAD-BEARING
+ Rate Fetcher            parallel            +0.50     [+0.30, +0.70]     1.00      54%   LOAD-BEARING
+ FX Calculator           control             +0.50     [+0.30, +0.70]     1.00      19%   LOAD-BEARING
+ Verifier                verification        +0.00     [−0.10, +0.10]     0.10       6%   WITNESS
+ Reporter                control             +0.10     [−0.10, +0.30]     0.30       8%   UNCERTAIN
  ─────────────────────────────────────────────────────────────────────────────────────────────────
- ablated on 10/20 cases · noise floor 0.10 · structural fidelity 0.53 → pruning 2 witnesses saves ~40%
+ ablated on 10/20 cases · noise floor 0.10 · structural fidelity 0.87 · 1 witness
 ```
 
-The correlation you want the audience to notice without being told: **the `ensemble` and `verification` rows are the red ones.** That is the Illusion paper's finding, reproduced live.
+The correlation you want the audience to notice without being told: **the `verification` row is the red one.** That is the Illusion paper's finding, reproduced live on a real task. (Numbers here match `08 §3`.)
+
+## 9. Lesson ablation (stretch — WP-14; schema already supports it)
+
+At run 2, each loaded lesson is a component too. Knock out lesson *l* = run g0 of run 2 with *l* removed from the architect's input (fresh architect call, then execute on the ablation subset). Same divergence/influence/CI/verdict machinery as roles. Reported in a second table under the roles table: `lesson · kind · influence · CI · verdict`. Expected: L1 (holiday resolution) and D1 (bank fee) LOAD-BEARING; anything else UNCERTAIN or WITNESS → `status: retired`. Cost: one architect call + one ablation-subset run per lesson (~3–5 lessons). Build only if run 2 is working end to end by +16h.
+
+## 10. pass³ reliability
+Final generation only: 3 independent runs per case at temperature 0. `reliability_pass3 = |{c : all 3 pass}| / N`. Emitted as `reliability.completed`; shown in the metrics strip as `rel³`. Noise floor from §4 stays as the *internal* signal for ablation verdicts; pass³ is the *reported* reliability. They will disagree slightly; that's expected — say so if asked.

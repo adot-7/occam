@@ -35,3 +35,9 @@ OpenEvolve (AlphaEvolve reimplementation), GEPA (arXiv:2507.19457) / DSPy. They 
 
 ## Do not say
 "Berkeley reward-hacked all 8 benchmarks" (unverified) · "DGM ran 80 iterations on SWE-bench *Verified*" (label unconfirmed) · any Maximor product claim.
+
+## Added for v3 (verify IDs before quoting)
+- Shinn et al. **Reflexion: Language Agents with Verbal Reinforcement Learning.** arXiv:2303.11366 — verbal self-reflection stored as memory for later attempts; our `lessons.jsonl` is this, made cross-run and typed.
+- Zhao et al. **ExpeL: LLM Agents Are Experiential Learners.** arXiv:2308.10144 — extracting reusable insights from trajectories.
+- Anthropic Engineering. **Writing tools for agents** and **Demystifying evals for AI agents** (linked by the Track 1 judge). Our self-authored tool descriptions and pass³/noise-floor reporting follow both.
+- **Frankfurter** — open ECB reference-rates API, https://frankfurter.dev (base URL `api.frankfurter.dev/v1`). ECB TARGET closing days: https://www.ecb.europa.eu/paym/target/target2/profuse/calendar/html/index.en.html

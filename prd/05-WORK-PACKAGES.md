@@ -1,120 +1,96 @@
-# 05 — Work Packages
+# 05 — Work Packages (v3, final)
 
-Ordered so that the two humans (H1: engine lead, H2: TUI + data lead) and their AO workers are never blocked on each other after WP-01. Each WP = one AO session = one branch `wp/<nn>-<slug>` = one PR. **Acceptance criteria are the definition of done; copy them into the PR.**
+Two humans (H1 engine, H2 data + TUI) plus AO workers. One WP = one AO session = one branch `wp/<nn>-<slug>` = one PR. Acceptance criteria are the definition of done; paste them into the PR with evidence.
 
-Dependencies are listed; anything not listed is independent. Parallel lanes are marked **[H1]** / **[H2]**; a WP with no lane can go to whoever is free.
-
----
-
-### WP-01 — Repo skeleton + schemas + fixture  **[both, first 60–90 min]**
-Create `pyproject.toml` (ruff, pytest, pydantic, typer, textual, httpx, anthropic, openai, datasets/pyarrow), package layout from `AGENTS.md`, `.env.example`, `CHANGELOG.md`.
-Write `schemas/events.schema.json`, `schemas/state.schema.json`, `schemas/task.schema.json` per `01 §3` and `02 §1`.
-Write `occam/core/` models. Write `occam/store/reducer.py` (`reduce(events) -> State`) and `occam/store/writer.py` / `reader.py`.
-**Hand-author `fixtures/demo_run/events.jsonl`**: a complete, realistic 4-generation SMFR run including a prune, a split+revert, ablation rows with mixed verdicts, and baselines — ~120 events. This is the TUI's development dataset and the demo backup; make it plausible.
-- [ ] `pytest tests/test_schemas.py` validates every fixture event against the schema
-- [ ] `occam validate fixtures/demo_run` passes; `reduce()` is deterministic (run twice, byte-identical state)
-- [ ] `ruff check` clean
-
-> Everything below forks from here. Do not start WP-02+ until WP-01 is merged.
+**Clock:** ~23h from 2026-09-06 04:00 IST to submission. Hour budgets below sum to ~20h across two lanes. **WP-01 is shipped**; WP-01b is a small additive patch.
 
 ---
 
-### WP-02 — LLM layer  **[H1]**
-`occam/llm/`: `complete()` interface; OpenAI-compatible + Anthropic providers; `models.yaml` loader with `${ENV}` interpolation; per-model token-bucket rate limiter; retries; cost computation; content-addressed disk cache; `cached` flag in results.
-- [ ] `occam llm ping worker_fast` returns a completion with tokens, cost, latency
-- [ ] Same call twice → second is `cached=True`, cost 0
-- [ ] Rate limiter test: 40 calls at rpm=30 take ≥ 20s wall-clock (mock provider)
-- [ ] Unknown model key → clear error naming `models.yaml`
+### WP-01b — Schema patch for v3  **[H1, ≤1h, first]**
+Add `Lesson` model; events `lesson.written`, `reliability.completed`; fields `run.started.{run_name,memory_ns,lessons_loaded}`, `metrics.snapshot.{tool_calls_per_case,reliability_pass3}`, `CaseResult.sub_results`. Extend `fixtures/demo_run` → **two fixtures**: `fixtures/demo_run1` (5 gens, holiday failures at g0, witness prune, 2 lessons written, pass³) and `fixtures/demo_run2` (lessons loaded, g0 mostly passing, plateau at g1, compare.json). Hand-authored; realistic numbers from `08`.
+- [ ] Both fixtures validate; reducer deterministic
+- [ ] `occam replay fixtures/demo_run2` header shows `lessons loaded 2`
 
-### WP-03 — Task packs + adapters + checkers  **[H2]**
-`occam/tasks/`: pack loader (`task.yaml` + `cases.jsonl`, schema-validated); checkers per `02 §2`; adapters `smfr.py`, `bfcl.py`, `mgsm.py`; `scripts/prepare_tasks.py`. Commit generated packs `tasks/smfr_2inv`, `tasks/bfcl_simple`, `tasks/mgsm_en` plus two held-out packs (`smfr_3inv`, `mgsm_de` or `bfcl_multiple`).
-- [ ] `python scripts/prepare_tasks.py --all` regenerates identical packs (fixed seeds)
-- [ ] `occam task list` shows 5 packs with case counts and mean input tokens
-- [ ] Checker unit tests: `json_set_equal` (order/case), `numeric_exact` (last-number extraction), `bfcl_ast` (required/optional params, allowed-value lists) — ≥ 15 cases
-- [ ] SMFR haystack parsed into `meta["_haystack"]`; `lookup_price("Airbnb","2026-01-05","Close")` returns 135.87 for the first record
+### WP-02 — LLM layer  **[H1, ≤1.5h]** (unchanged from v1)
+`models.yaml` with `worker_fast` (TensorMux GLM-4.7-Flash), `worker_alt` (GPT-5 nano), `architect` (Sonnet 5). Cache, rate limiter, cost accounting incl. list-rate-equivalent.
+- [ ] `occam llm ping worker_fast` works; native `tool_calls` verified or JSON-in-text fallback flag set
 
-### WP-04 — Tools  **[H2, after WP-03]**
-`occam/tools/registry.py` + `python_exec` (subprocess, 5s timeout, no network, whitelist imports), `calculator`, `lookup_price`, `list_transactions`, virtual BFCL tools from per-case manifests.
-- [ ] `python_exec("print(2**10)")` → `"1024"`; `import socket` → rejected; infinite loop → timeout error
-- [ ] BFCL virtual tools expose the record's `function` list as tool specs; a model tool-call is captured, not executed
+### WP-03 — FX packs + reference implementation + grader  **[H2, ≤3h]**
+`occam/tools/fx.py` (client + disk cache, used by the reference impl too), `occam/tasks/fx_reference.py` (formula `02 §1.2`), `scripts/gen_fx_cases.py`, `tasks/fx_recon_a`, `tasks/fx_recon_b`, checker `fx_total` with `sub_results`. Commit `data/fx_cache/`.
+- [ ] 3 hand-computed cases match the reference to the paisa
+- [ ] Both packs: ≥6 holiday/weekend, ≥5 bank-fee, ≥5 cross-ccy, ≥4 JPY; printed by the generator
+- [ ] Tolerance sanity report (min/max |expected|, tightest relative tolerance) printed and reviewed
+- [ ] Second run of the generator is byte-identical (seeded, cached)
 
-### WP-05 — Executor  **[H1, after WP-02; needs WP-03 packs for tests]**
-`engine/executor.py`: DAG executor per `01 §4.2`; per-role traces; concurrency; sentinel handling for knocked-out roles; emits `execution.*`.
-- [ ] Executes a hand-written 3-role architecture on 5 MGSM cases end to end; results in `generations/g000/results.jsonl`
-- [ ] Per-role cost sums equal case cost
-- [ ] Knockout of role 2 with sentinel: roles 1 is a cache hit (asserted via `cached=True`), role 3 recomputes
-- [ ] A provider failure on one case marks it failed and the run completes
+### WP-04 — Tool registry  **[H2, ≤1.5h, after WP-03]**
+`fx_rate`, `fx_series` (plain base descriptions!), `python_exec`, `fan_out`. Per-call accounting: latency, bytes, status, cached. `tool_note` append hook.
+- [ ] `fx_rate("2026-04-04","EUR","USD")` → `rate_date == "2026-04-02"`, `cached` true on second call
+- [ ] `python_exec` sandbox tests (no network, timeout)
 
-### WP-06 — Architect + Mutations  **[H1, after WP-05]**
-`engine/architect.py` (JSON-schema-constrained proposal, 3–6 roles, justification tags, tools only from manifest) and `engine/mutate.py` (closed menu, `parent_id`, `diff`).
-- [ ] `occam architect --task smfr_2inv` prints a valid `Architecture`; roles reference only manifest tools; DAG acyclic
-- [ ] Each mutation type has a unit test producing a valid child architecture; `prune` rewires consumers correctly
-- [ ] Architect prompt includes 3 example cases and the answer format
+### WP-05 — Executor  **[H1, ≤3h, after WP-02; needs WP-04 for integration test]**
+DAG executor per `01 §4.2`; sentinel knockouts; per-role traces incl. **raw tool responses**; `sub_results` from grader; emits `execution.*`.
+- [ ] 3-role hand-written arch on 5 fx cases end to end with real HTTP on first run, cache on second
+- [ ] Knockout of role 2: role 1 cached, role 3 recomputed
 
-### WP-07 — TUI shell + replay  **[H2, after WP-01; parallel to WP-02..06]**
-`occam/tui/`: app, layout, Header, Lineage tree, Metrics strip, Diagnosis feed, replay reader with speed/pause/step, `state.json` instant paint. Driven entirely by `fixtures/demo_run`.
-- [ ] `occam replay fixtures/demo_run --speed 8` plays to completion; lineage shows 4 gens incl. a reverted node
-- [ ] `--to-gen 3` fast-forwards then plays
-- [ ] Pilot test: after replay, lineage has 4 nodes; metrics strip shows 4 points
-- [ ] Renders correctly at 100×30 and 120×40
+### WP-06 — Architect + Mutations + Lessons I/O  **[H1, ≤2.5h, after WP-05]**
+Architect reads `memory/<ns>/lessons.jsonl`, appends `tool_note`s to tool descriptions, passes `domain_rule`s. Mutation menu. `occam lessons show|reset`.
+- [ ] With 2 lessons present, the proposed g0 fetcher prompt/tool description contains them; with 0, it doesn't
+- [ ] Each mutation type unit-tested
 
-### WP-08 — Ablation + metrics  **[H1, after WP-05]** ★ the core
-`engine/ablation.py`, `metrics/`: noise-floor repeat run, per-role knockouts with upstream cache reuse, divergence/influence/cost_share, bootstrap CI, verdict rule, structural fidelity, skip-unchanged-roles optimisation; emits `ablation.*`.
-- [ ] Property tests from `03 §4` pass
-- [ ] On a synthetic architecture with a deliberately inert role (output never referenced), verdict is `witness` with divergence 0
-- [ ] On MGSM 15 cases with a 3-role arch, full ablation completes and emits 3 `ablation.role` events with CIs
-- [ ] `structural_fidelity` = sum of load-bearing cost shares, asserted on fixture data
+### WP-07 — TUI shell + replay  **[H2, ≤3h, parallel]** (unchanged; drive from fixtures)
+- [ ] Replays both fixtures; `--to-gen`, `--at`, `--pause` work
 
-### WP-09 — Ablation table + Architecture panel + Case Inspector  **[H2, after WP-07]**
-Hero `DataTable` with verdict styling and live row updates; ASCII DAG with prune strikethrough animation; Cases grid; Inspector modal with per-role outputs and full-vs-ablated side-by-side.
-- [ ] Replay to gen 3 shows 5 rows with verdicts matching the fixture
-- [ ] A `mutation.applied{prune}` event strikes through then removes the role box
-- [ ] Inspector opens on a failed case and shows every role's output
+### WP-08 — Ablation + metrics  **[H1, ≤2h, after WP-05]** (unchanged math)
+- [ ] Property tests pass; inert role → WITNESS; SF computed
 
-### WP-10 — Baseline + Diagnose + Loop  **[H1, after WP-06, WP-08]**
-`engine/baseline.py` (cost-matched CoT-SC), `engine/diagnose.py` (with the hard rule: witnesses → prune), `engine/loop.py` (plateau, budget, split-then-verify-then-revert), `occam run`.
-- [ ] `occam run --task mgsm_en --max-gens 3 --cases 15` completes, writes a valid run dir, `occam validate` passes
-- [ ] `baseline.completed` has `k` such that cost is within ±30% of the generation's cost
-- [ ] If a witness exists, `diagnosis.emitted.chosen_mutation.type == "prune"` (unit test with a stubbed LLM)
-- [ ] A `split` whose new roles are witnesses produces `mutation.reverted`
+### WP-09 — TUI panels  **[H2, ≤3.5h, after WP-07]**
+Ablation table, architecture DAG w/ prune strikethrough, cases grid with sub-results, Inspector with **tool-response highlight**, Lessons pane, compare strip, metrics incl. `calls/case`, `rel³`.
+- [ ] Replay `demo_run1` to g0 ablation: verdicts render; Inspector on a holiday case highlights `requested_date → rate_date`
+- [ ] Replay `demo_run2`: lessons pane shows 2 loaded; compare strip populated
 
-### WP-11 — Full runs on three domains + demo run curation  **[both, after WP-10]**
-Run `smfr_2inv`, `bfcl_simple`, `mgsm_en` with real models. Tune prompts/thresholds until S1–S6 in `00 §6` hold. Pick the best SMFR run as `runs/demo_smfr` and copy it to `fixtures/demo_run` (replacing the hand-authored one). Record the noise floor, CIs and costs for the README.
-- [ ] S1–S6 evidenced with run dirs committed under `runs/` (cache dirs excluded)
-- [ ] `occam replay runs/demo_smfr --to-gen 2` lands on a populated ablation table with ≥1 witness
-- [ ] Total spend across all runs logged in `CHANGELOG.md`
+### WP-10 — Diagnose (with lesson writer + leak guard) + Baseline + pass³ + Loop + compare  **[H1, ≤3h, after WP-06, WP-08]**
+- [ ] Leak guard unit tests: rejects ISO dates, ≥4-digit numbers, invoice ids, near-expected values; accepts the two canonical lessons L1/D1
+- [ ] Witness present ⇒ mutation is `prune` (stubbed LLM)
+- [ ] `occam run --task fx_recon_a --run-name t1 --max-gens 3 --cases 8 --pass3` completes; `reliability.completed` emitted
+- [ ] `occam compare` prints the table and writes `compare.json`
 
-### WP-12 — README + submission assets  **[H2, after WP-11]**
-README per submission rules: what it does, how to run, track, agent workflow, what improved across iterations (table from real runs), demo link, **how AO was used** (sessions, worktrees, which WPs ran in parallel). Honesty section from `00 §8`. Citations from the research pack.
-- [ ] Fresh clone → `pip install -e . && occam replay fixtures/demo_run` works in < 5 min following README only
-- [ ] Every claim in README traces to a run dir or a citation
+### WP-11 — Real runs + curation  **[both, ≤3h]**
+`occam lessons reset` → run1 on `fx_recon_a` → run2 on `fx_recon_b`. Tune architect/diagnose prompts until S1–S6 (`00 §6`) hold. Copy to `fixtures/demo_run1`, `demo_run2` (replacing hand-authored). Record noise floors, CIs, calls/case, costs for README.
+- [ ] S1–S6 evidenced; `occam compare` shows run2.g0 ≥ run1.g0 + 0.25
+- [ ] Lessons file contains ≥2 lessons, none case-specific (eyeball + guard log)
 
-### WP-13 — Legibility + `textual serve` + recording rig  **[H2, any time after WP-09; do a first pass by hour 12]**
-Large-font palette, `textual serve` wrapper, `--at` and `--pause` replay flags, and `scripts/record_demo.sh` that launches one replay per shot in `09-DEMO-SHOTLIST.md`.
-- [ ] A 1080p screen recording of the ablation table is readable at 100% zoom (human check)
+### WP-12 — README  **[H2, ≤1.5h, after WP-11]**
+What/how/track/workflow/what improved (table from `compare`)/demo link/AO usage/honesty (`00 §7`)/sponsors (`06 §5`)/citations (`07`).
+- [ ] Fresh clone → `pip install -e . && occam replay fixtures/demo_run1` in <5 min from README alone
 
-### WP-14 (stretch) — Live task creation
-`occam task new --goal ...`: LLM drafts cases; TUI approval screen; writes `tasks/live_<slug>/`.
-- [ ] Draft → approve 8/10 → run proceeds using only approved cases
+### WP-13 — Recording rig  **[H2, ≤1h; first legibility pass by +10h]**
+`textual serve` wrapper, `scripts/record_demo.sh` per `09`.
+- [ ] 1080p capture of the ablation table readable at 100%
 
-### WP-15 — Neatlogs tracing  **[H1, right after WP-05 — no longer stretch]**
-`occam/llm/tracing.py` per `06 §3`: span per `complete()` with `occam.*` attributes from a contextvar; off when no key; flush on exit. TensorMux and GPT-5 nano are just `models.yaml` entries (WP-02) and need no separate package.
-- [ ] A 5-case MGSM run produces 5 traces in Neatlogs with role/generation/variant attributes visible
-- [ ] With `NEATLOGS_API_KEY` unset, runs are byte-identical in events and timing (±5%)
-- [ ] Spans flushed: last case's span present after a short run
+### WP-15 — Neatlogs tracing  **[H1, ≤1h, right after WP-05]**
+Exact API per `prd/10-SETUP-VERIFICATION.md §2`: `neatlogs.init(api_key=..., workflow_name="occam", instrumentations=["openai"])` **called before `openai` is imported** (or `neatlogs.wrap(OpenAI())` per client); manual spans via `with neatlogs.trace(name, kind=...) as s: s.set_attribute(...)` around each `complete()` and each `fx_rate`/`fx_series` HTTP call (httpx is **not** auto-instrumented); `neatlogs.flush(); neatlogs.shutdown()` at run end. No-op when `NEATLOGS_API_KEY` unset.
+- [ ] 5-case run → traces visible with role/generation/variant attributes; tool spans show `requested_date`/`rate_date`
+- [ ] With key unset: identical events, timing within ±5%
+- [ ] Last case's spans present after a short run (flush works)
+
+### WP-14 (stretch) — Lesson ablation at run 2  (`03 §9`)
+Only if WP-11 is done by +16h.
 
 ---
 
-## Suggested parallel schedule
+## Parallel schedule
 
-| Block | H1 lane | H2 lane |
+| block (h from 04:00) | H1 | H2 |
 |---|---|---|
-| 0 | WP-01 (together) | WP-01 (together) |
-| 1 | WP-02 → WP-05 | WP-03 → WP-04 → WP-07 |
-| 2 | WP-06 → WP-08 | WP-09 → WP-13 (first pass) |
-| **integration** | **WP-08 engine output replayed in WP-09 TUI — first real end-to-end** | |
-| 3 | WP-10 | WP-13 polish, README skeleton |
-| 4 | WP-11 (together) | WP-11 (together) |
-| 5 | WP-14/15 if time | WP-12 |
+| 0–1 | WP-01b | WP-03 starts |
+| 1–3 | WP-02 | WP-03 |
+| 3–6 | WP-05 (+WP-15) | WP-04 → WP-07 |
+| 6–9 | WP-06 → WP-08 | WP-09 |
+| **9** | **integration: real 8-case run replayed in TUI** | |
+| 9–12 | WP-10 | WP-09 finish, WP-13 first pass |
+| 12–15 | WP-11 (both) | WP-11 (both) |
+| 15–17 | WP-11 tuning / WP-14 if green | WP-12 |
+| 17–20 | recording (both) | recording (both) |
+| 20–23 | README final, submission post, buffer | |
 
-**Hour-20 rule:** if WP-08's ablation table isn't populating from a real run by hour 20, stop everything else and make it work with fewer cases, fewer roles, one domain. The ablation table alone is a shippable submission; nothing else is.
+**Hour-12 rule:** if a real run hasn't produced an ablation table *and* at least one lesson by +12h, cut pass³ and the compare strip; ship run1 alone with lessons visible. **Hour-16 rule:** if run2 isn't showing improvement over run1.g0, the demo becomes within-run improvement + `cat lessons.md`; still a complete answer.

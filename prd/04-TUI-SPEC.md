@@ -17,29 +17,39 @@ The differentiator was always "it's a TUI, not a web dashboard." That survives i
 - **The ablation table is the hero.** Everything else supports it.
 - **Colour carries meaning, consistently:** green = load-bearing / pass, red = witness / fail, amber = uncertain, dim = pruned / dead branch, cyan = current generation, magenta = baseline.
 
+## 1b. v3 additions (read with §2–§3)
+
+- **Header** gains `run 2/2 · lessons loaded 3` (or `run 1 · lessons 0`). Task label is the pack name plus a short human string: `fx_recon_b · FX revaluation`.
+- **Lessons pane** (new, right column under Metrics or as a tab `l`): one row per lesson — `kind badge · text · born run/gen · evidence ▸`. New rows animate in on `lesson.written`. In run 2, rows loaded at start are marked `● loaded`. Clicking evidence opens the Inspector on the originating case with the tool response highlighted (`requested_date 2026-04-04 → rate_date 2026-04-02`). **This highlight is the single most explanatory frame in the demo.**
+- **Cases grid** cells show per-invoice sub-results on hover/focus (`7/8 invoices ✓ · INV-2310 ✗ (fee)`).
+- **Metrics strip** adds `calls/case` and `rel³` (final gen only).
+- **Compare strip** (run 2 only, reads `compare.json`): `run1 g0 0.55 · run2 g0 0.85 │ calls/case 17 → 6 │ gens to plateau 5 → 2`. Stretch: a full compare tab.
+- Ablation table unchanged: it's the hero. Columns per `03 §8`. Verdict vocabulary LOAD-BEARING / WITNESS / HARMFUL / UNCERTAIN.
+
 ## 2. Layout (single screen, 4 regions)
 
 ```
-┌─ OCCAM ─ smfr_2inv ─ gen 3/6 ─ ▶ live ────────────────────────────────────────────────┐
-│ LINEAGE                      │ ABLATION — gen 3                                          │
-│ ● g0  5 roles  0.60  $0.41   │ role                just.    infl   CI          div  cost │
-│ ├─● g1  4 roles 0.65 $0.31   │ Transaction Extract ctx_iso +0.30 [+.10,+.50] .80  22% ██ │
-│ │ └─● g2 4 roles 0.65 $0.29  │ P&L Calculator      parallel+0.40 [+.20,+.60] .90  31% ██ │
-│ │   ├─○ g3' split → reverted │ Critic              verify  +0.00 [−.10,+.10] .10  19% ▒▒ │
-│ │   └─◉ g3  3 roles 0.65 $.19│ Second Opinion      ensembl −0.10 [−.30,+.10] .10  21% ▒▒ │
-│                              │ Synthesizer         control +0.20 [ .00,+.40] .60   7% ░░ │
-│ ARCHITECTURE g3              │ ablated 10/20 · noise 0.10 · SF 0.53 · 2 witnesses        │
-│  task ─▶ Extract ─▶ P&L ─▶   ├───────────────────────────────────────────────────────────┤
-│         ─▶ Synth ─▶ answer   │ CASES  ✓✓✓✗✓✓✓✓✗✓ ✓✓✓✓✓✓✗✓✓✓   16/20                    │
+┌─ OCCAM ─ fx_recon_a · FX revaluation ─ run 1 · lessons 0 ─ gen 1/6 ─ ⏵ REPLAY ──────────┐
+│ LINEAGE                      │ ABLATION — g0 · 5 roles · LOO approx.                     │
+│ ● g0  5 roles  0.55  $0.063  │ role            just.    infl   95% CI      div  cost verd │
+│ └─◉ g1  4 roles 0.55  $0.060 │ Ledger Parser   ctx_iso  +0.40 [+.20,+.60]  .90  14% LOAD │
+│    ✗ Verifier (pruned)       │ Rate Fetcher    parallel +0.50 [+.30,+.70] 1.00  54% LOAD │
+│                              │ FX Calculator   control  +0.50 [+.30,+.70] 1.00  19% LOAD │
+│ ARCHITECTURE g1              │ Verifier        verify   +0.00 [−.10,+.10]  .10   6% WITN │
+│ task ─▶ Parser ─▶ Fetcher ─▶ │ Reporter        control  +0.10 [−.10,+.30]  .30   8% UNC  │
+│   Calculator ─▶ Reporter     │ ablated 10/20 · noise 0.10 · SF 0.87 · 1 witness          │
+│   ~~Verifier~~               ├───────────────────────────────────────────────────────────┤
+│                              │ CASES 11/20  ✓✓✗✓✗✓✓✗✓✓ ✗✓✓✗✓✗✓✓✗✓                       │
+│ LESSONS · 2                  │  fxa_007 · 6/8 invoices ✓ · INV-2291 ✗ (holiday) · INV-2310 ✗ (fee) │
+│ [tool] fx_rate: rate_date is │├───────────────────────────────────────────────────────────┤
+│  the actual ECB day …  g0    ││ METRICS pass 0.55 ▁▁  cost $0.063 ▇▇  lat 22.9s ▇▇  calls/case 17.4  SF 0.87 ▅▆ │
+│ [rule] bank fee: add back g0 ││ vs CoT-SC(k=3) pass 0.40 · Δpass +0.15 · cost ×1.17                            │
 ├──────────────────────────────┴───────────────────────────────────────────────────────────┤
-│ METRICS   pass 0.65 ▁▂▃▅▅  cost $0.19 ▇▆▅▃▂  latency 4.1s ▆▅▅▃▂  SF 0.53 ▁▂▃▅  rel 0.90 │
-│ vs CoT-SC(k=3) pass 0.55 · cost $0.20 · Δpass +0.10 · cost ×0.95                        │
-├──────────────────────────────────────────────────────────────────────────────────────────┤
-│ DIAGNOSIS ▸ Ablation: Critic and Second Opinion changed 1/10 answers each, at noise      │
-│ floor. Combined 40% of spend. Pruning both. Expected: pass unchanged, cost −40%.         │
-│ ▸ g3' split "P&L Calculator" → per-investor workers: new roles diverged 0/10 → reverted. │
+│ DIAGNOSIS ▸ g0: 9 failures — 6 holiday/weekend, 5 bank-fee (overlap 2). Rate Fetcher    │
+│ passed 2026-04-02 rates as "April 4" without reading rate_date. Verifier: WITNESS.       │
+│ ▸ prune Verifier · lesson written [tool] fx_rate · lesson written [rule] bank fee        │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
- [q] quit  [←/→] generation  [a] ablation  [c] cases  [d] diagnosis  [b] baseline  [space] pause replay
+ ←/→ gen · a ablation · c cases · d diagnosis · l lessons · i inspect · space pause · . step · q
 ```
 
 ## 3. Widgets
@@ -91,7 +101,7 @@ store.EventReader(run_dir).tail()  →  reducer.reduce(state, event)  →  app.p
 - `App` subclass `OccamApp(run_dir, mode)`; one `Screen`; `ModalScreen` for the inspector.
 - Styling in `occam/tui/occam.tcss`. Palette variables at the top so the Figma reference can be applied by editing ~10 lines.
 - `textual serve "occam tui --run runs/demo"` for browser rendering during recording; set `--port` and record the browser tab at 1080p with a large font.
-- Unit tests with `App.run_test()` + `Pilot`: mount against `fixtures/demo_run`, assert the ablation table has 5 rows with expected verdicts after replay to gen 3.
+- Unit tests with `App.run_test()` + `Pilot`: mount against `fixtures/demo_run1`, assert the ablation table has 5 rows with expected verdicts after replay to g0's `ablation.completed`; mount `fixtures/demo_run2`, assert header shows `lessons loaded` and the compare strip is populated.
 
 ## 7. Design reference
 A Figma export (PNG + tokens) will be placed at `design/` by the human team. Treat it as the visual target for spacing, palette and typography; treat *this document* as the source of truth for what information appears where. If they conflict on information content, this document wins.

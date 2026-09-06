@@ -1,185 +1,126 @@
-# 08 — End-to-End Walkthrough, With the Numbers Worked
+# 08 — End-to-End Walkthrough (v3), With the Numbers Worked
 
-One SMFR run, traced from `occam run` to the ablation table, with every calculation shown. If a number in the TUI can't be derived by the method here, the implementation is wrong. Figures are illustrative but internally consistent.
+Two runs on the FX revaluation task. Figures are illustrative but internally consistent; every one is derivable from the events by the methods in `03`.
 
-## 0. Setup
+## 0. Run 1 setup
 
 ```
-occam run --task smfr_2inv --max-gens 6 --cases 20 --ablate-cases 10 --tui
+occam lessons reset --memory memory/fx_recon
+occam run --task fx_recon_a --run-name run1 --memory memory/fx_recon --max-gens 6 --cases 20 --ablate-cases 10 --pass3
 ```
-- Loads `tasks/smfr_2inv/` → 20 `Case`s. Each `input` ≈ 3,500 tokens of price tables + transactions + question. `expected` e.g. `["Rachel"]`.
-- Ablation subset: 10 cases, stratified (5 `reverse_target_sell` / 5 `_buy`, mixed earliest/latest). Fixed by seed → same 10 every generation.
-- Emits `run.started`. Creates `runs/2026…_smfr_2inv/`.
+20 cases, 6–10 invoices each. `lessons_loaded: []`.
 
-## 1. Architect → g0
+## 1. Architect → g0 (no lessons)
 
-One call to `architect` (Sonnet 5) with: goal, tool manifest (`python_exec`, `lookup_price`, `list_transactions`), answer format, 3 example cases. Response is JSON constrained to the `Architecture` schema. It proposes:
-
-| id | name | justification | tools | inputs | model |
-|---|---|---|---|---|---|
-| r_extract | Transaction Extractor | context_isolation | list_transactions | task | worker_fast |
-| r_pnl | P&L Calculator | parallel | lookup_price, python_exec | r_extract | worker_fast |
-| r_critic | Critic | verification | — | r_pnl | worker_fast |
-| r_second | Second Opinion | ensemble | lookup_price, python_exec | r_extract | worker_fast |
-| r_synth | Synthesizer | control | — | r_pnl, r_critic, r_second | worker_fast |
-
-`final_role = r_synth`, `control = deterministic`. Emits `architecture.proposed{generation:0}`. TUI: lineage gets node `g0 · 5 roles`; architecture panel draws `task → Extract → {P&L, Second} → Critic → Synth`.
-
-## 2. Execute g0 — one case in detail (`smfr2_0007`)
-
-Topological order: r_extract → (r_pnl ‖ r_second) → r_critic → r_synth. The two middle roles run concurrently.
-
-| role | what it does | calls | tok in | tok out | latency |
-|---|---|---|---|---|---|
-| r_extract | calls `list_transactions("Rachel")`, `("Patricia")`; returns structured JSON of holdings | 3 | 4,100 | 420 | 3.1s |
-| r_pnl | for each investor calls `lookup_price` ×~20, then `python_exec` to compute P&L per date, returns per-investor valid dates + optimal date | 6 | 5,900 | 900 | 6.4s |
-| r_second | independently does the same thing, differently phrased | 5 | 5,600 | 850 | 5.9s |
-| r_critic | reads r_pnl output, writes "looks consistent" | 1 | 1,300 | 90 | 1.2s |
-| r_synth | reads all three, emits `["Rachel"]` | 1 | 2,600 | 40 | 1.4s |
-
-Cost per role = `tok_in × in_rate/1e6 + tok_out × out_rate/1e6`. With a list-rate-equivalent of $0.10/$0.40 per M (GLM-4.7-Flash placeholder — fill real):
-```
-r_extract: 4100×0.10e-6 + 420×0.40e-6  = $0.000578
-r_pnl:     5900×0.10e-6 + 900×0.40e-6  = $0.000950
-r_second:  5600×0.10e-6 + 850×0.40e-6  = $0.000900
-r_critic:  1300×0.10e-6 +  90×0.40e-6  = $0.000166
-r_synth:   2600×0.10e-6 +  40×0.40e-6  = $0.000276
-case total                              = $0.002870
-```
-Latency for the case = critical path = 3.1 + max(6.4, 5.9) + 1.2 + 1.4 = **12.1s** (not the sum — parallel roles overlap).
-
-Checker `json_set_equal(answer='["Rachel"]', expected=["Rachel"])` → **pass**. Emits `execution.case`.
-
-After all 20 cases: `pass_rate = 13/20 = 0.65`, `cost = $0.0574`, `latency_mean = 11.8s`. Wilson 95% CI for 13/20 ≈ [0.43, 0.82]. Emits `execution.completed{variant:"full"}`. TUI: cases grid shows ✓✓✗✓…, metrics strip gets its first point.
-
-Per-role cost shares over the 20 cases (sum of each role's cost / total):
-```
-r_extract 20%   r_pnl 33%   r_second 31%   r_critic 6%   r_synth 10%
-```
-
-## 3. Noise floor
-
-Re-run `full` on the 10 ablation cases → `variant:"full_repeat"`. Compare answers case by case with the first run: 9 agree, 1 differs (case 0012 flipped `["Patricia"]` → `[]`). **noise_rate = 0.10.** Also gives `reliability = 0.90`. Cost: another ~$0.029 (10 cases). All upstream roles hit cache? No — this is a genuine re-run, temperature 0, but hosted models drift; that's the point.
-
-## 4. Ablate g0 — knock out r_critic
-
-Run the 10 cases with r_critic removed. r_synth's prompt template renders `[no input from Critic]` in that slot.
-
-- r_extract, r_pnl, r_second: **cache hits** (identical inputs) → $0, 0 added latency, `cached=true`.
-- r_synth: recomputes (its input changed).
-
-Paired comparison over 10 cases:
-
-| case | full answer | −critic answer | full pass | −critic pass |
+| id | name | justification | tools | inputs |
 |---|---|---|---|---|
-| 0003 | ["Rachel"] | ["Rachel"] | ✓ | ✓ |
-| 0007 | ["Rachel"] | ["Rachel"] | ✓ | ✓ |
-| 0012 | ["Patricia"] | [] | ✗ | ✗ |
-| … 7 more identical … |
+| r_parse | Ledger Parser | context_isolation | — | task |
+| r_rates | Rate Fetcher | parallel | fx_rate, fx_series | r_parse |
+| r_calc | FX Calculator | control | python_exec | r_parse, r_rates |
+| r_verify | Verifier | verification | — | r_calc |
+| r_report | Reporter | control | — | r_calc, r_verify |
 
+Tool description the architect saw for `fx_rate`: *"Get the exchange rate between two currencies on a date."* Nothing about holidays.
+
+## 2. Execute g0 — case `fxa_007` (8 invoices, valuation 2026-04-30)
+
+| role | behaviour | calls | tok in | tok out | latency |
+|---|---|---|---|---|---|
+| r_parse | structures 8 invoices as JSON | 1 | 1,900 | 620 | 2.2s |
+| r_rates | **16 single-date `fx_rate` calls** (issue + settle/valuation per invoice), one at a time | 17 | 9,400 | 1,900 | 14.8s |
+| r_calc | `python_exec` over parsed ledger + rates | 2 | 3,100 | 700 | 4.1s |
+| r_verify | "totals look consistent" | 1 | 1,600 | 80 | 1.1s |
+| r_report | emits final JSON | 1 | 1,400 | 260 | 1.3s |
+
+Cost at list-rate-equivalent $0.10/$0.40 per M: `r_parse $0.000438 · r_rates $0.001700 · r_calc $0.000590 · r_verify $0.000192 · r_report $0.000244 = $0.003164/case`. Critical path 2.2+14.8+4.1+1.1+1.3 = **23.5s**.
+
+**Where it goes wrong.** INV-2291 settled 2026-04-04 (Saturday; Friday was Good Friday). `fx_rate("2026-04-04","USD","INR")` returns `{"rate_date":"2026-04-02","rate":85.91}`. The fetcher passes 85.91 on as "the April 4 rate" — correct number by luck? No: the *calculator* separately decided "weekend → use Friday" and asked the fetcher for `2026-04-03`, got back `rate_date 2026-04-02` again, and then *averaged* the two identical values with a stale cached Thursday figure it had labelled wrongly. Net: INV-2291 off by ₹1,340. INV-2310 has "net of bank fee INR 1,250": calculator treats the fee as FX loss → off by exactly ₹1,250. Total off by ₹2,590 > tolerance (max(5, 0.1%·41,872) = ₹41.87). **Fail.** `sub_results`: 6/8 invoices ✓, INV-2291 ✗, INV-2310 ✗.
+
+After 20 cases: **pass 11/20 = 0.55**, cost $0.0633, latency 22.9s, **calls/case 17.4**. Failures: 6 holiday/weekend cases, 5 fee cases (some overlap) → 9 distinct failures.
+
+## 3. Noise floor, ablation g0
+
+`full_repeat` on 10 cases: 1 disagreement → noise 0.10.
+
+| role | divergence | influence | CI | cost share | verdict |
+|---|---|---|---|---|---|
+| r_parse | 0.90 | +0.40 | [+.20,+.60] | 14% | LOAD-BEARING |
+| r_rates | 1.00 | +0.50 | [+.30,+.70] | 54% | LOAD-BEARING |
+| r_calc | 1.00 | +0.50 | [+.30,+.70] | 19% | LOAD-BEARING |
+| **r_verify** | **0.10** | **0.00** | [−.10,+.10] | **6%** | **WITNESS** |
+| r_report | 0.30 | +0.10 | [−.10,+.30] | 8% | UNCERTAIN |
+
+SF(g0) = 0.14 + 0.54 + 0.19 = **0.87**. Baseline CoT-SC: single sample ≈ $0.0009 → k = floor(0.003164/0.0009) = 3 → 8/20 = 0.40, $0.054. Δpass +0.15, cost ×1.17.
+
+## 4. Diagnose g0 → prune + lessons
+
+Hard rule: witness exists → `prune r_verify`. Diagnosis text also reads the failing traces' raw tool responses and writes **two lessons** (both pass the leak guard — no dates, no ids, no ≥4-digit numbers):
+
+```json
+{"kind":"tool_note","tool":"fx_rate","text":"The response's rate_date is the actual ECB business day used and may be earlier than the requested date (weekends and ECB holidays). Always use rate_date and the returned rate as-is; never adjust the date yourself or average adjacent days.","evidence":{"run_id":"run1","generation":0,"case_ids":["fxa_003","fxa_007","fxa_012","fxa_015"]}}
+{"kind":"domain_rule","text":"When a settlement is marked net of a bank fee in the reporting currency, the fee is a bank charge, not FX: add it back to the received value before computing the FX gain or loss.","evidence":{"run_id":"run1","generation":0,"case_ids":["fxa_002","fxa_007","fxa_011"]}}
 ```
-divergence(r_critic) = 1/10 = 0.10      (only case 0012 changed — and it was already wrong)
-influence(r_critic)  = (0 cases ✓→✗  −  0 cases ✗→✓) / 10 = 0.00
-bootstrap CI (2000 resamples of the 10 paired outcomes) = [−0.10, +0.10]
-cost_share(r_critic) = 0.06
+Both → `lesson.written`. TUI lessons pane: 2 rows.
+
+Mutation for g1 is `prune r_verify` (hard rule). The prompt fixes come next generation.
+
+## 5. g1 → g2
+
+g1 (4 roles): r_parse, r_rates cached for all cases; r_calc, r_report recompute. pass 0.55 (unchanged), cost $0.0595 (−6%), SF 1.00 after re-ablation (r_report becomes LOAD-BEARING without a verifier in between).
+
+Diagnose g1: no witnesses → LLM picks `rewrite_prompt` on **r_calc and r_rates** (one mutation, two roles allowed when the diagnosis is identical for both): fetcher told to pass through `rate_date`, calculator told to trust it and to add back bank fees. g2: **pass 18/20 = 0.90**, cost $0.0601, calls/case 17.2. Two remaining failures are JPY-heavy batches at the tolerance edge (uncertain — see OPEN-QUESTIONS).
+
+## 6. g3 — the efficiency lesson
+
+Diagnose g2 sees 17 calls/case and the unused `fx_series` tool in the manifest. Mutation `rewrite_prompt r_rates`: "fetch each currency's rates for the whole date range in one `fx_series` call, then look up dates locally." g3: pass 0.90, **calls/case 17.2 → 5.1**, cost $0.0388 (−35%), latency 22.9s → 11.6s. Third lesson written:
+
+```json
+{"kind":"tool_note","tool":"fx_series","text":"For several dates in the same currency pair, one fx_series call over the date range is cheaper and faster than many fx_rate calls; look up individual dates from the returned map and treat missing days as non-business days.","evidence":{"run_id":"run1","generation":2,"case_ids":["fxa_001","fxa_004"]}}
 ```
-Verdict rule: `divergence 0.10 ≤ noise_rate 0.10 + eps 0.05` → **WITNESS**. Emits `ablation.role{role_id:"r_critic", verdict:"witness"}`. TUI row turns red.
 
-## 5. Ablate g0 — knock out r_second
+g4, g5: no improvement → plateau. **pass³ on g3:** 17/20 cases pass 3/3 → `rel³ = 0.85`.
 
-r_extract cached. r_pnl cached. r_critic recomputes? No — r_critic reads only r_pnl, unchanged → cached. r_synth recomputes.
+## 7. Run 1 summary
 
-Paired: 9/10 answers identical; case 0012 changes again (this case is just unstable).
-```
-divergence = 0.10 → ≤ noise floor → WITNESS.   influence 0.00, CI [−0.10,+0.10].   cost_share 0.31
-```
-**This is the money row**: a role eating 31% of spend that changed nothing beyond the noise floor. The "ensemble" tag next to a red verdict is the Illusion paper's finding on screen.
-
-## 6. Ablate g0 — knock out r_pnl
-
-r_synth now sees `[no input from P&L Calculator]` and only has r_second's numbers and r_critic's (now empty-input) comment. Answers change on 8/10 cases; 4 cases that passed now fail, 0 flip the other way.
-```
-divergence = 0.80
-influence  = (4 − 0)/10 = +0.40, CI [+0.20, +0.60]  → lo > 0 → LOAD-BEARING
-```
-Similarly r_extract → influence +0.30, CI [+0.10, +0.50] → LOAD-BEARING. r_synth → divergence 0.60, influence +0.20, CI [0.00, +0.40] → **UNCERTAIN** (lo == 0). Amber; never pruned.
-
-## 7. Structural fidelity of g0
-
-```
-SF(g0) = Σ cost_share over LOAD-BEARING roles = r_extract 0.20 + r_pnl 0.33 = 0.53
-```
-Emits `ablation.completed{structural_fidelity:0.53, witnesses:["r_critic","r_second"]}`. Footer: `ablated 10/20 · noise 0.10 · SF 0.53 · 2 witnesses`.
-
-## 8. Baseline for g0 — cost-matched CoT-SC
-
-Single role, worker_fast, CoT prompt, temperature 0.7. One sample on a 3.5k-token input ≈ 3,600 in / 400 out ≈ $0.00052. Generation cost per case = $0.00287.
-```
-k = clamp(floor(0.00287 / 0.00052), 1, 9) = floor(5.5) = 5
-```
-Run 5 samples per case on all 20 cases, majority vote → 11/20 = 0.55, cost $0.052, latency 4.0s (samples run in parallel). Emits `baseline.completed{k:5, pass_rate:0.55, cost_usd:0.052, matched_to_cost_usd:0.0574}`.
-
-Metrics strip: `vs CoT-SC(k=5) · Δpass +0.10 · cost ×1.10`. We're slightly more accurate and slightly more expensive at g0. Fine — that's the starting point.
-
-## 9. Diagnose → mutate → g1
-
-`diagnose` gets: 7 failed cases with per-role outputs, the ablation table, history. **Hard rule fires before the LLM is even asked:** witnesses exist → mutation must be `prune` of the highest-cost witness. The LLM writes the rationale:
-
-> "Second Opinion (31% of spend) and Critic (6%) each changed answers on 1/10 cases, at the noise floor. Second Opinion duplicates P&L Calculator's work; Critic's output is never acted on. Pruning both. Expected: pass rate unchanged (±0.10), cost −35–40%."
-
-Both are pruned in one mutation (rule: prune *all* witnesses whose combined removal was individually justified — cheaper than two generations). `mutate.prune` removes the roles and rewires r_synth's inputs to `[r_pnl]`. Emits `mutation.applied{type:"prune", target_role:["r_second","r_critic"], diff:"−Second Opinion, −Critic; Synthesizer.inputs: [P&L Calculator]"}`. TUI: architecture panel strikes through two boxes for 2s, then they vanish. Lineage: `g1 · 3 roles`.
-
-## 10. Execute g1
-
-Cache does a lot here: r_extract and r_pnl outputs for all 20 cases are byte-identical → cache hits. Only r_synth (changed inputs) recomputes. 20 calls total.
-```
-pass_rate 13/20 = 0.65 (unchanged)   cost $0.0353 (−39%)   latency_mean 9.9s (−16%)
-```
-Baseline re-matched: k = floor(0.001765/0.00052) = 3 → 0.50, $0.031. Now `Δpass +0.15, cost ×1.14`.
-
-Ablation g1 (3 roles): r_synth now LOAD-BEARING (influence +0.30 — without a control role nothing aggregates). **SF(g1) = 0.20 + 0.50 + 0.30 = 1.00.** Everything left is load-bearing.
-
-## 11. g2 — try a split, verify, revert
-
-No witnesses → hard rule doesn't fire → LLM picks from the menu. Failures show r_pnl's `python_exec` sometimes mixing up the two investors' holdings. It proposes `split r_pnl → r_pnl_A, r_pnl_B` (one per investor), justification `parallel`.
-
-Execute g2': pass 14/20, cost +8% (two smaller roles ≈ one bigger one, plus overhead). Ablate the two new roles: knock out r_pnl_A → divergence 0.5, influence +0.20 CI [0.0, +0.40] → UNCERTAIN. Knock out r_pnl_B → same. Neither is a witness, so **no revert**; but pass improved by 1 case — inside noise. Plateau rule: `(pass, −cost)` improved on pass → keep, continue.
-
-*(In the fixture we make the split fail instead, to show the revert beat: the new roles come back WITNESS because the architect wired them so r_synth still reads the old combined key. Emits `mutation.reverted{restored_to:"g1", reason:"new roles r_pnl_A, r_pnl_B: divergence 0.0 — not wired into final answer"}`. Lineage shows `○ g2' split → reverted`.)*
-
-## 12. g3 — rewrite prompt, plateau, done
-
-Diagnosis targets the remaining failures (investor-holding confusion) with `rewrite_prompt` on r_pnl adding an explicit "process one investor at a time; label every intermediate by investor name." Execute: 16/20 = 0.80, cost $0.037. Ablation: all three LOAD-BEARING, SF 1.00. Baseline k=3: 0.50. `Δpass +0.30, cost ×1.19`.
-
-g4 tries `set_memory scratchpad` on r_extract: 16/20, cost +3% → no improvement in `(pass, −cost)`. g5 tries `rebind_tools` (remove `lookup_price` from r_pnl, rely on `python_exec` over the parsed table): 16/20, cost −4% → improvement on cost. g6: no improvement → **plateau after 2 non-improving generations** → `run.completed{best_generation:"g5"}`.
-
-## 13. The summary the README table shows
-
-| gen | roles | pass | cost (list-equiv) | latency | SF | vs CoT-SC Δpass | cost ratio | mutation |
+| gen | roles | pass | cost | calls/case | latency | SF | vs CoT-SC Δpass | mutation |
 |---|---|---|---|---|---|---|---|---|
-| g0 | 5 | 0.65 | $0.0574 | 11.8s | 0.53 | +0.10 | 1.10 | — |
-| g1 | 3 | 0.65 | $0.0353 | 9.9s | 1.00 | +0.15 | 1.14 | prune ×2 |
-| g2' | 4 | — | — | — | — | — | — | split → **reverted** |
-| g3 | 3 | 0.80 | $0.0370 | 10.1s | 1.00 | +0.30 | 1.19 | rewrite_prompt |
-| g5 | 3 | 0.80 | $0.0355 | 9.6s | 1.00 | +0.30 | 1.15 | rebind_tools |
+| g0 | 5 | 0.55 | $0.0633 | 17.4 | 22.9s | 0.87 | +0.15 | — |
+| g1 | 4 | 0.55 | $0.0595 | 17.4 | 22.0s | 1.00 | +0.15 | prune Verifier |
+| g2 | 4 | 0.90 | $0.0601 | 17.2 | 22.4s | 1.00 | +0.45 | rewrite Fetcher+Calculator |
+| **g3** | 4 | **0.90** | **$0.0388** | **5.1** | **11.6s** | 1.00 | +0.50 | rewrite Fetcher (range endpoint) |
 
-Read across: **accuracy +15pp, cost −38%, latency −19%, structural fidelity 0.53 → 1.00, two agents deleted, one attempted addition reverted.** Four of the brief's axes, one table, all derived from the events.
-
-## 14. How every number reaches the TUI
+## 8. Run 2 — held-out ledger, lessons loaded
 
 ```
-engine emits event → store.writer appends line to events.jsonl (fsync)
-                  → store.reducer folds it into State → state.json rewritten
-TUI: EventReader.tail() yields the same line → reducer (same code) → StateChanged → widgets re-render
+occam run --task fx_recon_b --run-name run2 --memory memory/fx_recon --max-gens 6 --cases 20 --ablate-cases 10 --pass3
 ```
-The reducer is the only shared code and it is pure. `occam validate <run>` replays events through it and diffs against `state.json`; any divergence is a bug.
+`run.started.lessons_loaded` = 3. The architect sees `fx_rate`'s description **with L1 appended**, `fx_series` **with L2 appended**, and D1 under "Known conventions." It proposes **4 roles** (no verifier — the architect is also told the prior run's ablation history) with the fetcher already using `fx_series`.
 
-## 15. Where the numbers can lie, and the guard for each
+**Run 2 g0: pass 17/20 = 0.85, cost $0.0371, calls/case 4.9, latency 11.1s.** Ablation: all four LOAD-BEARING, SF 1.00. Diagnose g0 → `rewrite_prompt r_calc` (a JPY rounding fix) → g1: 0.90. g2, g3 no improvement → plateau at g1. pass³ = 0.90.
+
+## 9. `occam compare run1 run2`
+
+```
+                        run1        run2       Δ
+g0 pass rate            0.55        0.85      +0.30
+final pass rate         0.90        0.90       0.00
+g0 calls/case           17.4        4.9      −72%
+g0 cost/case            $0.0032     $0.0019  −41%
+generations to plateau  3           1         −2
+roles at g0 → final     5 → 4       4 → 4
+pass³ (final)           0.85        0.90     +0.05
+lessons loaded/written  0 / 3       3 / 0
+```
+
+That table is the answer to "does it get better over time." The second team started where the first one finished.
+
+## 10. Where the numbers can lie, and the guard
 
 | risk | guard |
 |---|---|
-| Cache hits make cost look lower than a cold run | `cached` flag recorded; README reports both "run cost" and "cold-equivalent cost" |
-| One unstable case dominates influence at n=10 | noise floor + CI + `uncertain` verdict; escalate n before acting |
-| Prune looks free because pass didn't move — but it's inside noise either way | say so: "pass unchanged within ±0.10 noise; cost −39% is outside any noise" |
-| Baseline k rounds down, flattering us | report `matched_to_cost_usd` next to actual baseline cost; ratio shown |
-| Granted tokens → "$0" | list-rate-equivalent, labelled |
+| Lessons leak case answers | code guard (`01 §4.4`); lessons are printed in README |
+| Run 2 is easier | same generator, different seed, same mix constraints; both `cases.jsonl` committed |
+| Cache flatters cost | `cached` flag; README shows cold-equivalent |
+| One unstable case at n=10 | noise floor, CI, `uncertain` never pruned |
+| pass³ vs noise floor disagree | expected; both reported, both defined |
+| Granted tokens → $0 | list-rate equivalent, labelled |
