@@ -1,0 +1,18 @@
+name: fx_recon_b
+domain: finance_ops
+goal: 'Month-end FX revaluation: for a ledger of foreign-currency receivables, compute the total FX gain/(loss)
+  in INR as of the valuation date and the gain/(loss) per invoice. Use the exchange rate tools for rates.
+  Follow the company''s ledger conventions as stated in each case.'
+answer_format: 'Final line: a JSON object {"total_inr": <number>, "per_invoice": {"<id>": <number>, ...}}'
+tools:
+- fx_rate
+- fx_series
+- python_exec
+checker: fx_total
+examples: 3
+memory: memory/fx_recon
+source:
+  kind: generated
+  repo: occam
+  file: tasks/fx_recon_b/cases.jsonl
+  license: MIT

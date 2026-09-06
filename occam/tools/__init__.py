@@ -1,1 +1,5 @@
-"""Tool registry and implementations are added in WP-04."""
+"""HTTP-backed tool implementations."""
+
+from occam.tools.fx import FXClient, fx_rate, fx_series
+
+__all__ = ["FXClient", "fx_rate", "fx_series"]

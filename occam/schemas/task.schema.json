@@ -14,9 +14,10 @@
     "tools": {"type": "array", "items": {"type": "string"}},
     "checker": {
       "type": "string",
-      "enum": ["json_set_equal", "numeric_exact", "bfcl_ast", "exact", "llm_judge"]
+      "enum": ["json_set_equal", "numeric_exact", "bfcl_ast", "exact", "llm_judge", "fx_total"]
     },
     "examples": {"type": "integer", "minimum": 0},
+    "memory": {"type": "string"},
     "source": {
       "type": "object",
       "additionalProperties": false,

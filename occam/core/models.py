@@ -18,7 +18,14 @@ Justification = Literal[
 MemoryPolicy = Literal["none", "scratchpad", "summary"]
 ControlMode = Literal["llm", "deterministic"]
 Verdict = Literal["load_bearing", "witness", "harmful", "uncertain"]
-CheckerName = Literal["json_set_equal", "numeric_exact", "bfcl_ast", "exact", "llm_judge"]
+CheckerName = Literal[
+    "json_set_equal",
+    "numeric_exact",
+    "bfcl_ast",
+    "exact",
+    "llm_judge",
+    "fx_total",
+]
 EventType = Literal[
     "run.started",
     "lesson.written",
@@ -192,6 +199,7 @@ class Task(ContractModel):
     tools: list[str]
     checker: CheckerName
     examples: int = Field(ge=0)
+    memory: str = ""
     source: SourceSpec
 
 
