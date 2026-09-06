@@ -39,10 +39,14 @@ All notable changes to Occam are documented here.
 
 ### Fixed
 
-- Hardened `python_exec` with safe builtins, AST/module capability checks, bounded
-  child output, and regression coverage for absolute-file, process, and
-  introspection escapes. The documentation explicitly treats this as
-  model-calculation containment rather than a perfect arbitrary-Python sandbox.
+- Replaced `python_exec`'s arbitrary `exec` path with a fail-closed AST
+  capability evaluator that preserves the FX arithmetic/Decimal/JSON surface,
+  bounds source, values, steps, timeout, and output, and rejects filesystem,
+  process, network, and introspection escapes before execution. Added sentinel
+  regressions for absolute files, recovered `os.system`, subprocess launch, and
+  a subprocess-based network escape. The documentation explicitly treats this
+  as model-calculation containment rather than a perfect arbitrary-Python
+  sandbox.
 - `EventWriter` now locks with `msvcrt` on Windows and `fcntl` elsewhere. The
   store imported `fcntl` at module level, so `occam.store` was unimportable on
   Windows and three test modules failed at collection. Covered by a fresh-

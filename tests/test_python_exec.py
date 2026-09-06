@@ -113,6 +113,31 @@ def test_process_and_introspection_routes_cannot_print_sentinels(
         assert "environment-secret" not in output
 
 
+@pytest.mark.parametrize(
+    ("label", "code"),
+    (
+        (
+            "process launch",
+            "import subprocess\n"
+            "subprocess.Popen(['python', '-c', \"print('PROCESS_LAUNCH_SENTINEL')\"])",
+        ),
+        (
+            "child network",
+            "import subprocess\n"
+            "subprocess.run(['python', '-c', \"import socket; "
+            "socket.create_connection(('example.com', 80), 1)\"])",
+        ),
+    ),
+    ids=lambda case: case[0],
+)
+def test_subprocess_and_child_network_escapes_are_rejected(label: str, code: str) -> None:
+    result = run(code, timeout_s=1.0)
+
+    assert not result.ok, label
+    assert "PROCESS_LAUNCH_SENTINEL" not in result.as_text()
+    assert "import of 'subprocess' is not allowed" in result.stderr
+
+
 def test_the_environment_allow_list_carries_no_credentials() -> None:
     assert not any(
         marker in name
