@@ -17,6 +17,8 @@ All notable changes to Occam are documented here.
 - WP-02 review hardening: explicit zero-temperature forwarding, Anthropic native
   structured outputs and multi-turn tool adaptation, approximate grant labels,
   poisoned-cache rejection, and non-overriding project `.env` loading.
+- WP-03 FX packs, Frankfurter cache-backed client, formula reference implementation,
+  and tolerance-aware `fx_total` grader.
 
 ### Fixed
 

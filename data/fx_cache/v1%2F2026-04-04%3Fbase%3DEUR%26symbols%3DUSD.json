@@ -1,0 +1,1 @@
+{"request_path":"/v1/2026-04-04?base=EUR&symbols=USD","response":{"amount":1.0,"base":"EUR","date":"2026-04-02","rates":{"USD":1.1525}},"status":200}
