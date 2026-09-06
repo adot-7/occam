@@ -401,6 +401,8 @@ def test_cost_is_accounted_per_role(tmp_path):
     case_result = result.results[0]
     per_role = case_result.per_role
     assert per_role["a"].cost_usd > 0
+    assert per_role["a"].billed_cost_usd == 0.0
+    assert per_role["a"].cost_label == "list-rate-equivalent"
     assert per_role["b"].cost_usd == pytest.approx(4 * per_role["a"].cost_usd)
     assert per_role["a"].billed_cost_usd == 0.0
     assert per_role["b"].billed_cost_usd == 0.0

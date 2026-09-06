@@ -78,6 +78,8 @@ def make_run_result(
                 tokens_in=100,
                 tokens_out=50,
                 cost_usd=cost,
+                billed_cost_usd=cost,
+                cost_label="synthetic",
                 latency_s=1.0,
                 output=f"{role_id}:{case_id}",
                 tool_calls=[{"name": "fx_rate"} for _ in range(calls.get(role_id, 0))],
@@ -162,6 +164,7 @@ class SyntheticRunner:
         variant: str,
         ablate_role: str | None = None,
         use_cache: bool = True,
+        generation: int = 0,
     ) -> RunResult:
         """Return the recorded answers for one variant over ``cases``."""
 

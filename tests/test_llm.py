@@ -194,6 +194,34 @@ def test_client_accounts_grant_equivalent_cost_and_cache_hit_is_free(tmp_path: P
     assert len(list(tmp_path.glob("*.json"))) == 1
 
 
+def test_cache_bypass_fetches_fresh_response_without_replacing_canonical_cache(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [
+            ProviderResponse(text="canonical", tokens_in=1, tokens_out=1),
+            ProviderResponse(text="fresh-repeat", tokens_in=2, tokens_out=2),
+        ]
+    )
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+    )
+    messages = [{"role": "user", "content": "same request"}]
+
+    canonical = client.complete("worker_fast", messages)
+    repeat = client.complete("worker_fast", messages, use_cache=False)
+    cached_again = client.complete("worker_fast", messages)
+
+    assert canonical.text == "canonical"
+    assert repeat.text == "fresh-repeat"
+    assert repeat.cached is False
+    assert cached_again.text == "canonical"
+    assert cached_again.cached is True
+    assert len(provider.calls) == 2
+
+
 def test_corrupt_cache_entry_is_a_miss_and_gets_repaired(tmp_path: Path) -> None:
     provider = FakeProvider([ProviderResponse(text="repaired", tokens_in=1, tokens_out=1)])
     client = LLMClient(

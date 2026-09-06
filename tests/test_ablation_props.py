@@ -121,6 +121,7 @@ def test_role_never_referenced_downstream_has_zero_divergence_and_is_a_witness()
             role_id: RoleEffect(changed=all_cases, broken=set(PASSING))
             for role_id in ("r_parse", "r_rates", "r_calc", "r_verify", "r_report")
         },
+        role_costs={role.id: 0.1 for role in roles},
     )
     full = runner.full_result(architecture)
 
@@ -483,6 +484,7 @@ def test_emitted_ablation_events_validate_against_the_event_schema() -> None:
     for seq, event in enumerate(collected):
         EVENT_VALIDATOR.validate({"ts": "2026-09-06T09:00:00Z", "run_id": "t", "seq": seq, **event})
     assert collected[0]["data"]["case_ids"] == [case.id for case in CASES]
+    assert collected[0]["data"]["noise_rate"] == 0.1
     assert collected[-1]["data"] == {
         "generation": 0,
         "structural_fidelity": 0.87,

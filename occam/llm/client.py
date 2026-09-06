@@ -311,8 +311,15 @@ class LLMClient:
         *,
         max_tokens: int | None = None,
         temperature: float = 0.0,
+        use_cache: bool = True,
     ) -> Completion:
-        """Complete one request, applying the cache, limiter, retry, and cost rules."""
+        """Complete one request, applying cache, limiter, retry and cost rules.
+
+        ``use_cache=False`` is reserved for measurements that must observe a
+        fresh provider response, notably ablation's ``full_repeat`` noise-floor
+        pass.  A bypassed response is not written back: a noisy repeat must not
+        replace the canonical response used by later knockouts.
+        """
 
         try:
             config = self.configs[model_key]
@@ -323,23 +330,24 @@ class LLMClient:
             config, messages, tools, response_schema, budget, temperature
         )
         address = self.cache.address(request)
-        cached_payload = self.cache.get(address)
-        if cached_payload is not None and _valid_cache_payload(cached_payload):
-            return Completion(
-                text=str(cached_payload.get("text") or ""),
-                tool_calls=list(cached_payload.get("tool_calls") or []),
-                tokens_in=int(cached_payload.get("tokens_in", 0)),
-                tokens_out=int(cached_payload.get("tokens_out", 0)),
-                cost_usd=0.0,
-                latency_s=0.0,
-                cached=True,
-                cost_label="cache-hit",
-                billed_cost_usd=0.0,
-                finish_reason=cached_payload.get("finish_reason"),
-                reasoning=cached_payload.get("reasoning"),
-                usage_estimated=bool(cached_payload.get("usage_estimated", False)),
-                model_key=model_key,
-            )
+        if use_cache:
+            cached_payload = self.cache.get(address)
+            if cached_payload is not None and _valid_cache_payload(cached_payload):
+                return Completion(
+                    text=str(cached_payload.get("text") or ""),
+                    tool_calls=list(cached_payload.get("tool_calls") or []),
+                    tokens_in=int(cached_payload.get("tokens_in", 0)),
+                    tokens_out=int(cached_payload.get("tokens_out", 0)),
+                    cost_usd=0.0,
+                    latency_s=0.0,
+                    cached=True,
+                    cost_label="cache-hit",
+                    billed_cost_usd=0.0,
+                    finish_reason=cached_payload.get("finish_reason"),
+                    reasoning=cached_payload.get("reasoning"),
+                    usage_estimated=bool(cached_payload.get("usage_estimated", False)),
+                    model_key=model_key,
+                )
 
         provider = self._provider_for(config)
         response: ProviderResponse | None = None
@@ -408,7 +416,8 @@ class LLMClient:
             usage_estimated=usage_estimated,
             model_key=model_key,
         )
-        self.cache.put(address, completion.cache_payload())
+        if use_cache:
+            self.cache.put(address, completion.cache_payload())
         return completion
 
 
@@ -432,6 +441,7 @@ def complete(
     *,
     max_tokens: int | None = None,
     temperature: float = 0.0,
+    use_cache: bool = True,
 ) -> Completion:
     """Module-level convenience wrapper for the shared completion interface."""
 
@@ -442,6 +452,7 @@ def complete(
         response_schema,
         max_tokens=max_tokens,
         temperature=temperature,
+        use_cache=use_cache,
     )
 
 

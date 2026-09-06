@@ -107,12 +107,12 @@ def role_cost_shares(
 ) -> dict[str, float]:
     """``cost_share(r)`` for every role: that role's share of total spend.
 
-    Read from the FULL run's per-role traces (`03 §2`). Two documented
-    fallbacks keep the share defined when the denominator is zero: granted
-    models price at $0, so we fall back to token share, and then — when a
-    result carries no accounting at all — to a uniform share. Without them a
-    fully granted run would report ``structural_fidelity = 0``, which would be
-    wrong rather than merely unknown.
+    Read from the FULL run's per-role ``RoleTrace.cost_usd`` values (`03 §2`).
+    The executor populates that field with the displayed cost, including the
+    list-rate equivalent for granted models.  A zero denominator is an
+    accounting failure, not permission to invent token or uniform shares: an
+    ablation table with fabricated spend would make structural fidelity
+    meaningless.
     """
 
     keys = list(role_ids) if role_ids is not None else sorted(role_cost_totals(result))
@@ -122,11 +122,10 @@ def role_cost_shares(
     weights: dict[str, float] = {key: float(costs.get(key, 0.0)) for key in keys}
     total = math.fsum(weights.values())
     if total <= 0.0:
-        tokens = role_token_totals(result)
-        weights = {key: float(tokens.get(key, 0)) for key in keys}
-        total = math.fsum(weights.values())
-    if total <= 0.0:
-        return {key: 1.0 / len(keys) for key in keys}
+        raise ValueError(
+            "cannot compute role cost shares: the full run has no positive "
+            "displayed RoleTrace.cost_usd"
+        )
     return {key: weights[key] / total for key in keys}
 
 

@@ -92,8 +92,38 @@ def test_cost_share_is_the_role_share_of_total_spend() -> None:
     assert role_cost_shares(run, ["r_a", "r_b", "r_c"])["r_c"] == 0.0
 
 
-def test_cost_share_falls_back_to_tokens_then_uniform_when_spend_is_zero() -> None:
+def test_cost_share_requires_positive_displayed_role_trace_costs() -> None:
     granted = RunResult(
+        architecture_id="g000",
+        variant="full",
+        results=[
+            CaseResult(
+                case_id="c1",
+                passed=True,
+                per_role={
+                    "r_a": RoleTrace(
+                        tokens_in=300,
+                        tokens_out=100,
+                        cost_usd=0.02,
+                        billed_cost_usd=0.0,
+                        cost_label="list-rate-equivalent",
+                    ),
+                    "r_b": RoleTrace(
+                        tokens_in=100,
+                        tokens_out=100,
+                        cost_usd=0.01,
+                        billed_cost_usd=0.0,
+                        cost_label="list-rate-equivalent",
+                    ),
+                },
+            )
+        ],
+    )
+    assert role_cost_shares(granted, ["r_a", "r_b"]) == {
+        "r_a": pytest.approx(2 / 3),
+        "r_b": pytest.approx(1 / 3),
+    }
+    unpriced = RunResult(
         architecture_id="g000",
         variant="full",
         results=[
@@ -107,17 +137,9 @@ def test_cost_share_falls_back_to_tokens_then_uniform_when_spend_is_zero() -> No
             )
         ],
     )
-    assert role_cost_shares(granted, ["r_a", "r_b"]) == {
-        "r_a": pytest.approx(2 / 3),
-        "r_b": pytest.approx(1 / 3),
-    }
-    untraced = RunResult(
-        architecture_id="g000",
-        variant="full",
-        results=[CaseResult(case_id="c1", passed=True, per_role={"r_a": RoleTrace()})],
-    )
-    assert role_cost_shares(untraced, ["r_a", "r_b"]) == {"r_a": 0.5, "r_b": 0.5}
-    assert role_cost_shares(untraced, []) == {}
+    with pytest.raises(ValueError, match="no positive displayed RoleTrace.cost_usd"):
+        role_cost_shares(unpriced, ["r_a", "r_b"])
+    assert role_cost_shares(unpriced, []) == {}
 
 
 def test_snapshot_reports_every_field_in_the_spec() -> None:

@@ -100,6 +100,7 @@ class VariantRunner(Protocol):
         variant: str,
         ablate_role: str | None = None,
         use_cache: bool = True,
+        generation: int = 0,
     ) -> RunResult: ...
 
 
@@ -206,6 +207,7 @@ class AblationTable(BaseModel):
             "roles": [row.role_id for row in self.rows],
             "n_cases": self.n_cases,
             "case_ids": list(self.case_ids),
+            "noise_rate": self.noise_rate,
         }
 
     def completed_event_data(self) -> dict[str, Any]:
@@ -357,22 +359,20 @@ def build_row(
     """Compute one role's divergence, influence, CI and verdict."""
 
     ci = influence_ci(pairs, resamples=resamples, seed=seed, label=role.id)
-    # Round before judging so the verdict can never contradict the CI the TUI
-    # prints next to it.
     rounded_ci = ConfidenceInterval(
         lo=round(clamp(ci.lo, -1.0, 1.0), _ROUND),
         hi=round(clamp(ci.hi, -1.0, 1.0), _ROUND),
     )
-    role_divergence = round(clamp(divergence(pairs)), _ROUND)
+    role_divergence = divergence(pairs)
     return AblationRow(
         role_id=role.id,
         role_name=role.name,
         justification=role.justification,
         influence=round(clamp(influence(pairs), -1.0, 1.0), _ROUND),
         influence_ci=rounded_ci,
-        divergence=role_divergence,
+        divergence=round(clamp(role_divergence), _ROUND),
         cost_share=round(clamp(cost_share), _ROUND),
-        verdict=verdict(role_divergence, rounded_ci, measured_noise_rate, eps),
+        verdict=verdict(role_divergence, ci, measured_noise_rate, eps),
         n_cases=len(pairs),
     )
 
@@ -467,8 +467,14 @@ def ablate(
 
     # Noise floor first (`03 §4.1`): every divergence below is judged against it.
     if full is None:
-        full = runner.run_variant(architecture, cases, variant=FULL)
-    repeat = runner.run_variant(architecture, cases, variant=FULL_REPEAT, use_cache=False)
+        full = runner.run_variant(architecture, cases, variant=FULL, generation=generation)
+    repeat = runner.run_variant(
+        architecture,
+        cases,
+        variant=FULL_REPEAT,
+        use_cache=False,
+        generation=generation,
+    )
     measured_noise_rate = noise_rate(full, repeat, case_ids)
 
     emit(
@@ -478,6 +484,7 @@ def ablate(
             "roles": targets,
             "n_cases": len(case_ids),
             "case_ids": list(case_ids),
+            "noise_rate": round(clamp(measured_noise_rate), _ROUND),
         },
     )
 
@@ -491,6 +498,7 @@ def ablate(
             cases,
             variant=ablate_variant(role.id),
             ablate_role=role.id,
+            generation=generation,
         )
         row = build_row(
             role,

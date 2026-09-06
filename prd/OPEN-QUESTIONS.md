@@ -8,20 +8,11 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 - **List-rate equivalent for GLM-4.7-Flash.** TensorMux publishes no rate card (`/pricing` 404). Using Cloudflare Workers AI's resale price ($0.06/$0.40 per MTok) as the labelled equivalent. If TensorMux gives a number, replace it in one place (`models.yaml`).
 - **Sonnet 5 price** — Anthropic pages contradict ($2/$10 vs $3/$15 from Sept 1 2026). Immaterial to the demo (few architect calls); recheck before quoting publicly.
 - **Frankfurter etiquette.** No documented rate limit; be polite: ≤5 concurrent, and the disk cache means generation ≥1 and all ablations are offline anyway. Commit `data/fx_cache/` after the first full run.
-- **Tolerance sanity.** After generating packs, check that `max(5, 0.1%)` doesn't make any case trivially passable or impossibly tight (JPY-heavy batches). Adjust in `02 §1.2` if needed — one place.
 - **Neatlogs shareable trace URL** — trace viewed fine while logged in; open the same URL in a private window to see if it's public. Decides README link only; not blocking.
 - **GLM thinking toggle.** Test whether `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` (vLLM convention) or `extra_body={"thinking": {"type": "disabled"}}` (Z.ai convention) suppresses the `reasoning` field through TensorMux. If either works, expose it as a per-role flag `thinking: on|off` — a cheap, honest cost/latency lever (and optionally a mutation type `set_thinking`).
 
 ## Unresolved — appended 2026-09-06 by WP-05 (executor)
 
-- **Where per-case traces live for a non-`full` variant.** `01 §1` names
-  `generations/g000/results.jsonl` and `generations/g000/ablation.json` but never
-  says where the per-case `CaseResult`s of a knockout run go, and the event schema
-  deliberately keeps `execution.case` small, so `RoleTrace` (raw tool responses,
-  per-role cost) has no other home. The executor writes `results.jsonl` for
-  `variant="full"` and `results.<slugged variant>.jsonl` otherwise, e.g.
-  `results.ablate_r_rates.jsonl`. WP-08 reads these for `cost_share`; confirm or
-  rename in one place before WP-08 hardcodes it.
 - **`control="llm"` has no defined router.** `01 §4.2` says "a router role decides"
   but no role type, tag, or wiring convention for a router is specified anywhere.
   The executor implements the weakest defensible reading: under `control="llm"`
@@ -40,7 +31,6 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 ### 2026-09-06 — WP-03 (FX packs, reference implementation, grader)
 
 - **Tolerance sanity — answers the standing "Tolerance sanity" item above.** Reviewed on both generated packs: `fx_recon_a` |expected| ₹17,762.30–₹246,238.85, `fx_recon_b` ₹8,930.52–₹309,275.60; the tightest relative tolerance is the 0.1% floor (no case is impossibly tight), and the loosest absolute tolerance is ₹309.28 (no case is trivially passable — a whole invoice's gain is orders of magnitude larger). **The constraint the PRD does not state:** the D1 bank fee must exceed the grader's tolerance, or an agent that ignores the fee still passes the total and the fee cases teach nothing. The first pack draft had fees of ₹125–₹1,250 against tolerances up to ₹637, so 5 of 10 fee cases were undetectable at the total level. Fees are now ₹1,500–₹4,500 and the generator asserts `min_bank_fee_headroom > 1` (currently 6.09x and 10.63x). If `02 §1.2`'s tolerance ever changes, this invariant must be rechecked.
-- **`occam/store/writer.py` imports `fcntl`, so nothing in the repo imports on Windows.** Pre-existing from WP-01 and unrelated to WP-03, but it makes `pytest` uncollectable on a Windows checkout (`tests/test_packaging.py` fails there on `origin/main` too). **Owned by workspaces-4** on `fix/windows-file-locking` (`msvcrt.locking` on win32, `fcntl.flock` elsewhere, plus a regression test); WP-03 deliberately carries no shim. Remove this item once that branch merges.
 
 ### 2026-09-06 — WP-03 hardening
 
@@ -56,7 +46,6 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 ### 2026-09-06 — WP-04 (tool registry)
 
 - **`ruff format --check .` fails on 38 pre-existing files in an AO Windows worktree.** The committed blobs are LF and format-clean (verified by running ruff against a `git archive` export), but the worktree checkout has CRLF while `pyproject.toml` sets `line-ending = "lf"`. Not a repo content bug, but it makes the standard verification command unusable in an AO worktree; a `.gitattributes` with `*.py text eol=lf` would settle it.
-- **`fcntl` on Windows — seconding the WP-03 item above.** It is worse than `tests/test_packaging.py`: `occam/store/__init__.py` re-exports `EventWriter`, so *every* test module that reaches the store fails at collection and `pytest -q` collects nothing at all. Fix is a small cross-platform advisory-lock shim (`msvcrt.locking` on win32, `fcntl.flock` elsewhere). Left to a WP-01 owner rather than widened into WP-04; WP-04's full-suite evidence was gathered behind a local, uncommitted shim.
 - **`wasted_calls` — resolved, see Resolved below.** Dropped from the PRD rather than defined.
 
 ## 2026-09-06 — WP-07 (TUI shell + replay): PRD notes for the orchestrator
@@ -70,9 +59,29 @@ Two PRD notes, neither blocking:
   `fx_recon_a · Month-end FX revaluation`. If the exact wording matters, `run.started`'s `task`
   needs a `label` field (a schema change, so not taken here).
 
+### 2026-09-06 — WP-08 (ablation + metrics)
+
+- **The executor result paths are confirmed.** A full run writes
+  `generations/gNNN/results.jsonl`; `full_repeat` and knockouts write
+  `results.<slugged variant>.jsonl`, including the raw per-role traces needed by
+  ablation. `tests/test_ablation_executor_integration.py` validates these paths
+  through `Executor` and `EventReader`.
+- **`full_repeat` cache bypass is implemented.** The executor passes
+  `use_cache=False` through the LLM client; fresh responses are neither read
+  from nor written to the content cache, and the integration test verifies the
+  canonical full cache remains unchanged.
+- **Noise-floor and cost contracts are settled by WP-01c.** `noise_rate` is
+  required on `ablation.started`; `RoleTrace.cost_usd` is the displayed cost,
+  while `billed_cost_usd` and `cost_label` preserve the nominal billing basis.
+  Cost shares now reject a zero displayed-cost denominator rather than invent
+  token or uniform shares. The pending WP-01c commit is carried temporarily in
+  the WP-08 branch until PR #8 lands and is inherited by `main`.
+
 ## Resolved
 - **2026-09-06 — WP-03 answer format: the canonical answer is the LAST FENCED JSON BLOCK.** `02` contradicted itself — §1.2 extracted the answer from the last fenced JSON block while the `task.yaml` template in §3 instructed `answer_format: 'Final line: a JSON object {...}'`, so an agent obeying the pack's own instruction was ungradeable. **§1.2 wins and §3 was changed**, because §1.2 is the grading contract and `AGENTS.md` treats `02` as authoritative for the task; because a fenced block survives trailing prose whereas "final line" breaks the moment a model adds a closing sentence, and GLM-4.7-Flash emits reasoning and prose freely; and because the grader already implemented fence extraction. Both packs' `task.yaml` were regenerated to match. `fx_total` keeps a bare-JSON-line fallback when no fence is present — defensive salvage so a dropped fence cannot crash or fail a run, explicitly **not** part of the contract.
 - **2026-09-06 — `wasted_calls` is dropped, not defined.** `02 §2` named it but nothing ever specified the aggregation. Ruling: remove the phrase; `02 §2` now reads "Feeds `n_tool_calls`." Reasoning: the disk cache is committed and permanent, so a repeat call costs approximately nothing and "wasted" is close to meaningless as a cost signal; and the metric appears in no success criterion (`00 §6`), no field in `events.schema.json`, and no TUI panel. `tool_calls_per_case` is already in `metrics.snapshot` and carries the whole cost/speed story, including the L2 range-endpoint halving. Defining a new metric under this deadline is scope we do not need. WP-04 keeps its raw per-call fields unchanged (`name`, `arguments`, `status`, `latency_s`, `bytes`, `cached`, `http_status`, `error`), so the metric can be reconstructed later if it ever earns its place.
+- **2026-09-06 — WP-03 tolerance sanity is complete.** Both generated packs were checked; the 0.1% floor is the tightest relative tolerance, no case is impossibly tight or trivially passable, and bank-fee headroom exceeds the tolerance in every fee case. See the WP-03 evidence above.
+- **2026-09-06 — Windows event locking is complete on `main`.** PR #7 is merged at `fde72e3`; `EventWriter` now selects `msvcrt` on Windows and `fcntl` elsewhere, with import and concurrent-append regression coverage. The duplicate WP-03/WP-04 blockers are removed from Unresolved.
 - **2026-09-06 — WP-01b fixture and design-reference decisions:**
   - **Run-2 lesson count:** resolved to 3, matching `prd/08-END-TO-END-WALKTHROUGH.md` and lessons L1, D1, and L2. The WP-01b acceptance wording of 2 is corrected; the canonical fixture and acceptance evidence use 3.
   - **Design reference filename:** resolved to `design/figma.png`; it is the intended visual target and there is no missing `figma-v2` asset. No design file was changed.
