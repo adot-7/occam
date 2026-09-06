@@ -117,6 +117,16 @@ class FailingArchitectLLM(StubArchitectLLM):
         raise RuntimeError("sensitive provider payload")
 
 
+class SequenceArchitectLLM(StubArchitectLLM):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__()
+        self.responses = list(responses)
+
+    def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
+        self.calls.append({"model_key": model_key, "messages": messages, **kwargs})
+        return SimpleNamespace(text=self.responses.pop(0), tool_calls=[])
+
+
 def make_lesson_store(path: Path) -> LessonStore:
     store = LessonStore(path)
     store.append(
@@ -312,6 +322,46 @@ def test_architect_rejects_raw_provider_model_ids_before_execution(tmp_path: Pat
 
     assert "gpt-4.1" in str(error.value)
     assert "worker_fast" in str(error.value)
+
+
+def test_architect_repairs_unknown_dag_input_once_and_emits_one_event(tmp_path: Path) -> None:
+    invalid = architecture_payload()
+    invalid["roles"][2]["inputs"] = ["r_parse", "parsed_case"]
+    valid = architecture_payload()
+    llm = SequenceArchitectLLM([json.dumps(invalid), json.dumps(valid)])
+    emitted: list[str] = []
+
+    architecture = Architect(
+        llm=llm,
+        memory=tmp_path / "memory",
+        event_sink=lambda event_type, _data: emitted.append(event_type),
+    ).propose(TASK)
+
+    assert architecture.final_role == "r_calc"
+    assert len(llm.calls) == 2
+    repair_prompt = llm.calls[1]["messages"][-1]["content"]
+    assert "Validation category: DAG input contract" in repair_prompt
+    assert '"worker_fast"' in repair_prompt
+    assert '"task"' in repair_prompt
+    assert "parsed_case" not in repair_prompt
+    assert emitted == ["architecture.proposed"]
+
+
+def test_architect_repair_exhaustion_preserves_strict_failure(tmp_path: Path) -> None:
+    invalid = architecture_payload()
+    invalid["roles"][2]["inputs"] = ["r_parse", "parsed_case"]
+    llm = SequenceArchitectLLM([json.dumps(invalid), json.dumps(invalid)])
+    emitted: list[str] = []
+
+    with pytest.raises(ArchitectError, match="invalid DAG"):
+        Architect(
+            llm=llm,
+            memory=tmp_path / "memory",
+            event_sink=lambda event_type, _data: emitted.append(event_type),
+        ).propose(TASK)
+
+    assert len(llm.calls) == 2
+    assert emitted == []
 
 
 def test_architect_overwrites_model_guessed_id_instead_of_raising(tmp_path: Path) -> None:

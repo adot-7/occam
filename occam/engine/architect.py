@@ -3,7 +3,8 @@
 The architect is intentionally a narrow boundary: it reads the task manifest
 and active lessons, asks the configured ``architect`` model for one JSON
 architecture, validates that response before it can reach the executor, and
-optionally emits the schema-compatible ``architecture.proposed`` event.  It
+allows one bounded correction request when proposal validation fails. It
+optionally emits the schema-compatible ``architecture.proposed`` event. It
 does not diagnose failures or write lessons; those responsibilities belong to
 WP-10.
 """
@@ -32,9 +33,11 @@ DOMAIN_RULE_HEADING = "Known conventions and facts about this task (learned in e
 ARCHITECT_MODEL_KEY = "architect"
 MIN_ROLES = 3
 MAX_ROLES = 6
+MAX_ARCHITECT_REPAIR_ATTEMPTS = 1
 
 _JSON_FENCE = re.compile(r"```(?P<language>[^\r\n`]*)\r?\n(?P<body>.*?)```", re.DOTALL)
 _WRAPPER_MARKERS = frozenset("{}[]`")
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,79}$")
 
 
 class ArchitectError(RuntimeError):
@@ -259,6 +262,37 @@ def _strict_json_object(text: str) -> dict[str, Any]:
     return payload
 
 
+def _validation_category(error: ArchitectError) -> str:
+    """Map an internal validation error to a concise repair-prompt category."""
+
+    message = str(error)
+    if "output-shape failure" in message:
+        return "strict JSON output shape"
+    if "strict validation" in message:
+        return "Pydantic Architecture schema"
+    if "event schema" in message:
+        return "event schema compatibility"
+    if "invalid DAG" in message or "unknown input" in message or "cycle" in message:
+        return "DAG input contract"
+    if "model key" in message or "configured role model" in message:
+        return "configured role model keys"
+    if "tool" in message.lower() or "ToolSpec" in message:
+        return "task tool bindings"
+    return "Architecture proposal contract"
+
+
+def _safe_output_keys(architecture: Architecture | None) -> tuple[str, ...]:
+    """Keep model-provided output keys out of repair prompts unless identifier-safe."""
+
+    if architecture is None:
+        return ()
+    return tuple(
+        role.output_key
+        for role in architecture.roles
+        if _SAFE_IDENTIFIER.fullmatch(role.output_key)
+    )
+
+
 class ArchitectContext:
     """The exact manifest/context sent to the architect model."""
 
@@ -386,15 +420,37 @@ class Architect:
             response_schema=response_schema,
         )
         completion = self._complete(messages, response_schema)
-        architecture = self._parse_architecture(
-            completion, generation=generation, parent_id=parent_id
-        )
-        self._validate_proposal(architecture, tool_names, task)
+        architecture: Architecture | None = None
+        for repair_attempt in range(MAX_ARCHITECT_REPAIR_ATTEMPTS + 1):
+            try:
+                architecture = self._parse_architecture(
+                    completion, generation=generation, parent_id=parent_id
+                )
+                self._validate_proposal(architecture, tool_names, task)
+                event_data = {
+                    "architecture": architecture.model_dump(mode="json", exclude_none=False),
+                    "generation": generation,
+                }
+                self._validate_event_compatibility(event_data)
+                break
+            except ArchitectError as exc:
+                if repair_attempt >= MAX_ARCHITECT_REPAIR_ATTEMPTS:
+                    raise
+                category = _validation_category(exc)
+                messages = self._build_repair_messages(
+                    messages,
+                    category=category,
+                    role_model_keys=role_model_keys,
+                    output_keys=_safe_output_keys(architecture),
+                )
+                if self.last_context is not None:
+                    self.last_context.messages = [dict(message) for message in messages]
+                completion = self._complete(messages, response_schema)
+        assert architecture is not None
         event_data = {
             "architecture": architecture.model_dump(mode="json", exclude_none=False),
             "generation": generation,
         }
-        self._validate_event_compatibility(event_data)
         self._emit("architecture.proposed", event_data)
         return architecture
 
@@ -491,6 +547,35 @@ class Architect:
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": "\n\n".join(sections)},
+        ]
+
+    @staticmethod
+    def _build_repair_messages(
+        messages: Sequence[Mapping[str, str]],
+        *,
+        category: str,
+        role_model_keys: Sequence[str],
+        output_keys: Sequence[str],
+    ) -> list[dict[str, str]]:
+        """Append one concise, sanitized correction request to the context."""
+
+        known_output_keys = json.dumps(list(output_keys), ensure_ascii=False)
+        correction = " ".join(
+            [
+                "ARCHITECTURE REPAIR: the previous proposal failed validation.",
+                f"Validation category: {category}.",
+                "Return a complete replacement as exactly one JSON object and no prose.",
+                "Use only these configured role model keys:",
+                json.dumps(list(role_model_keys), ensure_ascii=False) + ".",
+                'Each role input must be exactly "task" or the output_key of an earlier role; '
+                "do not use role names or invented aliases.",
+                f"Safe output_key values seen in the rejected proposal: {known_output_keys}.",
+                "Bind tools only from the task manifest and satisfy the supplied schema.",
+            ]
+        )
+        return [
+            *[dict(message) for message in messages],
+            {"role": "user", "content": correction},
         ]
 
     def _complete(
