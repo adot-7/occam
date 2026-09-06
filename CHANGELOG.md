@@ -23,9 +23,10 @@ All notable changes to Occam are documented here.
   `(ToolSpec, callable)` pairs, with deliberately plain base descriptions, the
   architect-time `tool_note` append hook, and per-call latency/bytes/status/cached
   accounting for successful and failed calls alike.
-- WP-04 `python_exec` sandbox: isolated subprocess, wall-clock timeout, neutered
-  sockets, an allow-list import guard, and an environment allow-list so the child
-  cannot read the engine's API keys into a trace, the event log, or a fixture.
+- WP-04 `python_exec` calculation surface: isolated subprocess, wall-clock
+  timeout, a strict AST capability evaluator, and an explicit environment
+  allow-list so submitted calculations cannot read the engine's API keys into a
+  trace, the event log, or a fixture.
 - WP-04 `fan_out`, the in-role multi-agent primitive: bounded concurrency, results in
   subtask order, one failing branch does not fail the batch.
 
@@ -39,6 +40,31 @@ All notable changes to Occam are documented here.
 
 ### Fixed
 
+- Replaced `python_exec`'s arbitrary `exec` path with a fail-closed AST
+  capability evaluator that preserves the FX arithmetic/Decimal/JSON surface,
+  bounds source, values, steps, timeout, and output, and rejects filesystem,
+  process, network, and introspection escapes before execution. Added sentinel
+  regressions for absolute files, recovered `os.system`, subprocess launch, and
+  a subprocess-based network escape. The documentation explicitly treats this
+  as model-calculation containment rather than a perfect arbitrary-Python
+  sandbox.
+- Added bounded public output-limit validation, pre-allocation guards for large
+  constructors, and incremental collection limits for comprehensions and
+  generator expressions. The plain tool description and callable docstring now
+  identify the restricted calculation subset and its actionable unsupported-
+  construct errors.
+- Added regression-tested resource guards for positive child/parent output
+  bounds, recursive repr/ascii/JSON serialization, bounded print streaming,
+  string/bytes aggregators, collection mutation, and integer power/shift and
+  magnitude boundaries. This remains capability containment, not a perfect
+  hostile-Python sandbox or OS isolation boundary; the residual OS caveat in
+  the README still applies.
+- Removed mutable display-cost state in `python_exec`; current-graph display
+  validation now recounts aliases and detects cycles separately. Decimal-to-
+  integer conversions, `round`, `math.ceil`, and `math.floor` preflight
+  metadata before conversion, while byte-base parsing and `strftime`
+  directives retain their bounded contracts. Collection operations may make
+  bounded transient copies; this is not a claim of zero-copy execution.
 - `EventWriter` now locks with `msvcrt` on Windows and `fcntl` elsewhere. The
   store imported `fcntl` at module level, so `occam.store` was unimportable on
   Windows and three test modules failed at collection. Covered by a fresh-
