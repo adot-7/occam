@@ -60,7 +60,7 @@ def test_every_fixture_event_validates_against_event_schema() -> None:
         with events_path.open(encoding="utf-8") as handle:
             payloads = [json.loads(line) for line in handle if line.strip()]
 
-        assert len(payloads) >= 100
+        assert len(payloads) >= 90
         assert [payload["seq"] for payload in payloads] == list(range(len(payloads)))
         event_types = {payload["type"] for payload in payloads}
         expected_types = required_types - ({"lesson.written"} if fixture == RUN2 else set())
@@ -228,6 +228,99 @@ def test_full_repeat_is_a_fresh_nonzero_accounted_run() -> None:
             assert all(case["cost_usd"] > 0 for case in repeat["cases"])
             assert all(case["latency_s"] > 0 for case in repeat["cases"])
             assert sum(case["cost_usd"] for case in repeat["cases"]) == repeat["cost_usd"]
+
+
+def test_full_repeat_matches_the_configured_ablation_subset() -> None:
+    for fixture in FIXTURES:
+        events = EventReader(fixture).read()
+        ablation_case_ids = {
+            event.data["generation"]: event.data["case_ids"]
+            for event in events
+            if event.type == "ablation.started"
+        }
+        assert ablation_case_ids
+        for generation, case_ids in ablation_case_ids.items():
+            assert len(case_ids) == 10
+            repeat_started = next(
+                event
+                for event in events
+                if event.type == "execution.started"
+                and event.data["generation"] == generation
+                and event.data["variant"] == "full_repeat"
+            )
+            repeat_cases = [
+                event.data
+                for event in events
+                if event.type == "execution.case"
+                and event.data["generation"] == generation
+                and event.data["variant"] == "full_repeat"
+            ]
+            assert repeat_started.data["n_cases"] == len(case_ids) == len(repeat_cases)
+            assert [case["case_id"] for case in repeat_cases] == case_ids
+
+        for generation in ablation_case_ids:
+            full_cases = {
+                event.data["case_id"]: event.data["passed"]
+                for event in events
+                if event.type == "execution.case"
+                and event.data["generation"] == generation
+                and event.data["variant"] == "full"
+            }
+            repeat_cases = {
+                event.data["case_id"]: event.data["passed"]
+                for event in events
+                if event.type == "execution.case"
+                and event.data["generation"] == generation
+                and event.data["variant"] == "full_repeat"
+            }
+            assert set(repeat_cases) == set(ablation_case_ids[generation])
+            if generation == 0:
+                disagreements = sum(
+                    full_cases[case_id] != repeat_cases[case_id] for case_id in repeat_cases
+                )
+                assert disagreements == 1
+                assert disagreements / len(repeat_cases) == 0.10
+
+
+def test_best_generation_reliability_and_summary_are_cross_event_consistent() -> None:
+    events = EventReader(RUN1).read()
+    state = reduce(events)
+    run_completed = next(event for event in events if event.type == "run.completed")
+    reliability_events = [event for event in events if event.type == "reliability.completed"]
+    assert state.best_generation == run_completed.data["best_generation"] == 3
+    assert [event.data["generation"] for event in reliability_events] == [3]
+    assert state.generations["g003"].reliability == reliability_events[0].data
+    assert state.generations["g004"].reliability is None
+    assert state.generations["g003"].metrics is not None
+    assert state.generations["g003"].metrics.reliability_pass3 == 0.85
+    assert state.generations["g004"].metrics is not None
+    assert state.generations["g004"].metrics.reliability_pass3 is None
+
+    summary = run_completed.data["summary"]
+    best_metrics = state.generations["g003"].metrics
+    assert summary["final_pass_rate"] == best_metrics.pass_rate
+    assert summary["final_cost_usd"] == best_metrics.cost_usd
+    assert summary["calls_per_case_final"] == best_metrics.tool_calls_per_case
+
+    ranked = sorted(
+        (
+            generation.metrics.pass_rate,
+            -generation.metrics.cost_usd,
+            generation.generation,
+        )
+        for generation in state.generations.values()
+        if generation.metrics is not None
+    )
+    assert ranked[-1][2] == state.best_generation
+    reliability_index = next(
+        index for index, event in enumerate(events) if event.type == "reliability.completed"
+    )
+    first_g4_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.type == "architecture.proposed" and event.data["generation"] == 4
+    )
+    assert reliability_index < first_g4_index
 
 
 def test_new_strict_models_capture_lessons_and_invoice_sub_results() -> None:

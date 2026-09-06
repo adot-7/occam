@@ -18,7 +18,7 @@ def test_validate_validates_derived_state_when_snapshot_is_absent() -> None:
     result = RUNNER.invoke(app, ["validate", str(fixture)])
 
     assert result.exit_code == 0
-    assert "valid: 281 events" in result.output
+    assert "valid: 231 events" in result.output
     assert "derived state schema validated" in result.output
     assert "state.json absent" in result.output
 

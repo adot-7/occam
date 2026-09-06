@@ -46,7 +46,7 @@ Architect reads `memory/<ns>/lessons.jsonl`, appends `tool_note`s to tool descri
 ### WP-09 — TUI panels  **[H2, ≤3.5h, after WP-07]**
 Ablation table, architecture DAG w/ prune strikethrough, cases grid with sub-results, Inspector with **tool-response highlight**, Lessons pane, compare strip, metrics incl. `calls/case`, `rel³`.
 - [ ] Replay `demo_run1` to g0 ablation: verdicts render; Inspector on a holiday case highlights `requested_date → rate_date`
-- [ ] Replay `demo_run2`: lessons pane shows 2 loaded; compare strip populated
+- [ ] Replay `demo_run2`: lessons pane shows 3 loaded; compare strip populated
 
 ### WP-10 — Diagnose (with lesson writer + leak guard) + Baseline + pass³ + Loop + compare  **[H1, ≤3h, after WP-06, WP-08]**
 - [ ] Leak guard unit tests: rejects ISO dates, ≥4-digit numbers, invoice ids, near-expected values; accepts the two canonical lessons L1/D1
