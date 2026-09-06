@@ -64,14 +64,31 @@ class ToolSpec(ContractModel):
 class Role(ContractModel):
     """One node in an architecture DAG."""
 
-    id: str = Field(min_length=1)
+    id: str = Field(
+        min_length=1,
+        description=(
+            "Simple role identifier. Later roles reference this exact id in inputs; "
+            "they do not reference output_key values."
+        ),
+    )
     name: str = Field(min_length=1)
     justification: Justification
     model: str = Field(min_length=1)
     system_prompt: str
     tools: list[str]
-    inputs: list[str]
-    output_key: str = Field(min_length=1)
+    inputs: list[str] = Field(
+        description=(
+            'Dependency tokens: exactly "task" or an earlier declared role.id; '
+            "never a role name, output_key, or invented descriptive alias."
+        )
+    )
+    output_key: str = Field(
+        min_length=1,
+        description=(
+            "Key under which this role output is stored for context rendering; "
+            "it is not a valid inputs token."
+        ),
+    )
     memory: MemoryPolicy = "none"
     max_turns: int = Field(default=6, ge=1)
 
@@ -81,7 +98,12 @@ class Architecture(ContractModel):
 
     id: str = Field(min_length=1)
     parent_id: str | None
-    roles: list[Role]
+    roles: list[Role] = Field(
+        description=(
+            "Declare roles in topological order so each non-task inputs token names "
+            "an earlier role.id."
+        )
+    )
     final_role: str = Field(min_length=1)
     control: ControlMode = "deterministic"
     notes: str = ""

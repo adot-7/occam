@@ -281,18 +281,6 @@ def _validation_category(error: ArchitectError) -> str:
     return "Architecture proposal contract"
 
 
-def _safe_output_keys(architecture: Architecture | None) -> tuple[str, ...]:
-    """Keep model-provided output keys out of repair prompts unless identifier-safe."""
-
-    if architecture is None:
-        return ()
-    return tuple(
-        role.output_key
-        for role in architecture.roles
-        if _SAFE_IDENTIFIER.fullmatch(role.output_key)
-    )
-
-
 def _safe_dependency_pairs(architecture: Architecture | None) -> tuple[tuple[str, str], ...]:
     """Return safe role/output-key pairs in the model-provided order."""
 
@@ -470,7 +458,6 @@ class Architect:
                     messages,
                     category=category,
                     role_model_keys=role_model_keys,
-                    output_keys=_safe_output_keys(architecture),
                     dependency_pairs=_safe_dependency_pairs(architecture),
                     validation_detail=_safe_validation_detail(exc, category),
                 )
@@ -547,13 +534,20 @@ class Architect:
             "must be one configured role model key from the allowlist below, never a provider "
             "model ID. Put reusable task instructions in the system_prompt of the roles that "
             "need them. For roles where tool calls are expected, set max_turns >= 16 so the "
-            "role has room to finish its tool work; keep no-tool roles appropriately bounded."
+            "role has room to finish its tool work; keep no-tool roles appropriately bounded. "
+            "Declare simple role ids in topological order. Each later role's inputs must "
+            'exactly equal an earlier declared role.id or the literal "task"; never use an '
+            "output_key, role name, or invented descriptive alias such as parsed_case."
         )
         sections = [
             "TASK AND TOOL MANIFEST",
             json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2),
             "CONFIGURED ROLE MODEL KEYS (use these keys exactly; do not use provider model IDs)",
             json.dumps(list(role_model_keys), ensure_ascii=False),
+            "DAG INPUT CONTRACT (role ids, not output keys)",
+            'Declare roles in topological order. Each inputs item must be exactly "task" or '
+            "the id of an earlier declared role. An output_key names stored context only and "
+            "must never appear as an inputs token.",
             "ARCHITECTURE OUTPUT SCHEMA",
             json.dumps(
                 _architect_response_schema(role_model_keys),
@@ -586,13 +580,15 @@ class Architect:
         *,
         category: str,
         role_model_keys: Sequence[str],
-        output_keys: Sequence[str],
         dependency_pairs: Sequence[tuple[str, str]],
         validation_detail: str,
     ) -> list[dict[str, str]]:
         """Append one concise, sanitized correction request to the context."""
 
-        known_output_keys = json.dumps(list(output_keys), ensure_ascii=False)
+        known_role_ids = json.dumps(
+            [role_id for role_id, _output_key in dependency_pairs], ensure_ascii=False
+        )
+        role_output_pairs = json.dumps(list(dependency_pairs), ensure_ascii=False)
         sections = [
             "ARCHITECTURE REPAIR: the previous proposal failed validation.",
             f"Validation category: {category}.",
@@ -604,11 +600,14 @@ class Architect:
                 "Return a complete replacement as exactly one JSON object and no prose.",
                 "Use only these configured role model keys:",
                 json.dumps(list(role_model_keys), ensure_ascii=False) + ".",
-                'Each role input must be exactly "task" or the output_key of an earlier role; '
-                "do not use role names or invented aliases.",
-                f"Safe output_key values seen in the rejected proposal: {known_output_keys}.",
-                "Safe role/output_key pairs in proposal order:",
-                json.dumps(list(dependency_pairs), ensure_ascii=False) + ".",
+                'Declare roles in topological order. Each role input must be exactly "task" or '
+                "the id of an earlier declared role; never use an output_key, role name, or "
+                "invented descriptive alias.",
+                "Safe earlier role.id dependency tokens in proposal order:",
+                known_role_ids + ".",
+                "For reference only, role.id to output_key mapping (use only the first value "
+                "in inputs; output_key is a context label, never an input token):",
+                role_output_pairs + ".",
                 "Bind tools only from the task manifest and satisfy the supplied schema.",
             ]
         )

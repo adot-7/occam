@@ -309,9 +309,14 @@ def test_architect_schema_and_prompt_advertise_only_configured_role_keys(tmp_pat
     call = llm.calls[0]
     role_schema = call["response_schema"]["$defs"]["Role"]
     assert role_schema["properties"]["model"]["enum"] == ["worker_alt", "worker_fast"]
+    input_description = role_schema["properties"]["inputs"]["description"]
+    assert "earlier declared role.id" in input_description
+    assert "output_key" in input_description
     request_text = json.dumps(call["messages"], ensure_ascii=False)
     assert "CONFIGURED ROLE MODEL KEYS" in request_text
     assert "provider model IDs" in request_text
+    assert "role.id" in request_text
+    assert "output_key" in request_text
     assert "worker_fast" in request_text
     assert "gpt-4.1" not in request_text
 
@@ -341,7 +346,7 @@ def test_architect_rejects_raw_provider_model_ids_before_execution(tmp_path: Pat
 
 def test_architect_repairs_unknown_dag_input_once_and_emits_one_event(tmp_path: Path) -> None:
     invalid = architecture_payload()
-    invalid["roles"][2]["inputs"] = ["r_parse", "parsed_case"]
+    invalid["roles"][2]["inputs"] = ["r_parse", "parsed"]
     valid = architecture_payload()
     llm = SequenceArchitectLLM([json.dumps(invalid), json.dumps(valid)])
     emitted: list[str] = []
@@ -356,9 +361,11 @@ def test_architect_repairs_unknown_dag_input_once_and_emits_one_event(tmp_path: 
     assert len(llm.calls) == 2
     repair_prompt = llm.calls[1]["messages"][-1]["content"]
     assert "Validation category: DAG input contract" in repair_prompt
-    assert "parsed_case" in repair_prompt
+    assert "parsed" in repair_prompt
     assert '"worker_fast"' in repair_prompt
     assert '"task"' in repair_prompt
+    assert "earlier declared role" in repair_prompt
+    assert "never use an output_key" in repair_prompt
     assert '"r_parse", "parsed"' in repair_prompt
     assert emitted == ["architecture.proposed"]
 

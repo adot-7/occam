@@ -113,6 +113,15 @@ def test_validate_architecture_rejects_unknown_input():
         validate_architecture(arch)
 
 
+def test_validate_architecture_rejects_output_key_as_dependency():
+    arch = architecture(
+        role("a", output_key="parsed"),
+        role("b", inputs=["parsed"]),
+    )
+    with pytest.raises(ArchitectureError, match="unknown input"):
+        validate_architecture(arch)
+
+
 def test_validate_architecture_rejects_unbound_tool():
     arch = architecture(role("a", tools=["fx_rate"]))
     with pytest.raises(ArchitectureError, match="not in the registry"):
