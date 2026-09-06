@@ -1,24 +1,27 @@
 # Model identifiers are configuration, not code. Verify rates before a live run.
 worker_fast:
   provider: openai_compat
-  base_url: ${GROQ_BASE_URL}
-  api_key_env: GROQ_API_KEY
-  model: llama-3.3-70b-versatile
-  in_per_m: 0.59
-  out_per_m: 0.79
-  rpm: 30
-  tpm: 6000
+  base_url: https://api.tensormux.com/v1
+  api_key: ${TENSORMUX_API_KEY}
+  model: glm-4-7-flash
+  in_per_m: 0.0
+  out_per_m: 0.0
+  grant_equiv_in_per_m: 0.06
+  grant_equiv_out_per_m: 0.40
+  rpm: 60
+  supports_json_schema: false
+  tool_choice_modes: [auto]
 worker_alt:
   provider: openai_compat
-  base_url: ${GEMINI_OPENAI_BASE_URL}
-  api_key_env: GEMINI_API_KEY
-  model: gemini-2.5-flash
-  in_per_m: 0.30
-  out_per_m: 2.50
-  rpm: 60
+  base_url: https://api.openai.com/v1
+  api_key: ${OPENAI_API_KEY}
+  model: gpt-5-nano
+  in_per_m: 0.05
+  out_per_m: 0.40
+  rpm: 500
 architect:
   provider: anthropic
-  api_key_env: ANTHROPIC_API_KEY
+  api_key: ${ANTHROPIC_API_KEY}
   model: claude-sonnet-5
   in_per_m: 2.00
   out_per_m: 10.00
