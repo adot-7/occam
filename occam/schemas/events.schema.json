@@ -212,12 +212,13 @@
     "ablationStarted": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generation", "roles", "n_cases", "case_ids"],
+      "required": ["generation", "roles", "n_cases", "case_ids", "noise_rate"],
       "properties": {
         "generation": {"type": "integer", "minimum": 0},
         "roles": {"type": "array", "items": {"type": "string"}},
         "n_cases": {"type": "integer", "minimum": 0},
-        "case_ids": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        "case_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "noise_rate": {"type": "number", "minimum": 0, "maximum": 1}
       }
     },
     "ablationRole": {

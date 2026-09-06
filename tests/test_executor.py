@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -21,10 +22,12 @@ from occam.engine.executor import (
     wilson_ci,
 )
 from occam.llm.client import CompletionError
+from occam.llm.providers import ProviderResponse
 from occam.store.reader import EventReader
 from occam.store.writer import EventWriter
 from tests.executor_doubles import (
     WORKER,
+    WORKER_CONFIG,
     ProviderCall,
     RecordingTool,
     ScriptedProvider,
@@ -378,9 +381,46 @@ def test_cost_is_accounted_per_role(tmp_path):
     per_role = case_result.per_role
     assert per_role["a"].cost_usd > 0
     assert per_role["b"].cost_usd == pytest.approx(4 * per_role["a"].cost_usd)
+    assert per_role["a"].billed_cost_usd == 0.0
+    assert per_role["b"].billed_cost_usd == 0.0
+    assert per_role["a"].cost_label == "list-rate-equivalent"
+    assert per_role["b"].cost_label == "list-rate-equivalent"
     assert case_result.cost_usd == pytest.approx(per_role["a"].cost_usd + per_role["b"].cost_usd)
     assert case_result.tokens_in == 500
     assert result.cost_usd == pytest.approx(case_result.cost_usd)
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_label"),
+    [
+        pytest.param(text_response("ok", tokens_in=100, tokens_out=200), "metered", id="metered"),
+        pytest.param(ProviderResponse(text="ok"), "approximate", id="approximate"),
+    ],
+)
+def test_executor_preserves_metered_and_approximate_cost_metadata(
+    tmp_path, response, expected_label
+):
+    metered_config = replace(
+        WORKER_CONFIG,
+        in_per_m=0.05,
+        out_per_m=0.40,
+        grant_equiv_in_per_m=None,
+        grant_equiv_out_per_m=None,
+    )
+    provider = ScriptedProvider(lambda _call: response)
+    executor = Executor(
+        llm=build_client(
+            provider,
+            tmp_path / expected_label,
+            configs={WORKER: metered_config},
+        )
+    )
+
+    trace = executor.execute(architecture(role("a")), [case()]).results[0].per_role["a"]
+
+    assert trace.cost_usd > 0.0
+    assert trace.billed_cost_usd == pytest.approx(trace.cost_usd)
+    assert trace.cost_label == expected_label
 
 
 def test_sub_results_come_from_the_grader(tmp_path):

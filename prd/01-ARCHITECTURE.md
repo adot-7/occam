@@ -76,7 +76,7 @@ class CaseResult(BaseModel):
     tokens_in: int; tokens_out: int
     cost_usd: float
     latency_s: float
-    per_role: dict[str, RoleTrace]     # role_id -> {tokens_in, tokens_out, cost_usd, latency_s, output, tool_calls}
+    per_role: dict[str, RoleTrace]     # role_id -> {tokens_in, tokens_out, cost_usd, billed_cost_usd, cost_label, latency_s, output, tool_calls}
 
 class RunResult(BaseModel):
     architecture_id: str
@@ -100,7 +100,7 @@ Every line: `{"ts": ISO8601, "run_id": str, "seq": int, "type": str, "data": {..
 | `execution.started` | `generation`, `variant`, `n_cases` |
 | `execution.case` | `generation`, `variant`, `case_id`, `passed`, `cost_usd`, `latency_s` |
 | `execution.completed` | `generation`, `variant`, `pass_rate`, `cost_usd`, `latency_s_mean`, `tokens`, `ci{lo,hi}` |
-| `ablation.started` | `generation`, `roles: [role_id]`, `n_cases` |
+| `ablation.started` | `generation`, `roles: [role_id]`, `n_cases`, `case_ids: [case_id]`, `noise_rate` |
 | `ablation.role` | `generation`, `role_id`, `influence`, `influence_ci{lo,hi}`, `divergence`, `cost_share`, `verdict: "load_bearing"|"witness"|"harmful"|"uncertain"` |
 | `ablation.completed` | `generation`, `structural_fidelity`, `witnesses: [role_id]` |
 | `baseline.completed` | `generation`, `method:"cot_sc"`, `k`, `pass_rate`, `cost_usd`, `latency_s_mean`, `matched_to_cost_usd` |
@@ -157,14 +157,23 @@ Each mutation produces a new `Architecture` with `parent_id` set and a human-rea
 Cost-matched CoT-SC: single role, same worker model, chain-of-thought prompt, sampled `k` times at temperature 0.7, majority vote on normalised answer. `k` chosen so that `cost ≈ current generation's cost` (round down, min 1, max 9). Emits `baseline.completed` with `matched_to_cost_usd`.
 
 ### 4.7 `loop.py`
+
+Within each generation, the event chronology is fixed: emit the full execution,
+then run the cache-bypassed `full_repeat` noise-floor pass, then emit the
+optional cost-matched baseline, then emit `ablation.started` and its rows. This
+keeps the `03 §4.1` noise measurement before any knockout and matches the
+chronology recorded in `08 §3` and both replay fixtures. `metrics.snapshot` is
+emitted only after `ablation.completed`.
+
 ```
 run(task_pack, config, run_name, memory_ns):
   L = load_lessons(memory_ns)    ; emit run.started{lessons_loaded: L}
   A = architect(task, L)         ; emit architecture.proposed g000
   for g in 0..max_generations:
     R = execute(A, cases)        ; emit execution.*
-    B = baseline(cost=R.cost)    ; emit baseline.completed
-    T = ablate(A, cases_subset)  ; emit ablation.*
+    N = repeat_full(A, cases_subset, use_cache=False) ; emit execution.* full_repeat
+    B = baseline(cost=R.cost)    ; emit baseline.completed (optional)
+    T = ablate(A, cases_subset, full=R, noise=N) ; emit ablation.*
     emit metrics.snapshot
     if plateau(history) or budget_exhausted(): break
     D = diagnose(R, T, history, L) ; emit diagnosis.emitted; for l in D.lessons: append(memory_ns, l); emit lesson.written

@@ -17,6 +17,7 @@ from occam.core import (
     GenerationState,
     Lesson,
     MetricsSnapshot,
+    RoleTrace,
     State,
 )
 from occam.core.models import EventType
@@ -31,9 +32,40 @@ RUN1 = FIXTURES[0]
 RUN2 = FIXTURES[1]
 
 
+SCHEMA_FILES = ("events.schema.json", "state.schema.json", "task.schema.json")
+
+
 def test_schemas_are_valid_draft_2020_documents() -> None:
-    for name in ("events.schema.json", "state.schema.json", "task.schema.json"):
+    for name in SCHEMA_FILES:
         Draft202012Validator.check_schema(load_schema(name))
+
+
+def test_the_two_schema_copies_stay_synchronised() -> None:
+    """``schemas/`` is what the PRD points at; ``occam/schemas/`` is what ships.
+
+    ``occam.store.schema`` loads the packaged copy, so a contract change applied
+    to only one of them would pass every other test in this file while shipping
+    a wheel that disagrees with the repo.
+    """
+
+    for name in SCHEMA_FILES:
+        repo_copy = json.loads((ROOT / "schemas" / name).read_text(encoding="utf-8"))
+        packaged_copy = json.loads((ROOT / "occam" / "schemas" / name).read_text(encoding="utf-8"))
+        assert repo_copy == packaged_copy, f"schemas/{name} and occam/schemas/{name} have diverged"
+
+
+def test_ablation_started_requires_a_bounded_noise_rate() -> None:
+    event = next(event for event in EventReader(RUN1) if event.type == "ablation.started")
+
+    missing = event.model_dump(mode="json")
+    missing["data"].pop("noise_rate")
+    with pytest.raises(ValueError, match="events.schema.json"):
+        validate_event(missing)
+
+    out_of_range = event.model_dump(mode="json")
+    out_of_range["data"]["noise_rate"] = 1.01
+    with pytest.raises(ValueError, match="events.schema.json"):
+        validate_event(out_of_range)
 
 
 def test_every_fixture_event_validates_against_event_schema() -> None:
@@ -289,12 +321,69 @@ def test_full_repeat_matches_the_configured_ablation_subset() -> None:
                 assert disagreements / len(repeat_cases) == 0.10
 
 
-def test_metrics_reliability_matches_noise_for_every_generation() -> None:
+def _event_position(events, generation: int, event_type: str, **fields: object) -> int:
+    return next(
+        index
+        for index, event in enumerate(events)
+        if event.type == event_type
+        and event.data.get("generation") == generation
+        and all(event.data.get(key) == value for key, value in fields.items())
+    )
+
+
+def test_fixture_generation_events_follow_the_canonical_ablation_order() -> None:
+    """Noise is measured before the optional baseline and ablation table."""
+
     for fixture in FIXTURES:
         events = EventReader(fixture).read()
-        generations = {
-            event.data["generation"] for event in events if event.type == "ablation.started"
+        generations = sorted(
+            {event.data["generation"] for event in events if "generation" in event.data}
+        )
+        for generation in generations:
+            full_completed = _event_position(
+                events, generation, "execution.completed", variant="full"
+            )
+            repeat_started = _event_position(
+                events, generation, "execution.started", variant="full_repeat"
+            )
+            repeat_completed = _event_position(
+                events, generation, "execution.completed", variant="full_repeat"
+            )
+            baseline = _event_position(events, generation, "baseline.completed")
+            ablation_started = _event_position(events, generation, "ablation.started")
+            ablation_completed = _event_position(events, generation, "ablation.completed")
+            metrics = _event_position(events, generation, "metrics.snapshot")
+            rows = [
+                index
+                for index, event in enumerate(events)
+                if event.type == "ablation.role" and event.data.get("generation") == generation
+            ]
+
+            assert full_completed < repeat_started < repeat_completed < baseline
+            assert baseline < ablation_started < ablation_completed < metrics
+            assert all(ablation_started < row < ablation_completed for row in rows)
+
+
+def test_noise_floor_is_consistent_across_ablation_started_and_metrics() -> None:
+    """One noise floor, three places it shows up, all of which must agree.
+
+    `03 §4.1` measures it from the two full runs; `ablation.started` carries it
+    so the TUI can print the `03 §8` footer while the table is still filling;
+    and `metrics.snapshot.reliability` is its complement (`03 §7`). The fixtures
+    only record `passed` per case, so pass-disagreement stands in for the
+    answer-disagreement the engine actually compares.
+    """
+
+    for fixture in FIXTURES:
+        events = EventReader(fixture).read()
+        state = reduce(events)
+        started = {
+            event.data["generation"]: event.data
+            for event in events
+            if event.type == "ablation.started"
         }
+        generations = set(started)
+        assert generations, f"{fixture.name} has no ablation.started events"
         for generation in generations:
             full_cases = {
                 event.data["case_id"]: event.data["passed"]
@@ -320,6 +409,10 @@ def test_metrics_reliability_matches_noise_for_every_generation() -> None:
                 if event.type == "metrics.snapshot" and event.data["generation"] == generation
             )
             assert metrics["reliability"] == pytest.approx(1 - noise_rate)
+            assert started[generation]["noise_rate"] == pytest.approx(noise_rate)
+            assert state.generations[f"g{generation:03d}"].ablation["noise_rate"] == pytest.approx(
+                noise_rate
+            )
 
 
 def test_best_generation_reliability_and_summary_are_cross_event_consistent() -> None:
@@ -380,6 +473,36 @@ def test_new_strict_models_capture_lessons_and_invoice_sub_results() -> None:
     assert result.sub_results == {"INV-1": False}
     with pytest.raises(ValidationError):
         CaseResult.model_validate({**result.model_dump(), "unexpected": True})
+
+
+def test_role_trace_carries_the_displayed_cost_and_its_label() -> None:
+    """A granted role costs $0 to bill and list-rate-equivalent to show.
+
+    `00 §7` and `01 §5` require the equivalent to be shown *and* labelled, and
+    ablation's `cost_share` divides by the displayed number — so a trace that
+    only carried the $0 bill would make structural fidelity meaningless.
+    """
+
+    granted = RoleTrace(
+        tokens_in=1000,
+        tokens_out=500,
+        cost_usd=0.00026,
+        billed_cost_usd=0.0,
+        cost_label="list-rate-equivalent",
+    )
+    assert granted.cost_usd > granted.billed_cost_usd
+    assert granted.cost_label == "list-rate-equivalent"
+
+    # Metered is the default, so an executor that forgets to label cannot
+    # silently claim a granted rate.
+    assert RoleTrace().cost_label == "metered"
+    assert RoleTrace().billed_cost_usd == 0.0
+    with pytest.raises(ValidationError):
+        RoleTrace(cost_label="")
+    with pytest.raises(ValidationError):
+        RoleTrace(cost_usd=-1.0)
+    with pytest.raises(ValidationError):
+        RoleTrace.model_validate({"unexpected": True})
 
 
 def test_task_manifest_shape_is_schema_compatible() -> None:
