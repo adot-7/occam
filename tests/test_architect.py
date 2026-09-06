@@ -97,11 +97,12 @@ class StubArchitectLLM:
         self,
         payload: dict[str, Any] | None = None,
         response_text: str | None = None,
+        configs: dict[str, Any] | None = None,
     ) -> None:
         self.payload = payload or architecture_payload()
         self.response_text = response_text
         self.calls: list[dict[str, Any]] = []
-        self.configs = {"architect": object(), "worker_fast": object()}
+        self.configs = configs or {"architect": object(), "worker_fast": object()}
 
     def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
         self.calls.append({"model_key": model_key, "messages": messages, **kwargs})
@@ -267,6 +268,50 @@ def test_architect_provider_failure_is_distinct_and_redacted(tmp_path: Path) -> 
         Architect(llm=FailingArchitectLLM(), memory=tmp_path / "memory").propose(TASK)
 
     assert "sensitive provider payload" not in str(error.value)
+
+
+def test_architect_schema_and_prompt_advertise_only_configured_role_keys(tmp_path: Path) -> None:
+    llm = StubArchitectLLM(
+        configs={
+            "architect": object(),
+            "worker_alt": object(),
+            "worker_fast": object(),
+        }
+    )
+
+    Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    call = llm.calls[0]
+    role_schema = call["response_schema"]["$defs"]["Role"]
+    assert role_schema["properties"]["model"]["enum"] == ["worker_alt", "worker_fast"]
+    request_text = json.dumps(call["messages"], ensure_ascii=False)
+    assert "CONFIGURED ROLE MODEL KEYS" in request_text
+    assert "provider model IDs" in request_text
+    assert "worker_fast" in request_text
+    assert "gpt-4.1" not in request_text
+
+
+def test_architect_accepts_a_configured_worker_model_key(tmp_path: Path) -> None:
+    payload = architecture_payload()
+    llm = StubArchitectLLM(
+        payload=payload,
+        response_text=f"Here is the plan:\n{json.dumps(payload)}",
+    )
+
+    architecture = Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    assert {role.model for role in architecture.roles} == {"worker_fast"}
+
+
+def test_architect_rejects_raw_provider_model_ids_before_execution(tmp_path: Path) -> None:
+    payload = architecture_payload()
+    payload["roles"][0]["model"] = "gpt-4.1"
+
+    with pytest.raises(ArchitectError, match=r"role model key\(s\) are not configured") as error:
+        Architect(llm=StubArchitectLLM(payload), memory=tmp_path / "memory").propose(TASK)
+
+    assert "gpt-4.1" in str(error.value)
+    assert "worker_fast" in str(error.value)
 
 
 def test_architect_overwrites_model_guessed_id_instead_of_raising(tmp_path: Path) -> None:

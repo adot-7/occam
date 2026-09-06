@@ -140,7 +140,9 @@ def _lesson_list(raw: Iterable[Lesson | Mapping[str, Any]]) -> list[Lesson]:
     return lessons
 
 
-def _architect_response_schema() -> dict[str, Any]:
+def _architect_response_schema(
+    role_model_keys: Sequence[str] | None = None,
+) -> dict[str, Any]:
     """The ``Architecture`` schema handed to the model, minus engine-owned ids.
 
     ``id`` and ``parent_id`` are the engine's own generation bookkeeping
@@ -158,6 +160,18 @@ def _architect_response_schema() -> dict[str, Any]:
     required = schema.get("required")
     if isinstance(required, list):
         schema["required"] = [name for name in required if name not in ("id", "parent_id")]
+    if role_model_keys is not None:
+        definitions = schema.get("$defs")
+        role_schema = definitions.get("Role") if isinstance(definitions, Mapping) else None
+        role_properties = (
+            role_schema.get("properties") if isinstance(role_schema, Mapping) else None
+        )
+        model_schema = (
+            role_properties.get("model") if isinstance(role_properties, Mapping) else None
+        )
+        if not isinstance(model_schema, dict):
+            raise ArchitectError("architect schema is missing the Role.model field")
+        model_schema["enum"] = list(role_model_keys)
     return schema
 
 
@@ -359,10 +373,11 @@ class Architect:
         self.last_lessons = loaded
 
         tool_names = _tool_names(task)
+        role_model_keys = self._configured_role_model_keys()
         specs = self._build_tool_specs(task, tool_names, loaded)
         manifest = self._build_manifest(task, specs)
-        messages = self._build_messages(manifest, loaded)
-        response_schema = _architect_response_schema()
+        messages = self._build_messages(manifest, loaded, role_model_keys)
+        response_schema = _architect_response_schema(role_model_keys)
         self.last_context = ArchitectContext(
             task=manifest,
             tools=specs,
@@ -433,22 +448,31 @@ class Architect:
 
     @staticmethod
     def _build_messages(
-        manifest: Mapping[str, Any], lessons: Sequence[Lesson]
+        manifest: Mapping[str, Any],
+        lessons: Sequence[Lesson],
+        role_model_keys: Sequence[str],
     ) -> list[dict[str, str]]:
         system = (
             "You are Occam's architecture architect. Design a compact multi-agent DAG for the "
             "task below. Return exactly one JSON object matching the supplied Architecture "
             "schema and no prose. Use 3 to 6 roles, tag every role with a justification, "
-            "bind only manifest tools, and prefer deterministic control. Put reusable task "
-            "instructions in the system_prompt of the roles that need them. For roles where "
-            "tool calls are expected, set max_turns >= 16 so the role has room to finish its "
-            "tool work; keep no-tool roles appropriately bounded."
+            "bind only manifest tools, and prefer deterministic control. Every role's model "
+            "must be one configured role model key from the allowlist below, never a provider "
+            "model ID. Put reusable task instructions in the system_prompt of the roles that "
+            "need them. For roles where tool calls are expected, set max_turns >= 16 so the "
+            "role has room to finish its tool work; keep no-tool roles appropriately bounded."
         )
         sections = [
             "TASK AND TOOL MANIFEST",
             json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2),
+            "CONFIGURED ROLE MODEL KEYS (use these keys exactly; do not use provider model IDs)",
+            json.dumps(list(role_model_keys), ensure_ascii=False),
             "ARCHITECTURE OUTPUT SCHEMA",
-            json.dumps(_architect_response_schema(), ensure_ascii=False, sort_keys=True),
+            json.dumps(
+                _architect_response_schema(role_model_keys),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
         ]
         domain_rules = [lesson for lesson in lessons if lesson.kind == "domain_rule"]
         if domain_rules:
@@ -593,14 +617,28 @@ class Architect:
                 f"architect proposal is not compatible with the event schema: {exc}"
             ) from exc
 
-    def _validate_model_keys(self, architecture: Architecture) -> None:
+    def _configured_role_model_keys(self) -> tuple[str, ...]:
         configs = getattr(self.llm, "configs", None)
         if not isinstance(configs, Mapping) or not configs:
-            return
-        missing = sorted({role.model for role in architecture.roles if role.model not in configs})
-        if missing:
             raise ArchitectError(
-                f"architecture uses unconfigured model key(s): {', '.join(missing)}"
+                "architect proposal validation failure: configured role model keys are unavailable"
+            )
+        excluded = {ARCHITECT_MODEL_KEY, self.model_key}
+        keys = tuple(sorted(str(key) for key in configs if str(key) not in excluded))
+        if not keys:
+            raise ArchitectError(
+                "architect proposal validation failure: no configured role model keys are available"
+            )
+        return keys
+
+    def _validate_model_keys(self, architecture: Architecture) -> None:
+        allowed = set(self._configured_role_model_keys())
+        missing = sorted({role.model for role in architecture.roles if role.model not in allowed})
+        if missing:
+            available = ", ".join(sorted(allowed))
+            raise ArchitectError(
+                "architect proposal validation failure: role model key(s) are not configured: "
+                f"{', '.join(missing)}; allowed role model keys: {available}"
             )
 
     def _emit(self, event_type: str, data: Mapping[str, Any]) -> None:
