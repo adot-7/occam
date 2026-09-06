@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from pathlib import Path
 
 import yaml
 
 from occam.core import Task
 from occam.store.schema import validate_task
-from occam.tasks.fx_reference import reference_case
+from occam.tasks.fx_reference import parse_case_input, reference_case
 from occam.tools.fx import FXClient
+from scripts.gen_fx_cases import _has_weekend_or_holiday
 from scripts.lesson_signal_report import MINIMUM_MARGIN, minimum_margins, pack_margins
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +40,15 @@ def test_committed_packs_have_required_mix_and_manifest_contract() -> None:
         assert sum(case["meta"]["has_bank_fee"] for case in cases) >= 5
         assert sum(case["meta"]["has_cross_ccy"] for case in cases) >= 5
         assert sum(case["meta"]["has_jpy"] for case in cases) >= 4
+
+
+def test_committed_pack_weekend_metadata_matches_actual_lookup_dates() -> None:
+    for pack in PACKS:
+        for case in _cases(pack):
+            valuation, invoices = parse_case_input(case["input"])
+            assert case["meta"]["has_weekend_or_holiday"] == _has_weekend_or_holiday(
+                date.fromisoformat(valuation), invoices
+            )
 
 
 def test_committed_pack_tolerance_sanity_is_nontrivial() -> None:

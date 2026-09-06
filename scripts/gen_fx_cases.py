@@ -173,7 +173,7 @@ def _make_case(rng: random.Random, prefix: str, index: int) -> dict[str, Any]:
         "input": "\n".join(lines),
         "meta": {
             "n_invoices": n_invoices,
-            "has_weekend_or_holiday": force_holiday,
+            "has_weekend_or_holiday": _has_weekend_or_holiday(valuation, invoices),
             "has_bank_fee": any(invoice["bank_fee_inr"] > 0 for invoice in invoices),
             "has_cross_ccy": any(
                 invoice["status"] == "SETTLED"
@@ -184,6 +184,22 @@ def _make_case(rng: random.Random, prefix: str, index: int) -> dict[str, Any]:
             "valuation_date": valuation.isoformat(),
         },
     }
+
+
+def _has_weekend_or_holiday(valuation: date, invoices: list[dict[str, Any]]) -> bool:
+    """Report whether a real rate lookup lands on a weekend or known holiday."""
+
+    lookup_dates: list[date] = []
+    for invoice in invoices:
+        lookup_dates.append(date.fromisoformat(invoice["issue_date"]))
+        if invoice["status"] == "OPEN":
+            lookup_dates.append(valuation)
+        else:
+            lookup_dates.append(date.fromisoformat(invoice["settlement_date"]))
+    return any(
+        lookup_date.weekday() >= 5 or lookup_date in HOLIDAY_LOOKUP_DATES
+        for lookup_date in lookup_dates
+    )
 
 
 def _make_invoice(
