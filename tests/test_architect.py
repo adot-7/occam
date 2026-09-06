@@ -11,6 +11,7 @@ import pytest
 
 from occam.core import Architecture
 from occam.engine.architect import DOMAIN_RULE_HEADING, Architect, ArchitectError
+from occam.llm import LLMClient, ModelConfig, ProviderResponse, RetryPolicy
 from occam.memory.lessons import LessonStore
 from occam.store.reader import EventReader
 from occam.store.schema import validate_event
@@ -125,6 +126,20 @@ class SequenceArchitectLLM(StubArchitectLLM):
     def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
         self.calls.append({"model_key": model_key, "messages": messages, **kwargs})
         return SimpleNamespace(text=self.responses.pop(0), tool_calls=[])
+
+
+class SequenceProvider:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(self, config: ModelConfig, messages: Any, **kwargs: Any) -> ProviderResponse:
+        self.calls.append({"config": config, "messages": messages, **kwargs})
+        return ProviderResponse(
+            text=self.responses.pop(0),
+            tokens_in=100,
+            tokens_out=10,
+        )
 
 
 def make_lesson_store(path: Path) -> LessonStore:
@@ -341,9 +356,10 @@ def test_architect_repairs_unknown_dag_input_once_and_emits_one_event(tmp_path: 
     assert len(llm.calls) == 2
     repair_prompt = llm.calls[1]["messages"][-1]["content"]
     assert "Validation category: DAG input contract" in repair_prompt
+    assert "parsed_case" in repair_prompt
     assert '"worker_fast"' in repair_prompt
     assert '"task"' in repair_prompt
-    assert "parsed_case" not in repair_prompt
+    assert '"r_parse", "parsed"' in repair_prompt
     assert emitted == ["architecture.proposed"]
 
 
@@ -362,6 +378,39 @@ def test_architect_repair_exhaustion_preserves_strict_failure(tmp_path: Path) ->
 
     assert len(llm.calls) == 2
     assert emitted == []
+
+
+def test_architect_repair_calls_are_truthfully_accounted(tmp_path: Path) -> None:
+    invalid = architecture_payload()
+    invalid["roles"][2]["inputs"] = ["r_parse", "parsed_case"]
+    provider = SequenceProvider([json.dumps(invalid), json.dumps(architecture_payload())])
+    architect_config = ModelConfig(
+        key="architect",
+        provider="test",
+        model="claude-sonnet-5",
+        in_per_m=2.0,
+        out_per_m=10.0,
+    )
+    worker_config = ModelConfig(
+        key="worker_fast",
+        provider="test",
+        model="worker-test",
+    )
+    llm = LLMClient(
+        configs={"architect": architect_config, "worker_fast": worker_config},
+        providers={"architect": provider},
+        cache_dir=tmp_path / "cache",
+        retry_policy=RetryPolicy(max_attempts=1),
+    )
+
+    architecture = Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    assert architecture.final_role == "r_calc"
+    assert len(provider.calls) == 2
+    assert llm.provider_call_count == 2
+    expected_cost = 2 * (100 * 2.0 + 10 * 10.0) / 1_000_000
+    assert llm.displayed_cost_usd == pytest.approx(expected_cost)
+    assert llm.billed_cost_usd == pytest.approx(expected_cost)
 
 
 def test_architect_overwrites_model_guessed_id_instead_of_raising(tmp_path: Path) -> None:

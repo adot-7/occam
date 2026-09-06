@@ -293,6 +293,35 @@ def _safe_output_keys(architecture: Architecture | None) -> tuple[str, ...]:
     )
 
 
+def _safe_dependency_pairs(architecture: Architecture | None) -> tuple[tuple[str, str], ...]:
+    """Return safe role/output-key pairs in the model-provided order."""
+
+    if architecture is None:
+        return ()
+    return tuple(
+        (role.id, role.output_key)
+        for role in architecture.roles
+        if _SAFE_IDENTIFIER.fullmatch(role.id) and _SAFE_IDENTIFIER.fullmatch(role.output_key)
+    )
+
+
+def _safe_validation_detail(error: ArchitectError, category: str) -> str:
+    """Expose only safe identifiers that help the one repair attempt."""
+
+    if category != "DAG input contract":
+        return ""
+    match = re.search(
+        r"role ['\"]([^'\"]+)['\"] reads unknown input ['\"]([^'\"]+)['\"]",
+        str(error),
+    )
+    if match is None:
+        return ""
+    role_id, input_name = match.groups()
+    if not (_SAFE_IDENTIFIER.fullmatch(role_id) and _SAFE_IDENTIFIER.fullmatch(input_name)):
+        return ""
+    return f"role {role_id} referenced unknown input {input_name}"
+
+
 class ArchitectContext:
     """The exact manifest/context sent to the architect model."""
 
@@ -442,6 +471,8 @@ class Architect:
                     category=category,
                     role_model_keys=role_model_keys,
                     output_keys=_safe_output_keys(architecture),
+                    dependency_pairs=_safe_dependency_pairs(architecture),
+                    validation_detail=_safe_validation_detail(exc, category),
                 )
                 if self.last_context is not None:
                     self.last_context.messages = [dict(message) for message in messages]
@@ -556,23 +587,32 @@ class Architect:
         category: str,
         role_model_keys: Sequence[str],
         output_keys: Sequence[str],
+        dependency_pairs: Sequence[tuple[str, str]],
+        validation_detail: str,
     ) -> list[dict[str, str]]:
         """Append one concise, sanitized correction request to the context."""
 
         known_output_keys = json.dumps(list(output_keys), ensure_ascii=False)
-        correction = " ".join(
+        sections = [
+            "ARCHITECTURE REPAIR: the previous proposal failed validation.",
+            f"Validation category: {category}.",
+        ]
+        if validation_detail:
+            sections.append(f"Sanitized validation detail: {validation_detail}.")
+        sections.extend(
             [
-                "ARCHITECTURE REPAIR: the previous proposal failed validation.",
-                f"Validation category: {category}.",
                 "Return a complete replacement as exactly one JSON object and no prose.",
                 "Use only these configured role model keys:",
                 json.dumps(list(role_model_keys), ensure_ascii=False) + ".",
                 'Each role input must be exactly "task" or the output_key of an earlier role; '
                 "do not use role names or invented aliases.",
                 f"Safe output_key values seen in the rejected proposal: {known_output_keys}.",
+                "Safe role/output_key pairs in proposal order:",
+                json.dumps(list(dependency_pairs), ensure_ascii=False) + ".",
                 "Bind tools only from the task manifest and satisfy the supplied schema.",
             ]
         )
+        correction = " ".join(sections)
         return [
             *[dict(message) for message in messages],
             {"role": "user", "content": correction},
