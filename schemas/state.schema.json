@@ -8,6 +8,10 @@
   "required": [
     "run_id",
     "last_seq",
+    "run_name",
+    "memory_ns",
+    "lessons_loaded",
+    "lessons",
     "task",
     "config",
     "generations",
@@ -22,6 +26,10 @@
   "properties": {
     "run_id": {"type": "string", "minLength": 1},
     "last_seq": {"type": "integer", "minimum": -1},
+    "run_name": {"type": "string"},
+    "memory_ns": {"type": "string"},
+    "lessons_loaded": {"type": "array", "items": {"$ref": "#/$defs/lesson"}},
+    "lessons": {"type": "array", "items": {"$ref": "#/$defs/lesson"}},
     "task": {"type": ["object", "null"]},
     "config": {"type": "object"},
     "generations": {
@@ -38,6 +46,20 @@
     "logs": {"type": "array", "items": {"type": "object"}}
   },
   "$defs": {
+    "lesson": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "text", "tool", "evidence", "born", "status"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "enum": ["tool_note", "domain_rule"]},
+        "text": {"type": "string", "minLength": 1},
+        "tool": {"type": ["string", "null"]},
+        "evidence": {"type": "object"},
+        "born": {"type": "object"},
+        "status": {"type": "string", "enum": ["active", "retired"]}
+      }
+    },
     "role": {
       "type": "object",
       "additionalProperties": false,
@@ -74,7 +96,7 @@
     "generation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generation", "architecture", "executions", "ablation", "baseline", "metrics", "diagnosis", "mutation", "revert", "reverted"],
+      "required": ["generation", "architecture", "executions", "ablation", "baseline", "metrics", "reliability", "diagnosis", "mutation", "revert", "reverted"],
       "properties": {
         "generation": {"type": "integer", "minimum": 0},
         "architecture": {"oneOf": [{"$ref": "#/$defs/architecture"}, {"type": "null"}]},
@@ -88,6 +110,7 @@
         "ablation": {"type": ["object", "null"]},
         "baseline": {"type": ["object", "null"]},
         "metrics": {"oneOf": [{"$ref": "#/$defs/metricsSnapshot"}, {"type": "null"}]},
+        "reliability": {"type": ["object", "null"]},
         "diagnosis": {"type": ["object", "null"]},
         "mutation": {"type": ["object", "null"]},
         "revert": {"type": ["object", "null"]},
@@ -115,6 +138,7 @@
         "latency_s_p50",
         "latency_s_p90",
         "tokens",
+        "tool_calls_per_case",
         "reliability",
         "speed",
         "structural_fidelity",
@@ -129,7 +153,9 @@
         "latency_s_p50": {"type": "number", "minimum": 0},
         "latency_s_p90": {"type": "number", "minimum": 0},
         "tokens": {"type": "integer", "minimum": 0},
+        "tool_calls_per_case": {"type": "number", "minimum": 0},
         "reliability": {"type": "number", "minimum": 0, "maximum": 1},
+        "reliability_pass3": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "speed": {"type": "number", "minimum": 0},
         "structural_fidelity": {"type": "number", "minimum": 0, "maximum": 1},
         "vs_baseline": {

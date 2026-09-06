@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from occam.core.models import Event, GenerationState, MetricsSnapshot, State
+from occam.core.models import Event, GenerationState, Lesson, MetricsSnapshot, State
 from occam.store.schema import validate_event
 
 
@@ -76,6 +76,20 @@ def reduce(events: Iterable[Event | Mapping[str, Any]]) -> State:
         if event_type == "run.started":
             state.task = data["task"]
             state.config = data["config"]
+            state.run_name = str(data["run_name"])
+            state.memory_ns = str(data["memory_ns"])
+            state.lessons_loaded = [
+                Lesson.model_validate(lesson) for lesson in data["lessons_loaded"]
+            ]
+            state.lessons = copy.deepcopy(state.lessons_loaded)
+        elif event_type == "lesson.written":
+            lesson = Lesson.model_validate(data["lesson"])
+            state.lessons.append(lesson)
+        elif event_type == "reliability.completed":
+            generation = int(data["generation"])
+            current = _generation(state, generation)
+            current.reliability = data
+            state.current_generation = generation
         elif event_type == "architecture.proposed":
             generation = int(data["generation"])
             current = _generation(state, generation)
