@@ -12,6 +12,31 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 - **Neatlogs shareable trace URL** — trace viewed fine while logged in; open the same URL in a private window to see if it's public. Decides README link only; not blocking.
 - **GLM thinking toggle.** Test whether `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` (vLLM convention) or `extra_body={"thinking": {"type": "disabled"}}` (Z.ai convention) suppresses the `reasoning` field through TensorMux. If either works, expose it as a per-role flag `thinking: on|off` — a cheap, honest cost/latency lever (and optionally a mutation type `set_thinking`).
 
+## Unresolved — appended 2026-09-06 by WP-05 (executor)
+
+- **Where per-case traces live for a non-`full` variant.** `01 §1` names
+  `generations/g000/results.jsonl` and `generations/g000/ablation.json` but never
+  says where the per-case `CaseResult`s of a knockout run go, and the event schema
+  deliberately keeps `execution.case` small, so `RoleTrace` (raw tool responses,
+  per-role cost) has no other home. The executor writes `results.jsonl` for
+  `variant="full"` and `results.<slugged variant>.jsonl` otherwise, e.g.
+  `results.ablate_r_rates.jsonl`. WP-08 reads these for `cost_share`; confirm or
+  rename in one place before WP-08 hardcodes it.
+- **`control="llm"` has no defined router.** `01 §4.2` says "a router role decides"
+  but no role type, tag, or wiring convention for a router is specified anywhere.
+  The executor implements the weakest defensible reading: under `control="llm"`
+  every role sees the whole context (task plus every produced `output_key`) rather
+  than only its declared `inputs`, so the model decides relevance instead of the
+  DAG. Deterministic control is unaffected and remains the default. Confirm before
+  any architect is allowed to emit `control="llm"`.
+- **WP-05 acceptance "real HTTP on the first run" is evidenced for the tool leg
+  only.** No `.env` and no `TENSORMUX_API_KEY`/`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`
+  exist in this workspace, so the LLM leg cannot make a real call here. The
+  Frankfurter leg is evidenced live (`OCCAM_LIVE_HTTP=1`, real ECB rates, and
+  `2026-04-03 → rate_date 2026-04-02` observed in a trace). The LLM leg is
+  evidenced with a scripted provider that counts provider hits: run 1 makes 20,
+  run 2 makes 0. `OCCAM_LIVE_LLM=1` runs the same test against `worker_fast` and
+  should be run once a key is available.
 ### 2026-09-06 — WP-03 (FX packs, reference implementation, grader)
 
 - **Tolerance sanity — answers the standing "Tolerance sanity" item above.** Reviewed on both generated packs: `fx_recon_a` |expected| ₹17,762.30–₹246,238.85, `fx_recon_b` ₹8,930.52–₹309,275.60; the tightest relative tolerance is the 0.1% floor (no case is impossibly tight), and the loosest absolute tolerance is ₹309.28 (no case is trivially passable — a whole invoice's gain is orders of magnitude larger). **The constraint the PRD does not state:** the D1 bank fee must exceed the grader's tolerance, or an agent that ignores the fee still passes the total and the fee cases teach nothing. The first pack draft had fees of ₹125–₹1,250 against tolerances up to ₹637, so 5 of 10 fee cases were undetectable at the total level. Fees are now ₹1,500–₹4,500 and the generator asserts `min_bank_fee_headroom > 1` (currently 6.09x and 10.63x). If `02 §1.2`'s tolerance ever changes, this invariant must be rechecked.
