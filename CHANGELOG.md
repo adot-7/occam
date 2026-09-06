@@ -46,6 +46,13 @@ All notable changes to Occam are documented here.
   completion into the role trace, including cache-hit labels. Both fixtures
   updated; tests cover reducer retention and schema-copy parity.
 
+- WP-08 ablation engine: noise floor from a `full_repeat` pass, paired divergence
+  and influence, bootstrap influence CIs, the coded verdict rule, structural
+  fidelity, knockout DAG helpers, and the stratified ablation subset.
+- WP-08 metrics package: Wilson pass-rate intervals, cost/token/latency
+  aggregation with p50/p90, tool calls per case, cost shares, and the
+  `metrics.snapshot` builder.
+
 ### Fixed
 
 - Replaced `python_exec`'s arbitrary `exec` path with a fail-closed AST

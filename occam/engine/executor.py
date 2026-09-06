@@ -477,6 +477,7 @@ class Executor:
         *,
         variant: str | None = None,
         ablate_role: str | None = None,
+        use_cache: bool = True,
         generation: int = 0,
         grader: Callable[..., Any] | None = None,
     ) -> RunResult:
@@ -494,9 +495,39 @@ class Executor:
                 cases,
                 variant=variant,
                 ablate_role=ablate_role,
+                use_cache=use_cache,
                 generation=generation,
                 grader=grader,
             )
+        )
+
+    def run_variant(
+        self,
+        architecture: Architecture,
+        cases: Sequence[Case],
+        *,
+        variant: str,
+        ablate_role: str | None = None,
+        use_cache: bool = True,
+        generation: int = 0,
+        grader: Callable[..., Any] | None = None,
+    ) -> RunResult:
+        """Run the narrow variant protocol consumed by :mod:`ablation`.
+
+        ``execute`` is the executor's primary API; this named adapter keeps
+        ablation independent of executor implementation details while carrying
+        the generation and cache-bypass controls needed for event ordering and
+        the fresh ``full_repeat`` noise-floor pass.
+        """
+
+        return self.execute(
+            architecture,
+            cases,
+            variant=variant,
+            ablate_role=ablate_role,
+            use_cache=use_cache,
+            generation=generation,
+            grader=grader,
         )
 
     async def execute_async(
@@ -506,6 +537,7 @@ class Executor:
         *,
         variant: str | None = None,
         ablate_role: str | None = None,
+        use_cache: bool = True,
         generation: int = 0,
         grader: Callable[..., Any] | None = None,
     ) -> RunResult:
@@ -533,7 +565,7 @@ class Executor:
         async def run_one(position: int, case: Case) -> int:
             async with limiter:
                 results[position] = await self._run_case(
-                    architecture, index, levels, excluded, case, active_grader
+                    architecture, index, levels, excluded, case, active_grader, use_cache
                 )
             return position
 
@@ -593,6 +625,7 @@ class Executor:
         excluded: set[str],
         case: Case,
         grader: Callable[..., Any] | None,
+        use_cache: bool,
     ) -> CaseResult:
         started = time.perf_counter()
         context: dict[str, str] = {
@@ -603,7 +636,9 @@ class Executor:
         for level in levels:
             level_traces = await asyncio.gather(
                 *(
-                    self._run_role(role, case, context, index, architecture.control)
+                    self._run_role(
+                        role, case, context, index, architecture.control, use_cache=use_cache
+                    )
                     for role in level
                 )
             )
@@ -645,6 +680,8 @@ class Executor:
         context: Mapping[str, str],
         index: Mapping[str, Role],
         control: str,
+        *,
+        use_cache: bool,
     ) -> RoleTrace:
         """Run one role's bounded tool-call loop and return its trace."""
 
@@ -661,6 +698,7 @@ class Executor:
             loop,
             nested_traces,
             nested_trace_guard,
+            use_cache,
         )
         role_tools = (
             normalize_registry(role_registry.bindings(role.tools))
@@ -684,15 +722,17 @@ class Executor:
 
         for turn in range(1, role.max_turns + 1):
             try:
-                completion = await self._complete(role.model, messages, specs or None)
+                completion = await self._complete(
+                    role.model, messages, specs or None, use_cache=use_cache
+                )
             except (LLMError, ConfigurationError) as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 break
             tokens_in += completion.tokens_in
             tokens_out += completion.tokens_out
             cost += completion.cost_usd
-            billed_cost += float(getattr(completion, "billed_cost_usd", 0.0))
-            cost_labels.append(str(getattr(completion, "cost_label", "metered")))
+            billed_cost += completion.billed_cost_usd
+            cost_labels.append(completion.cost_label)
             cached = cached and completion.cached
             text = (completion.text or "").strip()
             if not completion.tool_calls:
@@ -758,6 +798,7 @@ class Executor:
         loop: asyncio.AbstractEventLoop,
         nested_traces: list[RoleTrace],
         nested_trace_guard: threading.Lock,
+        use_cache: bool,
     ) -> ToolRegistry | None:
         """Create the registry scoped to ``role`` and its prompt runner."""
 
@@ -776,6 +817,7 @@ class Executor:
                     context,
                     index,
                     control,
+                    use_cache=use_cache,
                 ),
                 loop,
             )
@@ -793,6 +835,8 @@ class Executor:
         model_key: str,
         messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] | None,
+        *,
+        use_cache: bool,
     ) -> Any:
         payload = [dict(message) for message in messages]
         async with self._semaphore(model_key):
@@ -804,6 +848,7 @@ class Executor:
                 None,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
+                use_cache=use_cache,
             )
 
     async def _invoke_tool(
