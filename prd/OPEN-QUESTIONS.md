@@ -12,6 +12,32 @@ Workers: append under a dated heading when the PRD is wrong, ambiguous, or block
 - **Neatlogs shareable trace URL** — trace viewed fine while logged in; open the same URL in a private window to see if it's public. Decides README link only; not blocking.
 - **GLM thinking toggle.** Test whether `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` (vLLM convention) or `extra_body={"thinking": {"type": "disabled"}}` (Z.ai convention) suppresses the `reasoning` field through TensorMux. If either works, expose it as a per-role flag `thinking: on|off` — a cheap, honest cost/latency lever (and optionally a mutation type `set_thinking`).
 
+## Unresolved — appended 2026-09-06 by WP-05 (executor)
+
+- **Where per-case traces live for a non-`full` variant.** `01 §1` names
+  `generations/g000/results.jsonl` and `generations/g000/ablation.json` but never
+  says where the per-case `CaseResult`s of a knockout run go, and the event schema
+  deliberately keeps `execution.case` small, so `RoleTrace` (raw tool responses,
+  per-role cost) has no other home. The executor writes `results.jsonl` for
+  `variant="full"` and `results.<slugged variant>.jsonl` otherwise, e.g.
+  `results.ablate_r_rates.jsonl`. WP-08 reads these for `cost_share`; confirm or
+  rename in one place before WP-08 hardcodes it.
+- **`control="llm"` has no defined router.** `01 §4.2` says "a router role decides"
+  but no role type, tag, or wiring convention for a router is specified anywhere.
+  The executor implements the weakest defensible reading: under `control="llm"`
+  every role sees the whole context (task plus every produced `output_key`) rather
+  than only its declared `inputs`, so the model decides relevance instead of the
+  DAG. Deterministic control is unaffected and remains the default. Confirm before
+  any architect is allowed to emit `control="llm"`.
+- **WP-05 acceptance "real HTTP on the first run" is evidenced for the tool leg
+  only.** No `.env` and no `TENSORMUX_API_KEY`/`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`
+  exist in this workspace, so the LLM leg cannot make a real call here. The
+  Frankfurter leg is evidenced live (`OCCAM_LIVE_HTTP=1`, real ECB rates, and
+  `2026-04-03 → rate_date 2026-04-02` observed in a trace). The LLM leg is
+  evidenced with a scripted provider that counts provider hits: run 1 makes 20,
+  run 2 makes 0. `OCCAM_LIVE_LLM=1` runs the same test against `worker_fast` and
+  should be run once a key is available.
+
 ## Resolved
 - **2026-09-06 — WP-01b fixture and design-reference decisions:**
   - **Run-2 lesson count:** resolved to 3, matching `prd/08-END-TO-END-WALKTHROUGH.md` and lessons L1, D1, and L2. The WP-01b acceptance wording of 2 is corrected; the canonical fixture and acceptance evidence use 3.

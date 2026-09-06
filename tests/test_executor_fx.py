@@ -168,6 +168,9 @@ def fx_executor(tmp_path, fx_tool):
         grader=grade_fx_total,
         writer=writer,
         run_dir=run_dir,
+        # Frankfurter publishes no rate limit; stay under the 5 concurrent
+        # requests OPEN-QUESTIONS settled on when the live tool is in use.
+        case_concurrency=4 if os.environ.get("OCCAM_LIVE_HTTP") == "1" else 8,
     )
     yield executor, provider, run_dir
     writer.close()
