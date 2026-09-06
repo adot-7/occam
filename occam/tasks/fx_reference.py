@@ -201,8 +201,10 @@ def _decimal(value: Any, field: str) -> Decimal:
         raise ValueError(f"invoice has invalid {field}: {value!r}") from exc
 
 
-def _parse_number(value: str) -> float:
-    return float(value.replace(",", ""))
+def _parse_number(value: str) -> Decimal:
+    """Parse straight to ``Decimal``; this module never routes money via float."""
+
+    return Decimal(value.replace(",", ""))
 
 
 def _as_number(value: Decimal) -> float:

@@ -48,6 +48,9 @@ APPROX_INR_RATES = {
     "USD": 92.15,
 }
 BANK_FEES = (1500.0, 2400.0, 3200.0, 4500.0)
+# A D1 miss must move the total by well more than the grader's tolerance, or an
+# agent that never learns the rule still passes the fee cases.
+MINIMUM_FEE_HEADROOM = 3.0
 TRAILING_INSTRUCTION = (
     "Compute the total FX gain/(loss) in INR as of the valuation date, "
     "and the gain/(loss) per invoice."
@@ -374,10 +377,10 @@ def _assert_mix(report: dict[str, Any], n: int) -> None:
             raise AssertionError(f"{name} mix {report['mix'][name]} is below {minimum}")
     if report["n"] != n:
         raise AssertionError("generator report count does not match requested n")
-    if report["min_bank_fee_headroom"] <= 1.0:
+    if report["min_bank_fee_headroom"] < MINIMUM_FEE_HEADROOM:
         raise AssertionError(
-            f"bank fee headroom {report['min_bank_fee_headroom']:.2f} is not above the "
-            "grader tolerance, so a fee case would pass without applying D1"
+            f"bank fee headroom {report['min_bank_fee_headroom']:.2f}x is below the required "
+            f"{MINIMUM_FEE_HEADROOM:.0f}x, so a fee case could pass without applying D1"
         )
 
 
@@ -396,7 +399,8 @@ def _print_report(report: dict[str, Any], *, seed: int, out: Path) -> None:
         f"min_abs_expected={report['min_abs_expected']:.2f}, "
         f"max_abs_expected={report['max_abs_expected']:.2f}, "
         f"tightest_relative_tolerance={report['tightest_relative_tolerance']:.6f}, "
-        f"min_bank_fee_headroom={report['min_bank_fee_headroom']:.2f}x"
+        f"min_bank_fee_headroom={report['min_bank_fee_headroom']:.2f}x "
+        f"(>={MINIMUM_FEE_HEADROOM:.0f}x required)"
     )
 
 

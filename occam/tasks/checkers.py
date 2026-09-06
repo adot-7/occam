@@ -75,7 +75,12 @@ def fx_total(answer: str | Mapping[str, Any], expected: Mapping[str, Any]) -> Gr
     continue and record the failure.
     """
 
-    expected_total = _number(expected.get("total_inr"))
+    # A malformed *pack* must fail the case, never raise: the grader is on the
+    # hot path of a run and may not take it down.
+    try:
+        expected_total = _number(expected.get("total_inr"))
+    except (TypeError, ValueError) as exc:
+        return GradeResult(False, error=f"expected total_inr is unusable: {exc}")
     expected_per_invoice = expected.get("per_invoice", {})
     if not isinstance(expected_per_invoice, Mapping):
         return GradeResult(False, error="expected per_invoice is not an object")
@@ -101,9 +106,9 @@ def fx_total(answer: str | Mapping[str, Any], expected: Mapping[str, Any]) -> Gr
     total_passed = abs(answer_total - expected_total) <= total_tolerance
     sub_results: dict[str, bool] = {}
     for invoice_id, expected_value in expected_per_invoice.items():
-        expected_number = _number(expected_value)
         candidate_value = answer_per_invoice.get(invoice_id)
         try:
+            expected_number = _number(expected_value)
             candidate_number = _number(candidate_value)
         except (TypeError, ValueError):
             sub_results[str(invoice_id)] = False
