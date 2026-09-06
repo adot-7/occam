@@ -93,14 +93,27 @@ def architecture_payload() -> dict[str, Any]:
 
 
 class StubArchitectLLM:
-    def __init__(self, payload: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        payload: dict[str, Any] | None = None,
+        response_text: str | None = None,
+    ) -> None:
         self.payload = payload or architecture_payload()
+        self.response_text = response_text
         self.calls: list[dict[str, Any]] = []
         self.configs = {"architect": object(), "worker_fast": object()}
 
     def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
         self.calls.append({"model_key": model_key, "messages": messages, **kwargs})
-        return SimpleNamespace(text=json.dumps(self.payload), tool_calls=[])
+        text = self.response_text
+        if text is None:
+            text = json.dumps(self.payload)
+        return SimpleNamespace(text=text, tool_calls=[])
+
+
+class FailingArchitectLLM(StubArchitectLLM):
+    def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("sensitive provider payload")
 
 
 def make_lesson_store(path: Path) -> LessonStore:
@@ -192,6 +205,68 @@ def test_architect_emits_schema_compatible_event(tmp_path: Path) -> None:
     validate_event(proposal.model_dump(mode="json"))
     assert proposal.data["generation"] == 0
     assert proposal.data["architecture"]["id"] == "g000"
+
+
+@pytest.mark.parametrize(
+    "response_text",
+    [
+        lambda payload: f"Here is the architecture:\n{json.dumps(payload)}\n",
+        lambda payload: f"```json\n{json.dumps(payload)}\n```\n",
+    ],
+)
+def test_architect_accepts_one_json_object_with_minimal_wrapping(
+    tmp_path: Path,
+    response_text: Any,
+) -> None:
+    payload = architecture_payload()
+    llm = StubArchitectLLM(response_text=response_text(payload))
+
+    architecture = Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    assert architecture.id == "g000"
+    assert architecture.final_role == "r_calc"
+
+
+@pytest.mark.parametrize(
+    "response_text",
+    [
+        "No architecture was produced.",
+        '{"roles":',
+        lambda payload: f"{json.dumps(payload)}\n{json.dumps(payload)}",
+        lambda payload: f"```json\n{json.dumps(payload)}\n```\n```json\n{json.dumps(payload)}\n```",
+        lambda payload: f"```json\n[{json.dumps(payload)}]\n```",
+    ],
+)
+def test_architect_rejects_missing_malformed_or_ambiguous_json(
+    tmp_path: Path,
+    response_text: Any,
+) -> None:
+    payload = architecture_payload()
+    text = response_text(payload) if callable(response_text) else response_text
+
+    with pytest.raises(ArchitectError, match="output-shape failure"):
+        Architect(
+            llm=StubArchitectLLM(response_text=text),
+            memory=tmp_path / "memory",
+        ).propose(TASK)
+
+
+def test_architect_keeps_strict_validation_after_wrapping_is_removed(tmp_path: Path) -> None:
+    payload = {**architecture_payload(), "unexpected": True}
+    text = f"Here is the architecture:\n```json\n{json.dumps(payload)}\n```"
+
+    with pytest.raises(ArchitectError, match="proposal validation failure.*strict validation"):
+        Architect(
+            llm=StubArchitectLLM(response_text=text),
+            memory=tmp_path / "memory",
+        ).propose(TASK)
+
+
+def test_architect_provider_failure_is_distinct_and_redacted(tmp_path: Path) -> None:
+    with pytest.raises(ArchitectError, match="provider failure: RuntimeError") as error:
+        Architect(llm=FailingArchitectLLM(), memory=tmp_path / "memory").propose(TASK)
+
+    assert "sensitive provider payload" not in str(error.value)
 
 
 def test_architect_overwrites_model_guessed_id_instead_of_raising(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ WP-10.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +32,9 @@ DOMAIN_RULE_HEADING = "Known conventions and facts about this task (learned in e
 ARCHITECT_MODEL_KEY = "architect"
 MIN_ROLES = 3
 MAX_ROLES = 6
+
+_JSON_FENCE = re.compile(r"```(?P<language>[^\r\n`]*)\r?\n(?P<body>.*?)```", re.DOTALL)
+_WRAPPER_MARKERS = frozenset("{}[]`")
 
 
 class ArchitectError(RuntimeError):
@@ -165,6 +169,80 @@ def _jsonable(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return _jsonable(value.model_dump(mode="json"))
     return value
+
+
+def _output_shape_error(message: str) -> ArchitectError:
+    """Return a safe, consistently classified model-output error."""
+
+    return ArchitectError(f"architect output-shape failure: {message}")
+
+
+def _reject_json_constant(value: str) -> Any:
+    """Reject Python's non-standard NaN/Infinity JSON extensions."""
+
+    raise ValueError(f"non-standard JSON constant {value}")
+
+
+def _strict_json_object(text: str) -> dict[str, Any]:
+    """Extract exactly one JSON object from a tightly wrapped completion.
+
+    The model is allowed a Markdown JSON fence or short prose before/after one
+    object because some providers add a human-readable preamble despite the
+    response schema.  The wrapper itself may not contain JSON delimiters,
+    fences, or another JSON value; this keeps extraction deterministic and
+    prevents a valid nested/second object from being silently selected.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        raise _output_shape_error("expected exactly one JSON object; output was empty")
+
+    fences = list(_JSON_FENCE.finditer(stripped))
+    if "```" in stripped:
+        if len(fences) != 1:
+            raise _output_shape_error("expected exactly one complete JSON fence")
+        fence = fences[0]
+        language = fence.group("language").strip().lower()
+        if language not in {"", "json"}:
+            raise _output_shape_error("Markdown fence must contain JSON")
+        outside = stripped[: fence.start()] + stripped[fence.end() :]
+        if any(marker in outside for marker in _WRAPPER_MARKERS):
+            raise _output_shape_error("found multiple or ambiguous JSON objects")
+        candidate = fence.group("body").strip()
+        try:
+            payload = json.loads(candidate, parse_constant=_reject_json_constant)
+        except (TypeError, ValueError) as exc:
+            raise _output_shape_error("fenced content was not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise _output_shape_error("expected one JSON object, not another JSON value")
+        return payload
+
+    start = stripped.find("{")
+    if start < 0:
+        raise _output_shape_error("expected exactly one JSON object; none was found")
+    decoder = json.JSONDecoder(parse_constant=_reject_json_constant)
+    try:
+        payload, end = decoder.raw_decode(stripped, start)
+    except json.JSONDecodeError as exc:
+        raise _output_shape_error("the JSON object was malformed") from exc
+    if not isinstance(payload, dict):
+        raise _output_shape_error("expected one JSON object")
+
+    outside = stripped[:start] + stripped[end:]
+    if any(marker in outside for marker in _WRAPPER_MARKERS):
+        raise _output_shape_error("found multiple or ambiguous JSON objects")
+    # A second scalar JSON value is not prose around the object.  Prose such
+    # as "Here is the architecture" is intentionally not valid JSON and is
+    # therefore unaffected by this check.
+    for wrapper in (stripped[:start].strip(), stripped[end:].strip()):
+        if not wrapper:
+            continue
+        try:
+            json.loads(wrapper, parse_constant=_reject_json_constant)
+        except (TypeError, ValueError):
+            continue
+        raise _output_shape_error("found more than one JSON value")
+    return payload
 
 
 class ArchitectContext:
@@ -410,11 +488,9 @@ class Architect:
             try:
                 return self.llm.complete(self.model_key, messages, None, response_schema)
             except TypeError:
-                raise ArchitectError(f"architect completion failed: {exc}") from exc
+                raise ArchitectError(f"architect provider failure: {type(exc).__name__}") from exc
         except Exception as exc:  # noqa: BLE001 - normalize provider failures at this boundary
-            raise ArchitectError(
-                f"architect completion failed: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise ArchitectError(f"architect provider failure: {type(exc).__name__}") from exc
 
     @staticmethod
     def _completion_text(completion: Any) -> str:
@@ -422,10 +498,10 @@ class Architect:
             return completion
         if isinstance(completion, Mapping):
             if completion.get("tool_calls"):
-                raise ArchitectError("architect output must be JSON text, not native tool calls")
+                raise _output_shape_error("native tool calls are not JSON text")
             return str(completion.get("text") or completion.get("content") or "")
         if getattr(completion, "tool_calls", None):
-            raise ArchitectError("architect output must be JSON text, not native tool calls")
+            raise _output_shape_error("native tool calls are not JSON text")
         return str(getattr(completion, "text", "") or "")
 
     def _parse_architecture(
@@ -437,13 +513,8 @@ class Architect:
     ) -> Architecture:
         text = self._completion_text(completion).strip()
         if not text:
-            raise ArchitectError("architect returned empty output")
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ArchitectError("architect output must be one JSON object with no prose") from exc
-        if not isinstance(payload, Mapping):
-            raise ArchitectError("architect output must be a JSON object")
+            raise _output_shape_error("expected exactly one JSON object; output was empty")
+        payload = _strict_json_object(text)
         # `id`/`parent_id` are engine-assigned generation bookkeeping, not
         # something the model can be expected to guess correctly - overwrite
         # whatever (if anything) it returned rather than aborting the run
@@ -452,7 +523,16 @@ class Architect:
         try:
             architecture = Architecture.model_validate(payload)
         except ValidationError as exc:
-            raise ArchitectError(f"architect output failed strict validation: {exc}") from exc
+            locations = []
+            for error in exc.errors(include_url=False):
+                location = ".".join(str(part) for part in error.get("loc", ())) or "root"
+                locations.append(f"{location}:{error.get('type', 'validation_error')}")
+            summary = ", ".join(locations[:5])
+            if len(locations) > 5:
+                summary += f", +{len(locations) - 5} more"
+            raise ArchitectError(
+                f"architect proposal validation failure: strict validation ({summary})"
+            ) from exc
         return architecture
 
     def _validate_proposal(
