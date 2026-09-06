@@ -1,0 +1,1 @@
+{"request_path":"/v1/2026-01-31?base=EUR&symbols=INR","response":{"amount":1.0,"base":"EUR","date":"2026-01-30","rates":{"INR":109.5825}},"status":200}

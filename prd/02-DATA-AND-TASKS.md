@@ -65,7 +65,7 @@ python_exec(code: str) -> str
 ```
 - **Base tool descriptions are deliberately plain** ("Get the exchange rate for a date"). They say nothing about weekends/holidays or about the range endpoint. Lessons L1/L2, once learned, are appended to these descriptions in later runs — the agent rewrites its own tool docs.
 - **Disk cache** keyed on the full request path, under `data/fx_cache/` and **committed to the repo**. Historical ECB rates never change, so the cache is permanent. First run hits the network (visible in Neatlogs); ablations, replays and the demo are offline.
-- Records per call: latency, bytes, status, `cached`. Feeds `n_tool_calls` and `wasted_calls`.
+- Records per call: latency, bytes, status, `cached`. Feeds `n_tool_calls`.
 - Verified 2026-09-06: `/2026-04-04?base=EUR&symbols=USD` → `{"date":"2026-04-02", ...}` (Sat → Thu, Good Friday skipped). `/2026-03-14?base=USD&symbols=INR` → `{"date":"2026-03-13","rates":{"INR":92.38}}`. `/2026-03-02..2026-03-06?base=EUR&symbols=USD` → 5 daily rates.
 - **Param names are `base` and `symbols`. The legacy `from`/`to` names are silently ignored on v1** (live-tested: you get EUR→everything instead of an error). The tool wrapper must use `base`/`symbols`; a test asserts the returned `base` equals the requested one.
 - No published rate limit. Be polite (≤5 concurrent); the cache makes this moot after g0.
@@ -87,7 +87,7 @@ python scripts/gen_fx_cases.py --seed 11 --n 20 --out tasks/fx_recon_b     # hel
     Month-end FX revaluation: for a ledger of foreign-currency receivables, compute the total FX
     gain/(loss) in INR as of the valuation date and the gain/(loss) per invoice. Use the exchange
     rate tools for rates. Follow the company's ledger conventions as stated in each case.
-  answer_format: 'Final line: a JSON object {"total_inr": <number>, "per_invoice": {"<id>": <number>, ...}}'
+  answer_format: 'End your reply with a fenced json code block containing {"total_inr": <number>, "per_invoice": {"<id>": <number>, ...}}'
   tools: [fx_rate, fx_series, python_exec]
   checker: fx_total
   examples: 3
