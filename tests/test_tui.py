@@ -14,11 +14,11 @@ import pytest
 from typer.testing import CliRunner
 
 from occam.cli import app as cli_app
-from occam.core.models import Event
+from occam.core.models import Event, GenerationState, State
 from occam.store.reader import EventReader
 from occam.store.reducer import Reduction, reduce, state_json_bytes
 from occam.tui.app import OccamApp
-from occam.tui.panels import DiagnosisFeed, HeaderBar
+from occam.tui.panels import AblationPanel, DiagnosisFeed, HeaderBar
 from occam.tui.source import (
     LiveSource,
     ReplayOptions,
@@ -228,6 +228,30 @@ def test_at_is_scoped_to_to_gen() -> None:
     assert events[index].type == "ablation.completed"
     assert events[index].data["generation"] == 2
     assert index > fast_forward_index(events, at="ablation.completed")
+
+
+def test_ablation_noise_floor_renders_before_rows_arrive() -> None:
+    state = State(
+        run_id="run",
+        current_generation=0,
+        generations={
+            "g000": GenerationState(
+                generation=0,
+                ablation={
+                    "generation": 0,
+                    "roles": ["r_rates"],
+                    "rows": [],
+                    "noise_rate": 0.1,
+                },
+            )
+        },
+    )
+    view = RunView(state)
+
+    assert view.selected is not None
+    assert view.selected.noise_rate == pytest.approx(0.1)
+    assert "ablated 0/1 roles" in AblationPanel().render_view(view).plain
+    assert "noise floor 0.10" in AblationPanel().render_view(view).plain
 
 
 def test_at_and_to_gen_reject_targets_that_are_not_in_the_log() -> None:

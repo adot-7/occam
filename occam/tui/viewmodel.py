@@ -134,6 +134,17 @@ class GenerationView:
         return list(self.ablation.get("witnesses", []))
 
     @property
+    def noise_rate(self) -> float | None:
+        """Noise floor carried by ``ablation.started``, when the contract has it."""
+
+        if not self.ablation or "noise_rate" not in self.ablation:
+            return None
+        try:
+            return float(self.ablation["noise_rate"])
+        except (TypeError, ValueError):
+            return None
+
+    @property
     def structural_fidelity(self) -> float | None:
         if self.ablation is not None and "structural_fidelity" in self.ablation:
             return float(self.ablation["structural_fidelity"])

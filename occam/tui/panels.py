@@ -185,6 +185,10 @@ class AblationPanel(Panel):
         roles = generation.ablation_roles or [row["role_id"] for row in rows]
         text = Text()
         text.append(f"ablated {len(rows)}/{len(roles)} roles", style=FG)
+        noise_rate = generation.noise_rate
+        if noise_rate is not None:
+            text.append("  ·  noise floor ", style=DIM)
+            text.append(_ratio(noise_rate), style=FG)
         fidelity = generation.structural_fidelity
         if fidelity is not None:
             text.append("  ·  SF ", style=DIM)
