@@ -461,6 +461,8 @@ def ablate(
     resamples: int = DEFAULT_RESAMPLES,
     seed: int = DEFAULT_SEED,
     sink: EventSink | None = None,
+    full_repeat: RunResult | None = None,
+    measured_noise_rate: float | None = None,
 ) -> AblationTable:
     """Measure the noise floor, knock out each role, emit the table.
 
@@ -484,14 +486,17 @@ def ablate(
     # Noise floor first (`03 §4.1`): every divergence below is judged against it.
     if full is None:
         full = runner.run_variant(architecture, cases, variant=FULL, generation=generation)
-    repeat = runner.run_variant(
-        architecture,
-        cases,
-        variant=FULL_REPEAT,
-        use_cache=False,
-        generation=generation,
-    )
-    measured_noise_rate = noise_rate(full, repeat, case_ids)
+    if measured_noise_rate is None:
+        repeat = full_repeat or runner.run_variant(
+            architecture,
+            cases,
+            variant=FULL_REPEAT,
+            use_cache=False,
+            generation=generation,
+        )
+        measured_noise_rate = noise_rate(full, repeat, case_ids)
+    elif not 0.0 <= measured_noise_rate <= 1.0:
+        raise ValueError("measured_noise_rate must be within [0, 1]")
 
     emit(
         "ablation.started",

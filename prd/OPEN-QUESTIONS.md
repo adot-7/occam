@@ -59,6 +59,20 @@ Two PRD notes, neither blocking:
   `fx_recon_a · Month-end FX revaluation`. If the exact wording matters, `run.started`'s `task`
   needs a `label` field (a schema change, so not taken here).
 
+## 2026-09-06 — WP-10 live acceptance blockers
+
+- **Architect credential is absent in the acceptance environment.** The configured
+  `architect` lane is Anthropic `claude-sonnet-5`, but the available `.env` has no
+  `ANTHROPIC_API_KEY`. The exact 8-case checkpoint therefore stops after
+  `run.started` with a redacted `MissingCredentialsError`; do not silently route
+  architecture or diagnosis through a worker model. Supply the configured
+  credential before claiming a live checkpoint.
+- **OpenAI worker request shape is not current-model compatible.** The configured
+  `worker_alt` probe reaches OpenAI but returns a redacted HTTP 400 with
+  `unsupported_parameter: max_tokens` for `gpt-5-nano`. The WP-10 checkpoint uses
+  `worker_fast`; resolve the provider parameter contract before relying on the
+  alternate worker lane.
+
 ## Resolved
 - **2026-09-06 — WP-03 answer format: the canonical answer is the LAST FENCED JSON BLOCK.** `02` contradicted itself — §1.2 extracted the answer from the last fenced JSON block while the `task.yaml` template in §3 instructed `answer_format: 'Final line: a JSON object {...}'`, so an agent obeying the pack's own instruction was ungradeable. **§1.2 wins and §3 was changed**, because §1.2 is the grading contract and `AGENTS.md` treats `02` as authoritative for the task; because a fenced block survives trailing prose whereas "final line" breaks the moment a model adds a closing sentence, and GLM-4.7-Flash emits reasoning and prose freely; and because the grader already implemented fence extraction. Both packs' `task.yaml` were regenerated to match. `fx_total` keeps a bare-JSON-line fallback when no fence is present — defensive salvage so a dropped fence cannot crash or fail a run, explicitly **not** part of the contract.
 - **2026-09-06 — `wasted_calls` is dropped, not defined.** `02 §2` named it but nothing ever specified the aggregation. Ruling: remove the phrase; `02 §2` now reads "Feeds `n_tool_calls`." Reasoning: the disk cache is committed and permanent, so a repeat call costs approximately nothing and "wasted" is close to meaningless as a cost signal; and the metric appears in no success criterion (`00 §6`), no field in `events.schema.json`, and no TUI panel. `tool_calls_per_case` is already in `metrics.snapshot` and carries the whole cost/speed story, including the L2 range-endpoint halving. Defining a new metric under this deadline is scope we do not need. WP-04 keeps its raw per-call fields unchanged (`name`, `arguments`, `status`, `latency_s`, `bytes`, `cached`, `http_status`, `error`), so the metric can be reconstructed later if it ever earns its place.

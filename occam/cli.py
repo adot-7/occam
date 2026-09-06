@@ -76,6 +76,102 @@ def lessons_reset(
     typer.echo(f"reset {memory}: removed {removed} lesson(s)")
 
 
+@app.command("run")
+def run_command(
+    task: Annotated[str, typer.Option("--task", help="Task-pack directory or committed pack name")],
+    run_name: Annotated[str, typer.Option("--run-name", help="Stable run id and artifact name")],
+    memory: Annotated[
+        Path | None,
+        typer.Option("--memory", help="Lesson namespace; defaults to the task manifest value"),
+    ] = None,
+    max_gens: Annotated[
+        int, typer.Option("--max-gens", min=1, help="Maximum architecture generations")
+    ] = 6,
+    cases: Annotated[
+        int | None, typer.Option("--cases", min=1, help="Number of cases from the pack")
+    ] = None,
+    ablate_cases: Annotated[
+        int, typer.Option("--ablate-cases", min=1, help="Paired cases per role knockout")
+    ] = 10,
+    pass3: Annotated[
+        bool, typer.Option("--pass3", help="Run three independent final-generation passes")
+    ] = False,
+    out: Annotated[Path, typer.Option("--out", help="Parent directory for run artifacts")] = Path(
+        "runs"
+    ),
+    launch_tui: Annotated[
+        bool, typer.Option("--tui", help="Attach the read-only TUI after the run")
+    ] = False,
+) -> None:
+    """Architect, execute, ablate, diagnose, mutate, and record one run."""
+
+    from occam.engine.loop import RunConfig, run_task
+
+    try:
+        outcome = run_task(
+            task,
+            RunConfig(
+                run_name=run_name,
+                out=out,
+                memory=memory,
+                max_generations=max_gens,
+                n_cases=cases,
+                ablate_cases=ablate_cases,
+                pass3=pass3,
+            ),
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    summary = outcome.summary
+    typer.echo(f"run_id: {outcome.run_id}")
+    typer.echo(f"run_dir: {outcome.run_dir}")
+    typer.echo(
+        f"completed: best=g{outcome.best_generation} generations={summary['generations']} "
+        f"pass={summary['final_pass_rate']:.3f} cost=${summary['final_cost_usd']:.6f} "
+        f"calls/case={summary['calls_per_case_final']:.2f}"
+    )
+    provider_calls = summary.get("provider_calls")
+    typer.echo(
+        f"provider_calls: {provider_calls if provider_calls is not None else 'unavailable'}; "
+        f"displayed_cost_usd=${summary['displayed_cost_usd']:.6f}; "
+        f"billed_cost_usd=${summary['billed_cost_usd']:.6f}"
+    )
+    if launch_tui:
+        from occam.tui.app import OccamApp
+
+        _launch(OccamApp(outcome.run_dir))
+
+
+def _resolve_run_argument(value: str) -> Path:
+    candidate = Path(value)
+    if candidate.is_dir():
+        return candidate
+    named = Path("runs") / value
+    if named.is_dir():
+        return named
+    raise ValueError(f"run directory not found: {value}")
+
+
+@app.command("compare")
+def compare_command(
+    run_dir_1: Annotated[str, typer.Argument(help="First run directory or run name")],
+    run_dir_2: Annotated[str, typer.Argument(help="Second run directory or run name")],
+) -> None:
+    """Compare two completed runs and write compare.json into the second."""
+
+    from occam.engine.compare import compare_runs, format_compare
+
+    try:
+        first = _resolve_run_argument(run_dir_1)
+        second = _resolve_run_argument(run_dir_2)
+        payload = compare_runs(first, second)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(format_compare(payload))
+    typer.echo(f"compare_json: {second / 'compare.json'}")
+
+
 @app.command("validate")
 def validate_run(
     run_dir: Annotated[Path, typer.Argument(help="Run directory containing events.jsonl")],
