@@ -53,6 +53,12 @@ All notable changes to Occam are documented here.
   generator expressions. The plain tool description and callable docstring now
   identify the restricted calculation subset and its actionable unsupported-
   construct errors.
+- Closed the remaining calculation-surface resource gaps: child and parent
+  output clipping now includes truncation markers within the requested bound;
+  repr/ascii/JSON preflight cumulative display size and print streams through a
+  bounded sink; and power, shifts, and integer results enforce a pre-operation
+  bit-length limit. This remains capability containment, not a perfect hostile
+  Python sandbox or OS isolation boundary.
 - `EventWriter` now locks with `msvcrt` on Windows and `fcntl` elsewhere. The
   store imported `fcntl` at module level, so `occam.store` was unimportable on
   Windows and three test modules failed at collection. Covered by a fresh-

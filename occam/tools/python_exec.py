@@ -31,6 +31,7 @@ from dataclasses import dataclass
 DEFAULT_TIMEOUT_S = 10.0
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
 MAX_OUTPUT_CHARS_LIMIT = 1_000_000
+MAX_INTEGER_BITS = 100_000
 
 #: The only variables the child inherits: what a Python interpreter needs to
 #: start, and nothing else.  ``-I`` ignores ``PYTHON*`` variables but does not
@@ -70,6 +71,7 @@ import sys
 ALLOWED = frozenset(__ALLOWED__)
 NETWORK_BLOCKED_MESSAGE = __NETWORK_MESSAGE__
 MAX_OUTPUT_CHARS = __MAX_OUTPUT__
+MAX_INTEGER_BITS = __MAX_INTEGER_BITS__
 MAX_SOURCE_CHARS = 1_000_000
 
 sys.stdin.reconfigure(encoding="utf-8")
@@ -99,10 +101,11 @@ class _BoundedTextIO:
             self._written += len(value)
             return len(value)
         marker = "\\n... [truncated at %d characters]" % self._limit
-        keep = max(0, remaining - len(marker))
-        if keep:
-            self._stream.write(value[:keep])
-        self._stream.write(marker)
+        if len(marker) >= remaining:
+            clipped = value[:remaining]
+        else:
+            clipped = value[: remaining - len(marker)] + marker
+        self._stream.write(clipped)
         self._stream.flush()
         self._written = self._limit
         self._truncated = True
@@ -338,7 +341,11 @@ def _validate_value(value, depth=0):
         raise _EvalError("python_exec: value nesting limit exceeded")
     if _is_wrapper(value) or isinstance(value, _SafeException):
         return
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or isinstance(value, (bool, float)):
+        return
+    if isinstance(value, int):
+        if value.bit_length() > _Evaluator.MAX_INTEGER_BITS:
+            raise _EvalError("python_exec: integer magnitude limit exceeded")
         return
     if isinstance(value, (str, bytes)):
         if len(value) > _Evaluator.MAX_STRING_CHARS:
@@ -368,6 +375,7 @@ class _Evaluator:
     MAX_STEPS = 10_000_000
     MAX_ITEMS = 100_000
     MAX_STRING_CHARS = 1_000_000
+    MAX_INTEGER_BITS = MAX_INTEGER_BITS
 
     def __init__(self, tree):
         self.tree = tree
@@ -547,15 +555,76 @@ class _Evaluator:
                 raise _EvalError("python_exec: string constructor size limit exceeded")
         if isinstance(value, (list, tuple, dict, set, frozenset)):
             return self._display(value)
-        return str(value)
+        if isinstance(value, bytes) and self._display_size(value) > self.MAX_STRING_CHARS:
+            raise _EvalError("python_exec: string conversion size limit exceeded")
+        result = str(value)
+        if len(result) > self.MAX_STRING_CHARS:
+            raise _EvalError("python_exec: string conversion size limit exceeded")
+        return result
 
     def _safe_repr(self, value):
         if _is_wrapper(value):
             return self._display(value)
-        return self._repr_value(value)
+        _validate_value(value)
+        if isinstance(value, (list, tuple, dict, set, frozenset)):
+            return self._display(value)
+        if isinstance(value, str):
+            if self._ascii_string_size(value) > self.MAX_STRING_CHARS:
+                raise _EvalError("python_exec: string conversion size limit exceeded")
+            result = repr(value)
+            if len(result) > self.MAX_STRING_CHARS:
+                raise _EvalError("python_exec: string conversion size limit exceeded")
+            return result
+        if isinstance(value, bytes) and self._display_size(value) > self.MAX_STRING_CHARS:
+            raise _EvalError("python_exec: string conversion size limit exceeded")
+        result = repr(value)
+        if len(result) > self.MAX_STRING_CHARS:
+            raise _EvalError("python_exec: string conversion size limit exceeded")
+        return result
+
+    def _ascii_string_size(self, value):
+        total = 2
+        for character in value:
+            code = ord(character)
+            if code < 128:
+                if character == chr(92) or character == "'" or character == '"':
+                    total += 2
+                elif code < 32 or code == 127:
+                    total += 4
+                else:
+                    total += 1
+            elif code <= 255:
+                total += 4
+            elif code <= 0xFFFF:
+                total += 6
+            else:
+                total += 10
+            if total > self.MAX_STRING_CHARS:
+                return total
+        return total
 
     def _safe_ascii(self, value):
-        return ascii(self._plain(value))
+        value = self._plain(value)
+        if isinstance(value, str):
+            if self._ascii_string_size(value) > self.MAX_STRING_CHARS:
+                raise _EvalError("python_exec: string conversion size limit exceeded")
+            return ascii(value)
+        if isinstance(value, (list, tuple, dict, set, frozenset)):
+            # _display_size recursively preflights the representation.  Its
+            # nested string estimate is deliberately conservative enough for
+            # ascii/repr escaping, so no aggregate is built before the check.
+            if self._display_size(value) > self.MAX_STRING_CHARS:
+                raise _EvalError("python_exec: string conversion size limit exceeded")
+            result = self._ascii_render(value)
+            if len(result) > self.MAX_STRING_CHARS:
+                raise _EvalError("python_exec: string conversion size limit exceeded")
+            return result
+        if isinstance(value, bytes) and self._display_size(value) > self.MAX_STRING_CHARS:
+            raise _EvalError("python_exec: string conversion size limit exceeded")
+        result = ascii(value)
+        if len(result) > self.MAX_STRING_CHARS:
+            raise _EvalError("python_exec: string conversion size limit exceeded")
+        return result
 
     def _safe_bytes(self, value=b"", encoding=None, errors="strict"):
         value = self._plain(value)
@@ -572,14 +641,71 @@ class _Evaluator:
     def _safe_int(self, value=0, base=10):
         value = self._plain(value)
         if isinstance(value, str):
-            return int(value, self._plain(base))
-        return int(value)
+            base = self._plain(base)
+            digits = value.lstrip("+-").replace("_", "")
+            if len(digits) * 6 > self.MAX_INTEGER_BITS:
+                raise _EvalError("python_exec: integer magnitude limit exceeded")
+            return int(value, base)
+        if isinstance(value, _decimal.Decimal) and value.is_finite():
+            if value.adjusted() * 3 > self.MAX_INTEGER_BITS:
+                raise _EvalError("python_exec: integer magnitude limit exceeded")
+        result = int(value)
+        _validate_value(result)
+        return result
+
+    def _check_pow(self, left, right):
+        if not isinstance(right, int) or isinstance(right, bool):
+            raise _EvalError("python_exec: power exponent must be a bounded integer")
+        if abs(right) > self.MAX_INTEGER_BITS:
+            raise _EvalError("python_exec: integer magnitude limit exceeded")
+        if right < 0 or not isinstance(left, int) or isinstance(left, bool):
+            return
+        magnitude = abs(left)
+        if magnitude <= 1:
+            return
+        if magnitude == 2:
+            projected_bits = right + 1
+        else:
+            projected_bits = left.bit_length() * right
+        if projected_bits > self.MAX_INTEGER_BITS:
+            raise _EvalError("python_exec: integer magnitude limit exceeded")
+
+    def _check_integer_binary(self, operator, left, right):
+        if isinstance(operator, ast.Pow):
+            self._check_pow(left, right)
+            return
+        integer_operands = (
+            isinstance(left, int)
+            and not isinstance(left, bool)
+            and isinstance(right, int)
+            and not isinstance(right, bool)
+        )
+        if isinstance(operator, (ast.LShift, ast.RShift)):
+            if isinstance(right, int) and not isinstance(right, bool):
+                if abs(right) > self.MAX_INTEGER_BITS:
+                    raise _EvalError("python_exec: integer magnitude limit exceeded")
+            if not integer_operands or right < 0:
+                return
+            if isinstance(operator, ast.LShift):
+                projected_bits = left.bit_length() + right
+                if projected_bits > self.MAX_INTEGER_BITS:
+                    raise _EvalError("python_exec: integer magnitude limit exceeded")
+            return
+        if not integer_operands:
+            return
+        if isinstance(operator, (ast.Add, ast.Sub)):
+            projected_bits = max(left.bit_length(), right.bit_length()) + 1
+        elif isinstance(operator, ast.Mult):
+            projected_bits = left.bit_length() + right.bit_length()
+        else:
+            return
+        if projected_bits > self.MAX_INTEGER_BITS:
+            raise _EvalError("python_exec: integer magnitude limit exceeded")
 
     def _safe_pow(self, left, right, modulo=None):
         left = self._plain(left)
         right = self._plain(right)
-        if isinstance(right, int) and abs(right) > 10_000:
-            raise _EvalError("python_exec: exponent limit exceeded")
+        self._check_pow(left, right)
         if modulo is None:
             return pow(left, right)
         return pow(left, right, self._plain(modulo))
@@ -731,7 +857,11 @@ class _Evaluator:
         end = self._plain(end)
         if not isinstance(sep, str) or not isinstance(end, str):
             raise _EvalError("python_exec: print separators must be strings")
-        sys.stdout.write(sep.join(self._display(value) for value in values) + end)
+        for index, value in enumerate(values):
+            if index:
+                sys.stdout.write(sep)
+            sys.stdout.write(self._display(value))
+        sys.stdout.write(end)
         sys.stdout.flush()
 
     def _display_size(self, value, nested=False, depth=0):
@@ -746,7 +876,7 @@ class _Evaluator:
         if isinstance(value, _SafeException):
             return len(value.name) + len(value.message) + 2
         if isinstance(value, str):
-            return len(value) if not nested else len(value) * 6 + 2
+            return len(value) if not nested else len(value) * 12 + 2
         if isinstance(value, bytes):
             return len(value) * 4 + 4
         if isinstance(value, int) and not isinstance(value, bool):
@@ -769,10 +899,10 @@ class _Evaluator:
                 if total > self.MAX_STRING_CHARS:
                     return total
             return total
-        return len(str(value))
+        return len(str(value)) + 16
 
-    def _display(self, value, _checked=False):
-        if not _checked and self._display_size(value) > self.MAX_STRING_CHARS:
+    def _display(self, value):
+        if self._display_size(value) > self.MAX_STRING_CHARS:
             raise _EvalError("python_exec: string conversion size limit exceeded")
         if isinstance(value, _Capability):
             return "<capability %s>" % value.label
@@ -788,23 +918,36 @@ class _Evaluator:
             left, right = ("[", "]") if isinstance(value, list) else ("(", ")")
             if isinstance(value, (set, frozenset)):
                 left, right = ("{", "}")
-            return left + ", ".join(self._repr_value(item) for item in value) + right
+            return left + ", ".join(self._render_value(item) for item in value) + right
         if isinstance(value, dict):
             return "{" + ", ".join(
-                "%s: %s" % (self._repr_value(key), self._repr_value(item))
+                "%s: %s" % (self._render_value(key), self._render_value(item))
                 for key, item in value.items()
             ) + "}"
         return str(value)
 
-    def _repr_value(self, value):
-        if _is_wrapper(value):
-            return self._display(value, _checked=True)
-        if isinstance(value, _SafeException):
-            return self._display(value, _checked=True)
-        if isinstance(value, dict):
-            return self._display(value, _checked=True)
+    def _ascii_render(self, value):
         if isinstance(value, (list, tuple, set, frozenset)):
-            return self._display(value, _checked=True)
+            left, right = ("[", "]") if isinstance(value, list) else ("(", ")")
+            if isinstance(value, (set, frozenset)):
+                left, right = ("{", "}")
+            return left + ", ".join(self._ascii_render(item) for item in value) + right
+        if isinstance(value, dict):
+            return "{" + ", ".join(
+                "%s: %s" % (self._ascii_render(key), self._ascii_render(item))
+                for key, item in value.items()
+            ) + "}"
+        return ascii(value)
+
+    def _render_value(self, value):
+        if _is_wrapper(value):
+            return self._display(value)
+        if isinstance(value, _SafeException):
+            return self._display(value)
+        if isinstance(value, dict):
+            return self._display(value)
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return self._display(value)
         return repr(value)
 
     def _json_plain(self, value, depth=0):
@@ -825,6 +968,64 @@ class _Evaluator:
             }
         raise _EvalError("python_exec: JSON value is not available")
 
+    def _json_string_size(self, value, ensure_ascii):
+        total = 2
+        for character in value:
+            code = ord(character)
+            if character == chr(92) or character == '"':
+                total += 2
+            elif code < 32:
+                total += 2 if character in "\\b\\t\\n\\f\\r" else 6
+            elif ensure_ascii and code > 127:
+                total += 6 if code <= 0xFFFF else 12
+            else:
+                total += 1
+            if total > self.MAX_STRING_CHARS:
+                return total
+        return total
+
+    def _json_size(self, value, depth=0, ensure_ascii=True):
+        if depth > 64:
+            raise _EvalError("python_exec: JSON nesting limit exceeded")
+        if _is_wrapper(value) or isinstance(value, _SafeException):
+            raise _EvalError("python_exec: JSON cannot contain capabilities")
+        if value is None:
+            return 4
+        if isinstance(value, bool):
+            return 5
+        if isinstance(value, int):
+            if value.bit_length() > self.MAX_INTEGER_BITS:
+                raise _EvalError("python_exec: integer magnitude limit exceeded")
+            return value.bit_length() * 4 + 2
+        if isinstance(value, float):
+            return 32
+        if isinstance(value, str):
+            return self._json_string_size(value, ensure_ascii)
+        if isinstance(value, bytes):
+            return len(value) * 4 + 2
+        if isinstance(value, (_decimal.Decimal, _datetime.date, _datetime.datetime)):
+            return len(str(value)) * 12 + 2
+        if isinstance(value, (list, tuple)):
+            if len(value) > self.MAX_ITEMS:
+                raise _EvalError("python_exec: collection item limit exceeded")
+            total = 2
+            for item in value:
+                total += self._json_size(item, depth + 1, ensure_ascii) + 1
+                if total > self.MAX_STRING_CHARS:
+                    return total
+            return total
+        if isinstance(value, dict):
+            if len(value) > self.MAX_ITEMS:
+                raise _EvalError("python_exec: collection item limit exceeded")
+            total = 2
+            for key, item in value.items():
+                total += self._json_size(key, depth + 1, ensure_ascii)
+                total += self._json_size(item, depth + 1, ensure_ascii) + 2
+                if total > self.MAX_STRING_CHARS:
+                    return total
+            return total
+        raise _EvalError("python_exec: JSON value is not available")
+
     def _json_dumps(self, value, **kwargs):
         allowed = {
             "allow_nan",
@@ -840,10 +1041,38 @@ class _Evaluator:
             raise _EvalError("python_exec: unsupported json.dumps option")
         default = kwargs.get("default")
         if isinstance(default, (_Capability, _UserFunction)):
-            kwargs["default"] = lambda item: self._invoke(default, (item,), {})
+            ensure_ascii = bool(kwargs.get("ensure_ascii", True))
+
+            def bounded_default(item):
+                result = self._invoke(default, (item,), {})
+                if self._json_size(result, ensure_ascii=ensure_ascii) > self.MAX_STRING_CHARS:
+                    raise _EvalError("python_exec: JSON output size limit exceeded")
+                return result
+
+            kwargs["default"] = bounded_default
         elif default is not None:
             raise _EvalError("python_exec: json default must be an allowed function")
-        return _json.dumps(self._json_plain(value), **kwargs)
+        ensure_ascii = bool(kwargs.get("ensure_ascii", True))
+        indent = kwargs.get("indent")
+        if isinstance(indent, str):
+            indent_size = len(indent)
+        elif isinstance(indent, int) and not isinstance(indent, bool):
+            indent_size = abs(indent)
+        else:
+            indent_size = 0
+        if indent_size * 64 > self.MAX_STRING_CHARS:
+            raise _EvalError("python_exec: JSON output size limit exceeded")
+        if self._json_size(value, ensure_ascii=ensure_ascii) > self.MAX_STRING_CHARS:
+            raise _EvalError("python_exec: JSON output size limit exceeded")
+        encoder = _json.JSONEncoder(**kwargs)
+        pieces = []
+        length = 0
+        for piece in encoder.iterencode(self._json_plain(value)):
+            if length + len(piece) > self.MAX_STRING_CHARS:
+                raise _EvalError("python_exec: JSON output size limit exceeded")
+            pieces.append(piece)
+            length += len(piece)
+        return "".join(pieces)
 
     def _json_loads(self, value):
         return _json.loads(self._plain(value))
@@ -991,6 +1220,7 @@ class _Evaluator:
     def _binary(self, operator, left, right):
         left = self._plain(left)
         right = self._plain(right)
+        self._check_integer_binary(operator, left, right)
         if isinstance(operator, ast.Mult):
             for sequence, multiplier in ((left, right), (right, left)):
                 if isinstance(sequence, (str, bytes, list, tuple)) and isinstance(
@@ -1001,7 +1231,7 @@ class _Evaluator:
                         if isinstance(sequence, (str, bytes))
                         else self.MAX_ITEMS
                     )
-                    if len(sequence) * abs(multiplier) > limit:
+                    if len(sequence) and abs(multiplier) > limit // len(sequence):
                         raise _EvalError("python_exec: multiplication result limit exceeded")
         operations = {
             ast.Add: lambda: left + right,
@@ -1508,6 +1738,12 @@ class PythonExecResult:
     stderr: str
     returncode: int | None
     timed_out: bool
+    max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
+
+    def __post_init__(self) -> None:
+        _validate_max_output_chars(self.max_output_chars)
+        object.__setattr__(self, "stdout", _clip(self.stdout, self.max_output_chars))
+        object.__setattr__(self, "stderr", _clip(self.stderr, self.max_output_chars))
 
     @property
     def ok(self) -> bool:
@@ -1523,10 +1759,13 @@ class PythonExecResult:
         """
 
         if self.timed_out:
-            return _join(self.stdout, self.stderr)
+            return _clip(_join(self.stdout, self.stderr), self.max_output_chars)
         if self.ok:
-            return self.stdout
-        return _join(self.stdout, self.stderr or f"python_exec: exited with {self.returncode}")
+            return _clip(self.stdout, self.max_output_chars)
+        return _clip(
+            _join(self.stdout, self.stderr or f"python_exec: exited with {self.returncode}"),
+            self.max_output_chars,
+        )
 
 
 def run(
@@ -1547,6 +1786,7 @@ def run(
         _BOOTSTRAP.replace("__ALLOWED__", repr(sorted(ALLOWED_IMPORTS)))
         .replace("__NETWORK_MESSAGE__", repr(NETWORK_BLOCKED_MESSAGE))
         .replace("__MAX_OUTPUT__", repr(max_output_chars))
+        .replace("__MAX_INTEGER_BITS__", repr(MAX_INTEGER_BITS))
         .strip()
     )
     # -I isolates the child from PYTHON* variables and the user site directory;
@@ -1570,9 +1810,10 @@ def run(
         except subprocess.TimeoutExpired as expired:
             return PythonExecResult(
                 stdout=_clip(_decode(expired.stdout), max_output_chars),
-                stderr=TIMEOUT_MESSAGE.format(timeout=timeout_s),
+                stderr=_clip(TIMEOUT_MESSAGE.format(timeout=timeout_s), max_output_chars),
                 returncode=None,
                 timed_out=True,
+                max_output_chars=max_output_chars,
             )
         except OSError as exc:  # pragma: no cover - interpreter is missing
             raise PythonExecError(f"python_exec: could not start the sandbox: {exc}") from exc
@@ -1582,6 +1823,7 @@ def run(
         stderr=_clip(completed.stderr, max_output_chars),
         returncode=completed.returncode,
         timed_out=False,
+        max_output_chars=max_output_chars,
     )
 
 
@@ -1632,9 +1874,12 @@ def _decode(value: str | bytes | None) -> str:
 
 
 def _clip(value: str, limit: int) -> str:
-    if limit <= 0 or len(value) <= limit:
+    if len(value) <= limit:
         return value
-    return value[:limit] + f"\n... [truncated at {limit} characters]"
+    marker = f"\n... [truncated at {limit} characters]"
+    if len(marker) >= limit:
+        return value[:limit]
+    return value[: limit - len(marker)] + marker
 
 
 __all__ = [
@@ -1644,6 +1889,7 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
     "ENV_PASSTHROUGH",
     "MAX_OUTPUT_CHARS_LIMIT",
+    "MAX_INTEGER_BITS",
     "NETWORK_BLOCKED_MESSAGE",
     "child_env",
     "PythonExecError",

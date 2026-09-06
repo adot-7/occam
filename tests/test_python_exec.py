@@ -13,7 +13,9 @@ import pytest
 from occam.tools.python_exec import (
     ALLOWED_IMPORTS,
     CPYTHON_SYNTHESIZED_ENV,
+    DEFAULT_MAX_OUTPUT_CHARS,
     ENV_PASSTHROUGH,
+    MAX_INTEGER_BITS,
     MAX_OUTPUT_CHARS_LIMIT,
     PythonExecResult,
     child_env,
@@ -200,6 +202,35 @@ def test_output_is_clipped_so_one_call_cannot_flood_a_transcript() -> None:
     assert "truncated at 100 characters" in text
 
 
+@pytest.mark.parametrize("limit", [1, 2, 32, 100, DEFAULT_MAX_OUTPUT_CHARS])
+def test_output_limit_includes_markers_at_every_positive_bound(limit: int) -> None:
+    result = run("print('x' * 100_000)", max_output_chars=limit)
+    marker = f"\n... [truncated at {limit} characters]"
+
+    assert len(result.stdout) == limit
+    assert len(result.stderr) <= limit
+    assert len(result.as_text()) <= limit
+    if len(marker) < limit:
+        assert result.stdout.endswith(marker)
+    else:
+        assert result.stdout == "x" * limit
+
+
+@pytest.mark.parametrize("limit", [1, 2, 32, 100, DEFAULT_MAX_OUTPUT_CHARS])
+def test_parent_result_clipping_is_also_a_strict_total_bound(limit: int) -> None:
+    result = PythonExecResult(
+        stdout="stdout" * 1000,
+        stderr="stderr" * 1000,
+        returncode=1,
+        timed_out=False,
+        max_output_chars=limit,
+    )
+
+    assert len(result.stdout) <= limit
+    assert len(result.stderr) <= limit
+    assert len(result.as_text()) <= limit
+
+
 @pytest.mark.parametrize(
     "limit",
     [0, -1, True, 1.5, MAX_OUTPUT_CHARS_LIMIT + 1],
@@ -219,6 +250,74 @@ def test_unsupported_syntax_reports_the_restricted_surface() -> None:
 
     assert not result.ok
     assert "unsupported by the restricted calculation subset" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("label", "code", "message"),
+    (
+        (
+            "repr",
+            "repr(['x' * 200_000] * 10)",
+            "string conversion size limit exceeded",
+        ),
+        (
+            "ascii",
+            "ascii(['x' * 200_000] * 10)",
+            "string conversion size limit exceeded",
+        ),
+        (
+            "json",
+            "import json\njson.dumps(['x' * 200_000] * 10)",
+            "JSON output size limit exceeded",
+        ),
+    ),
+    ids=lambda case: case[0],
+)
+def test_aggregate_renderers_reject_before_building_large_representations(
+    label: str, code: str, message: str
+) -> None:
+    result = run(code, timeout_s=2.0)
+
+    assert not result.ok, label
+    assert not result.timed_out, label
+    assert message in result.stderr, label
+
+
+def test_print_streams_each_argument_and_separator_into_the_bounded_sink() -> None:
+    result = run(
+        "print('x' * 800_000, 'y' * 800_000, sep='s' * 800_000, end='e' * 800_000)",
+        max_output_chars=128,
+    )
+
+    assert result.ok
+    assert len(result.stdout) == 128
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        f"print(2 ** {MAX_INTEGER_BITS})",
+        "print(2 ** 1_000_000)",
+        f"print(1 << {MAX_INTEGER_BITS})",
+        "print(1 << 1_000_000)",
+        f"print((2 ** {MAX_INTEGER_BITS - 1}) * 2)",
+    ),
+)
+def test_explosive_integer_operations_fail_before_growth(code: str) -> None:
+    result = run(code, timeout_s=2.0)
+
+    assert not result.ok
+    assert not result.timed_out
+    assert "integer magnitude limit exceeded" in result.stderr
+
+
+def test_integer_bit_boundary_allows_normal_sized_results() -> None:
+    power = run(f"print(2 ** {MAX_INTEGER_BITS - 1} > 0)", timeout_s=2.0)
+    shift = run(f"print(1 << {MAX_INTEGER_BITS - 1} > 0)", timeout_s=2.0)
+
+    assert power.ok and power.stdout == "True\n"
+    assert shift.ok and shift.stdout == "True\n"
 
 
 @pytest.mark.parametrize(
