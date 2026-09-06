@@ -123,6 +123,13 @@ def test_run2_acceptance_evidence_records_three_loaded_lessons() -> None:
         "lesson_fx_series",
     ]
 
+    work_packages = (ROOT / "prd" / "05-WORK-PACKAGES.md").read_text(encoding="utf-8")
+    assert (
+        "fixtures/demo_run1` (5 gens, holiday failures at g0, witness prune, "
+        "3 lessons written, pass³)" in work_packages
+    )
+    assert "With 2 lessons present" in work_packages
+
 
 def test_metrics_snapshot_has_the_complete_metrics_contract() -> None:
     metrics_event = next(event for event in EventReader(RUN1) if event.type == "metrics.snapshot")
