@@ -270,6 +270,9 @@ def test_architect_accepts_one_json_object_with_minimal_wrapping(
         lambda payload: f"{json.dumps(payload)}\n{json.dumps(payload)}",
         lambda payload: f"```json\n{json.dumps(payload)}\n```\n```json\n{json.dumps(payload)}\n```",
         lambda payload: f"```json\n[{json.dumps(payload)}]\n```",
+        lambda payload: f"123\n```json\n{json.dumps(payload)}\n```",
+        lambda payload: f"```json\n{json.dumps(payload)}\n```\n123",
+        '{"roles": [], "roles": []}',
     ],
 )
 def test_architect_rejects_missing_malformed_or_ambiguous_json(
@@ -302,6 +305,17 @@ def test_architect_provider_failure_is_distinct_and_redacted(tmp_path: Path) -> 
         Architect(llm=FailingArchitectLLM(), memory=tmp_path / "memory").propose(TASK)
 
     assert "sensitive provider payload" not in str(error.value)
+
+
+def test_architect_rejects_non_earlier_role_dependencies(tmp_path: Path) -> None:
+    payload = architecture_payload()
+    payload["roles"] = [payload["roles"][1], payload["roles"][0], payload["roles"][2]]
+    llm = StubArchitectLLM(payload)
+
+    with pytest.raises(ArchitectError, match="non-earlier input"):
+        Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    assert len(llm.calls) == 2
 
 
 @pytest.mark.parametrize(

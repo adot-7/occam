@@ -202,6 +202,42 @@ def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"non-standard JSON constant {value}")
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate keys instead of silently choosing the last value."""
+
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _json_decoder() -> json.JSONDecoder:
+    return json.JSONDecoder(
+        object_pairs_hook=_reject_duplicate_keys,
+        parse_constant=_reject_json_constant,
+    )
+
+
+def _has_json_value(text: str) -> bool:
+    """Whether a wrapper side starts with a complete JSON value."""
+
+    candidate = text.strip()
+    if not candidate:
+        return False
+    try:
+        _value, end = _json_decoder().raw_decode(candidate)
+    except (TypeError, ValueError):
+        return False
+    if end == len(candidate):
+        return True
+    # ``raw_decode`` accepts a valid scalar prefix from ``123 trailing``. A
+    # whitespace boundary still means the scalar is a second value, while
+    # adjoining letters are ordinary prose such as ``nullish``.
+    return candidate[end].isspace()
+
+
 def _strict_json_object(text: str) -> dict[str, Any]:
     """Extract exactly one JSON object from a tightly wrapped completion.
 
@@ -227,9 +263,11 @@ def _strict_json_object(text: str) -> dict[str, Any]:
         outside = stripped[: fence.start()] + stripped[fence.end() :]
         if any(marker in outside for marker in _WRAPPER_MARKERS):
             raise _output_shape_error("found multiple or ambiguous JSON objects")
+        if _has_json_value(stripped[: fence.start()]) or _has_json_value(stripped[fence.end() :]):
+            raise _output_shape_error("found more than one JSON value")
         candidate = fence.group("body").strip()
         try:
-            payload = json.loads(candidate, parse_constant=_reject_json_constant)
+            payload = _json_decoder().decode(candidate)
         except (TypeError, ValueError) as exc:
             raise _output_shape_error("fenced content was not valid JSON") from exc
         if not isinstance(payload, dict):
@@ -239,10 +277,10 @@ def _strict_json_object(text: str) -> dict[str, Any]:
     start = stripped.find("{")
     if start < 0:
         raise _output_shape_error("expected exactly one JSON object; none was found")
-    decoder = json.JSONDecoder(parse_constant=_reject_json_constant)
+    decoder = _json_decoder()
     try:
         payload, end = decoder.raw_decode(stripped, start)
-    except json.JSONDecodeError as exc:
+    except (TypeError, ValueError) as exc:
         raise _output_shape_error("the JSON object was malformed") from exc
     if not isinstance(payload, dict):
         raise _output_shape_error("expected one JSON object")
@@ -253,14 +291,9 @@ def _strict_json_object(text: str) -> dict[str, Any]:
     # A second scalar JSON value is not prose around the object.  Prose such
     # as "Here is the architecture" is intentionally not valid JSON and is
     # therefore unaffected by this check.
-    for wrapper in (stripped[:start].strip(), stripped[end:].strip()):
-        if not wrapper:
-            continue
-        try:
-            json.loads(wrapper, parse_constant=_reject_json_constant)
-        except (TypeError, ValueError):
-            continue
-        raise _output_shape_error("found more than one JSON value")
+    for wrapper in (stripped[:start], stripped[end:]):
+        if _has_json_value(wrapper):
+            raise _output_shape_error("found more than one JSON value")
     return payload
 
 
@@ -274,7 +307,13 @@ def _validation_category(error: ArchitectError) -> str:
         return "Pydantic Architecture schema"
     if "event schema" in message:
         return "event schema compatibility"
-    if "invalid DAG" in message or "unknown input" in message or "cycle" in message:
+    if (
+        "invalid DAG" in message
+        or "unknown input" in message
+        or "non-earlier input" in message
+        or "topological order" in message
+        or "cycle" in message
+    ):
         return "DAG input contract"
     if "model key" in message or "configured role model" in message:
         return "configured role model keys"
@@ -301,7 +340,8 @@ def _safe_validation_detail(error: ArchitectError, category: str) -> str:
     if category != "DAG input contract":
         return ""
     match = re.search(
-        r"role ['\"]([^'\"]+)['\"] reads unknown input ['\"]([^'\"]+)['\"]",
+        r"role ['\"]([^'\"]+)['\"] reads (?:unknown input|non-earlier input) "
+        r"['\"]([^'\"]+)['\"]",
         str(error),
     )
     if match is None:
@@ -734,7 +774,6 @@ class Architect:
         for role in architecture.roles:
             if role.id in role_ids:
                 raise ArchitectError(f"duplicate role id {role.id!r}")
-            role_ids.add(role.id)
             if role.output_key in output_keys:
                 raise ArchitectError(f"duplicate role output_key {role.output_key!r}")
             output_keys.add(role.output_key)
@@ -743,6 +782,14 @@ class Architect:
                 raise ArchitectError(
                     f"role {role.id!r} binds tools outside the task manifest: {', '.join(unknown)}"
                 )
+            for source in role.inputs:
+                if source != "task" and source not in role_ids:
+                    raise ArchitectError(
+                        "architect proposed an invalid DAG: "
+                        f"role {role.id!r} reads non-earlier input {source!r}; "
+                        "roles must be declared in topological order"
+                    )
+            role_ids.add(role.id)
         self._validate_model_keys(architecture)
         try:
             validate_architecture(architecture)
