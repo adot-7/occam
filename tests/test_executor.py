@@ -30,6 +30,7 @@ from occam.tools.registry import ToolRegistry
 from tests.executor_doubles import (
     WORKER,
     WORKER_CONFIG,
+    NeverEndingToolProvider,
     ProviderCall,
     RecordingTool,
     ScriptedProvider,
@@ -322,22 +323,38 @@ def test_tool_loop_records_raw_responses_and_offers_only_bound_tools(tmp_path):
     assert next(call for call in provider.calls if call.system == "ROLE: a").tool_names == ["echo"]
 
 
-def test_tool_loop_stops_at_max_turns(tmp_path):
+def test_tool_loop_exhaustion_is_soft_and_grader_decides(tmp_path):
     tool = RecordingTool(ECHO_SPEC, lambda value: {"echoed": value})
-    provider = ScriptedProvider(
-        lambda _call: tool_call_response([("echo", {"value": "again"})], text="still working")
+    provider = NeverEndingToolProvider(
+        "echo",
+        {"value": "again"},
+        first_text="last useful output",
     )
     executor = Executor(
         llm=build_client(provider, tmp_path / "cache"),
         tools={"echo": (ECHO_SPEC, tool)},
+        grader=lambda answer, expected: {
+            "passed": answer == expected,
+            "sub_results": {"answer": answer == expected},
+        },
     )
     arch = architecture(role("a", tools=["echo"], max_turns=3))
-    result = executor.execute(arch, [case()])
+    result = executor.execute(arch, [case(expected="last useful output")])
 
     trace = result.results[0].per_role["a"]
     assert len(trace.tool_calls) == 3
-    assert trace.error is not None and "max_turns (3)" in trace.error
-    assert result.results[0].passed is False
+    assert trace.output == "last useful output"
+    assert trace.truncated is True
+    assert trace.error is None
+
+    case_result = result.results[0]
+    assert case_result.answer == "last useful output"
+    assert case_result.truncated is True
+    assert case_result.role_error is None
+    assert case_result.grade_error is None
+    assert case_result.sub_results == {"answer": True}
+    assert case_result.passed is True
+    assert result.pass_rate == 1.0
 
 
 def test_unbound_tool_call_is_refused_and_fed_back(tmp_path):

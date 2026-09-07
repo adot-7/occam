@@ -148,6 +148,7 @@ def _aggregate_case(
         tokens_out=sum(sample.tokens_out for sample in samples),
         cost_usd=sum(sample.cost_usd for sample in samples),
         latency_s=sum(sample.latency_s for sample in samples),
+        truncated=chosen.truncated,
         per_role=chosen.per_role,
     )
 
