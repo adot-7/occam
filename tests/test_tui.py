@@ -138,7 +138,8 @@ def test_wp09_ablation_table_and_case_trace_use_fixture_contract() -> None:
         "VERDICT",
     ]
     assert rows == 5
-    assert "requested_date  →  rate_date" in evidence
+    assert "invoices  8/9 pass" in evidence
+    assert "fx_rate  2026-04-03 → 2026-04-02" in evidence
     assert "lessons 0" in header
     assert clean
 
@@ -254,6 +255,34 @@ def test_wp09_recorded_tool_dates_are_highlighted_verbatim() -> None:
 
     assert "requested_date 2026-04-04  →  rate_date 2026-04-02" in text
     assert "rate: 1.11" in text
+
+
+def test_wp17_fixture_holiday_case_inspector_shows_recorded_evidence() -> None:
+    state = reduce(_events(RUN1))
+    case = state.generations["g000"].executions["full"]["cases"][2]
+
+    assert case["answer_prefix"]
+    assert len(case["answer_prefix"]) <= 120
+    assert sum(case["sub_results"].values()) == 8
+    call = case["per_role"]["r_rates"]["tool_calls"][0]
+    assert call["name"] == "fx_rate"
+    assert call["response"] == {
+        "requested_date": "2026-04-03",
+        "rate_date": "2026-04-02",
+        "base": "EUR",
+        "symbol": "INR",
+        "rate": 107.3,
+    }
+
+    text = CaseInspector(RunView(state, selected_generation=0), "fxa_003").render_inspector().plain
+
+    assert "sub_results  8/9 invoices pass" in text
+    assert 'answer_prefix  {"total_inr": 159990.33' in text
+    assert "ROLE TRACES" in text
+    assert "r_rates  ·  1 tool call" in text
+    assert "r_rates  ·  fx_rate" in text
+    assert "requested_date 2026-04-03  →  rate_date 2026-04-02" in text
+    assert "cached: True" in text
 
 
 @pytest.mark.parametrize("run_dir", FIXTURES, ids=lambda path: path.name)

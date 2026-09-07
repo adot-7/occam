@@ -520,6 +520,41 @@ def test_execution_case_diagnostics_are_required_and_bounded() -> None:
         RoleTrace(error="x" * 257)
 
 
+def test_fixture_holiday_case_evidence_uses_the_additive_bounded_contract() -> None:
+    event = next(
+        event
+        for event in EventReader(RUN1)
+        if event.type == "execution.case"
+        and event.data["generation"] == 0
+        and event.data["variant"] == "full"
+        and event.data["case_id"] == "fxa_003"
+    )
+    validate_event(event.model_dump(mode="json"))
+
+    data = event.data
+    assert data["answer_prefix"]
+    assert len(data["answer_prefix"]) <= 120
+    assert set(data["sub_results"]) == {
+        "INV-A003-01",
+        "INV-A003-02",
+        "INV-A003-03",
+        "INV-A003-04",
+        "INV-A003-05",
+        "INV-A003-06",
+        "INV-A003-07",
+        "INV-A003-08",
+        "INV-A003-09",
+    }
+    trace = data["per_role"]["r_rates"]["tool_calls"][0]
+    assert trace["response"]["requested_date"] == "2026-04-03"
+    assert trace["response"]["rate_date"] == "2026-04-02"
+
+    too_long = event.model_dump(mode="json")
+    too_long["data"]["per_role"]["r_rates"]["tool_calls"][0]["response"]["rate_date"] = "x" * 33
+    with pytest.raises(ValueError, match="events.schema.json"):
+        validate_event(too_long)
+
+
 def test_reducer_retains_execution_case_diagnostics() -> None:
     event = next(event for event in EventReader(RUN1) if event.type == "execution.case")
     state = reduce(EventReader(RUN1).read())

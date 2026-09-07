@@ -144,6 +144,7 @@ class CaseInspector(ModalScreen[None]):
         if case is not None:
             self._append_sub_results(text, case)
             self._append_optional_payload(text, case)
+            self._append_role_traces(text, case)
         self._append_tool_trace(text, case)
         return text
 
@@ -190,10 +191,29 @@ class CaseInspector(ModalScreen[None]):
 
     @staticmethod
     def _append_optional_payload(text: Text, case: dict[str, Any]) -> None:
-        for label in ("input", "expected", "answer"):
+        for label in ("input", "expected", "answer", "answer_prefix"):
             value = case.get(label)
-            if value is not None:
+            if value is not None and (label != "answer_prefix" or value):
                 text.append(f"{label}  {_clip(value, 120)}\n", style=FG)
+
+    @staticmethod
+    def _append_role_traces(text: Text, case: dict[str, Any]) -> None:
+        per_role = case.get("per_role")
+        if not isinstance(per_role, dict) or not per_role:
+            return
+        text.append("\nROLE TRACES\n", style=f"bold {CYAN}")
+        for role_id, trace in per_role.items():
+            if not isinstance(trace, dict):
+                continue
+            calls = trace.get("tool_calls") or trace.get("raw_tool_responses") or []
+            n_calls = len(calls) if isinstance(calls, list) else 0
+            text.append(f"{role_id}", style=f"bold {FG_BRIGHT}")
+            if n_calls:
+                text.append(f"  ·  {n_calls} tool call{'s' if n_calls != 1 else ''}", style=CYAN)
+            output = trace.get("output")
+            if output:
+                text.append(f"  ·  output {_clip(output, 120)}", style=FG)
+            text.append("\n", style=FG)
 
     def _append_tool_trace(self, text: Text, case: dict[str, Any] | None) -> None:
         text.append("\nTOOL RESPONSE HIGHLIGHT\n", style=f"bold {AMBER}")
@@ -218,6 +238,9 @@ class CaseInspector(ModalScreen[None]):
             return
         for call in calls:
             tool = str(call.get("tool") or call.get("name") or "tool")
+            role_id = call.get("role_id")
+            if role_id:
+                text.append(f"{role_id}  ·  ", style=f"bold {FG_BRIGHT}")
             text.append(f"{tool}\n", style=f"bold {CYAN}")
             requested = _first_value(call, "requested_date")
             response = call.get("response") or call.get("raw_response") or call
@@ -228,8 +251,10 @@ class CaseInspector(ModalScreen[None]):
                 text.append("  →  rate_date ", style=FG)
                 text.append(str(rate_date or "—"), style=f"bold {AMBER_HI} on #231908")
                 text.append("\n", style=FG)
-            for field in ("rate", "status", "bytes", "cached", "error"):
+            for field in ("rate", "status", "bytes", "cached", "http_status", "error"):
                 value = _first_value(response, field)
+                if value is None:
+                    value = call.get(field)
                 if value is not None:
                     text.append(f"  {field}: {value}\n", style=DIM if field != "error" else RED)
 

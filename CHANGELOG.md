@@ -59,6 +59,9 @@ All notable changes to Occam are documented here.
 
 ### Fixed
 
+- The run 1 replay fixture now carries a bounded holiday-case answer prefix,
+  per-invoice results, and the recorded FX role/tool response so the Inspector
+  can show its evidence instead of a compact-event placeholder.
 - Execution case failures now retain checker errors and expose bounded answer
   prefixes plus checker/role reasons in the validated event projection, without
   copying raw provider traces into events.  Role failures skip grading, and
