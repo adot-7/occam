@@ -1072,6 +1072,17 @@ def _first_nested(payload: Any, key: str) -> Any:
 
 def _trace_calls(case: dict[str, Any]) -> list[dict[str, Any]]:
     direct = case.get("tool_calls") or case.get("raw_tool_responses")
+    calls: list[dict[str, Any]] = []
     if isinstance(direct, list):
-        return [item for item in direct if isinstance(item, dict)]
-    return []
+        calls.extend(item for item in direct if isinstance(item, dict))
+    per_role = case.get("per_role")
+    if isinstance(per_role, dict):
+        for role_id, trace in per_role.items():
+            if not isinstance(trace, dict):
+                continue
+            role_calls = trace.get("tool_calls") or trace.get("raw_tool_responses") or []
+            if isinstance(role_calls, list):
+                for call in role_calls:
+                    if isinstance(call, dict):
+                        calls.append({"role_id": role_id, **call})
+    return calls

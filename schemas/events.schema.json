@@ -111,6 +111,67 @@
         "status": {"type": "string", "enum": ["active", "retired"]}
       }
     },
+    "traceResponse": {
+      "type": ["object", "array", "string", "number", "boolean", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "amount": {"type": "number"},
+        "base": {"type": "string", "maxLength": 16},
+        "end_date": {"type": "string", "maxLength": 32},
+        "rate": {"type": "number"},
+        "rate_date": {"type": "string", "maxLength": 32},
+        "rates": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {"type": "number"}
+          }
+        },
+        "requested_date": {"type": "string", "maxLength": 64},
+        "start_date": {"type": "string", "maxLength": 32},
+        "status": {"type": ["integer", "string"]},
+        "symbol": {"type": "string", "maxLength": 16}
+      }
+    },
+    "traceCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 64},
+        "tool": {"type": "string", "minLength": 1, "maxLength": 64},
+        "arguments": {"type": "object", "maxProperties": 16},
+        "requested_date": {"type": "string", "maxLength": 64},
+        "status": {"type": "string", "maxLength": 32},
+        "latency_s": {"type": "number", "minimum": 0},
+        "bytes": {"type": "integer", "minimum": 0},
+        "cached": {"type": "boolean"},
+        "http_status": {"type": ["integer", "null"], "minimum": 100, "maximum": 599},
+        "response": {"$ref": "#/$defs/traceResponse"},
+        "raw_response": {"$ref": "#/$defs/traceResponse"},
+        "error": {"type": ["string", "null"], "maxLength": 256}
+      }
+    },
+    "roleTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tokens_in": {"type": "integer", "minimum": 0},
+        "tokens_out": {"type": "integer", "minimum": 0},
+        "cost_usd": {"type": "number", "minimum": 0},
+        "billed_cost_usd": {"type": "number", "minimum": 0},
+        "cost_label": {"type": "string", "minLength": 1, "maxLength": 64},
+        "latency_s": {"type": "number", "minimum": 0},
+        "output": {"type": "string", "maxLength": 120},
+        "tool_calls": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/traceCall"}
+        },
+        "cached": {"type": "boolean"},
+        "error": {"type": ["string", "null"], "maxLength": 256}
+      }
+    },
     "influenceCi": {
       "type": "object",
       "additionalProperties": false,
@@ -194,8 +255,19 @@
         "cost_usd": {"type": "number", "minimum": 0},
         "latency_s": {"type": "number", "minimum": 0},
         "answer_prefix": {"type": "string", "maxLength": 120},
+        "answer": {"type": "string", "maxLength": 120},
         "grade_error": {"type": ["string", "null"], "maxLength": 256},
-        "role_error": {"type": ["string", "null"], "maxLength": 256}
+        "role_error": {"type": ["string", "null"], "maxLength": 256},
+        "sub_results": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": {"type": "boolean"}
+        },
+        "per_role": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": {"$ref": "#/$defs/roleTrace"}
+        }
       }
     },
     "executionCompleted": {
