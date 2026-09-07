@@ -69,7 +69,7 @@
         "model": {"type": "string", "minLength": 1},
         "system_prompt": {"type": "string"},
         "tools": {"type": "array", "items": {"type": "string"}},
-        "inputs": {"type": "array", "description": "Dependency tokens: exactly task or an earlier declared role.id; never a role name, output_key, or invented descriptive alias.", "items": {"type": "string"}},
+        "inputs": {"type": "array", "description": "Dependency tokens: exactly \"task\" or an earlier declared role.id; never a role name, output_key, or invented descriptive alias.", "items": {"type": "string"}},
         "output_key": {"type": "string", "minLength": 1, "description": "Key under which this role output is stored for context rendering; it is not a valid inputs token."},
         "memory": {"type": "string", "enum": ["none", "scratchpad", "summary"], "default": "none"},
         "max_turns": {"type": "integer", "minimum": 1, "default": 6}
