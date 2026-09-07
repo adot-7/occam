@@ -194,7 +194,7 @@
         "cost_usd": {"type": "number", "minimum": 0},
         "latency_s": {"type": "number", "minimum": 0},
         "answer_prefix": {"type": "string", "maxLength": 120},
-        "grade_error": {"type": ["string", "null"]},
+        "grade_error": {"type": ["string", "null"], "maxLength": 256},
         "role_error": {"type": ["string", "null"]}
       }
     },

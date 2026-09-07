@@ -497,6 +497,14 @@ def test_execution_case_diagnostics_are_required_and_bounded() -> None:
     with pytest.raises(ValueError, match="events.schema.json"):
         validate_event(too_long)
 
+    too_long_grade_error = event.model_dump(mode="json")
+    too_long_grade_error["data"]["grade_error"] = "x" * 257
+    with pytest.raises(ValueError, match="events.schema.json"):
+        validate_event(too_long_grade_error)
+
+    with pytest.raises(ValidationError):
+        CaseResult(case_id="fxa_001", passed=False, grade_error="x" * 257)
+
 
 def test_reducer_retains_execution_case_diagnostics() -> None:
     event = next(event for event in EventReader(RUN1) if event.type == "execution.case")

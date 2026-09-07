@@ -509,6 +509,46 @@ def test_role_failure_reason_is_persisted_in_the_case_event(tmp_path):
     assert event.data["grade_error"] is None
 
 
+def test_role_failure_skips_grader_and_preserves_bounded_answer_prefix(tmp_path):
+    grader_calls = 0
+    answer = "final answer " + ("x" * 200)
+
+    def grader(_answer, _expected):
+        nonlocal grader_calls
+        grader_calls += 1
+        raise AssertionError("grader must not run after role failure")
+
+    def handler(call):
+        if call.system == "ROLE: a":
+            raise CompletionError("provider boom")
+        return text_response(answer)
+
+    run_dir = tmp_path / "run"
+    provider = ScriptedProvider(handler)
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = Executor(
+            llm=build_client(provider, tmp_path / "cache"),
+            grader=grader,
+            writer=writer,
+            run_dir=run_dir,
+        )
+        result = executor.execute(
+            architecture(role("a"), role("b"), final="b"),
+            [case()],
+        )
+
+    assert grader_calls == 0
+    case_result = result.results[0]
+    assert case_result.answer == answer
+    assert case_result.passed is False
+    assert case_result.grade_error is None
+    event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
+    assert event.data["answer_prefix"] == answer[:120]
+    assert len(event.data["answer_prefix"]) == 120
+    assert event.data["grade_error"] is None
+    assert event.data["role_error"] == "CompletionError: provider boom"
+
+
 def test_a_grader_that_raises_does_not_crash_the_run(tmp_path):
     def grader(_answer, _expected):
         raise RuntimeError("checker bug")
@@ -549,6 +589,40 @@ def test_grader_exception_reason_is_persisted_without_raw_trace_payload(tmp_path
     assert event.data["role_error"] is None
     assert "per_role" not in event.data
     assert "tool_calls" not in event.data
+
+
+def test_hostile_checker_exception_is_sanitized_and_bounded(tmp_path):
+    hostile = "checker failed sk-live-secret payload={'token': 'sk-live-secret'} " + ("x" * 400)
+
+    def grader(_answer, _expected):
+        raise RuntimeError(hostile)
+
+    run_dir = tmp_path / "run"
+    provider = ScriptedProvider(lambda _call: text_response("ok"))
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = Executor(
+            llm=build_client(provider, tmp_path / "cache"),
+            grader=grader,
+            writer=writer,
+            run_dir=run_dir,
+        )
+        result = executor.execute(architecture(role("a")), [case()])
+
+    grade_error = result.results[0].grade_error
+    assert grade_error is not None
+    assert grade_error.startswith("RuntimeError: checker failed")
+    assert "sk-live-secret" not in grade_error
+    assert "{'token':" not in grade_error
+    assert len(grade_error) <= 256
+    persisted = json.loads(
+        (run_dir / "generations" / "g000" / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
+    assert persisted["grade_error"] == grade_error
+    assert event.data["grade_error"] == grade_error
+    assert "sk-live-secret" not in json.dumps(event.data)
 
 
 def test_malformed_answer_reason_and_bounded_prefix_are_persisted(tmp_path):
