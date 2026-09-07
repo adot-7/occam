@@ -150,6 +150,28 @@ def test_witness_verdict_survives_a_noise_floor_that_dwarfs_the_divergence() -> 
     assert table.row("r_verify").verdict == "witness"
 
 
+def test_two_all_failed_arms_are_uncertain_even_when_answers_match() -> None:
+    roles = [
+        make_role("r_parse"),
+        make_role("r_calc", inputs=["r_parse"]),
+        make_role("r_report", inputs=["r_calc"]),
+    ]
+    architecture = make_architecture(roles)
+    runner = SyntheticRunner(
+        cases=CASES,
+        passing=set(),
+        role_costs={role.id: 0.1 for role in roles},
+    )
+    full = runner.full_result(architecture)
+
+    table = ablate(architecture, CASES, runner=runner, generation=0, full=full)
+
+    assert all(row.divergence == 0.0 for row in table.rows)
+    assert all(row.verdict == "uncertain" for row in table.rows)
+    assert table.witnesses == []
+    assert table.prunable == []
+
+
 # --- property 2: the sole producer of the answer is load-bearing -----------------
 
 

@@ -78,7 +78,9 @@ def test_wp10_leak_guard_accepts_canonical_lessons_and_rejects_case_values() -> 
         assert not lesson_passes_leak_guard(text, case_values=[41872.35])
 
 
-def test_wp10_witness_rule_forces_highest_cost_prune(tmp_path: Path) -> None:
+def test_wp10_witness_rule_forces_highest_cost_prune_when_some_cases_pass(
+    tmp_path: Path,
+) -> None:
     rows = [
         AblationRow(
             role_id="witness_a",
@@ -89,7 +91,7 @@ def test_wp10_witness_rule_forces_highest_cost_prune(tmp_path: Path) -> None:
             divergence=0.0,
             cost_share=0.2,
             verdict="witness",
-            n_cases=1,
+            n_cases=2,
         ),
         AblationRow(
             role_id="witness_b",
@@ -100,10 +102,10 @@ def test_wp10_witness_rule_forces_highest_cost_prune(tmp_path: Path) -> None:
             divergence=0.0,
             cost_share=0.6,
             verdict="witness",
-            n_cases=1,
+            n_cases=2,
         ),
     ]
-    table = AblationTable(generation=0, case_ids=["c1"], noise_rate=0.0, rows=rows)
+    table = AblationTable(generation=0, case_ids=["c1", "c2"], noise_rate=0.0, rows=rows)
     full = RunResult(
         architecture_id="g000",
         variant="full",
@@ -113,10 +115,20 @@ def test_wp10_witness_rule_forces_highest_cost_prune(tmp_path: Path) -> None:
                 answer="bad",
                 passed=False,
                 per_role={"cheap": RoleTrace(cost_usd=0.1)},
-            )
+            ),
+            CaseResult(
+                case_id="c2",
+                answer="good",
+                passed=True,
+                per_role={"cheap": RoleTrace(cost_usd=0.1)},
+            ),
         ],
+        pass_rate=0.5,
     )
-    case = Case(id="c1", input="input", expected={"total_inr": 100.0})
+    cases = [
+        Case(id="c1", input="input 1", expected={"total_inr": 100.0}),
+        Case(id="c2", input="input 2", expected={"total_inr": 100.0}),
+    ]
 
     class StubLLM:
         def complete(self, *_args: object, **_kwargs: object) -> str:
@@ -141,7 +153,7 @@ def test_wp10_witness_rule_forces_highest_cost_prune(tmp_path: Path) -> None:
         full=full,
         table=table,
         architecture=_architecture(),
-        cases=[case],
+        cases=cases,
         llm=StubLLM(),
         lesson_store=store,
         run_id="run1",
@@ -151,6 +163,123 @@ def test_wp10_witness_rule_forces_highest_cost_prune(tmp_path: Path) -> None:
     assert result.mutation.type == "prune"
     assert result.mutation.target_role == "witness_b"
     assert [event_type for event_type, _ in events] == ["diagnosis.emitted"]
+
+
+def test_wp10_all_failed_diagnosis_falls_back_from_prune(tmp_path: Path) -> None:
+    row = AblationRow(
+        role_id="witness_b",
+        role_name="Witness B",
+        justification="verification",
+        influence=0.0,
+        influence_ci=ConfidenceInterval(lo=-0.1, hi=0.1),
+        divergence=0.0,
+        cost_share=0.6,
+        verdict="witness",
+        n_cases=1,
+    )
+    table = AblationTable(generation=0, case_ids=["c1"], noise_rate=0.0, rows=[row])
+    full = RunResult(
+        architecture_id="g000",
+        variant="full",
+        results=[CaseResult(case_id="c1", answer="bad", passed=False)],
+        pass_rate=0.0,
+    )
+    case = Case(id="c1", input="input", expected={"total_inr": 100.0})
+
+    class StubLLM:
+        def complete(self, *_args: object, **_kwargs: object) -> str:
+            return json.dumps(
+                {
+                    "text": "the answer needs a safer prompt",
+                    "failure_summary": "all cases failed",
+                    "chosen_mutation": {
+                        "type": "prune",
+                        "target_role": "witness_b",
+                        "rationale": "the witness appears redundant",
+                    },
+                    "lessons": [],
+                }
+            )
+
+    result = diagnose(
+        {"goal": "test"},
+        generation=0,
+        full=full,
+        table=table,
+        architecture=_architecture(),
+        cases=[case],
+        llm=StubLLM(),
+        lesson_store=LessonStore(tmp_path / "memory"),
+        run_id="run1",
+    )
+
+    assert result.mutation.type == "rewrite_prompt"
+    assert result.mutation.target_role == "witness_b"
+
+
+def test_wp10_diagnosis_does_not_prune_to_one_role(tmp_path: Path) -> None:
+    full_architecture = _architecture()
+    architecture = full_architecture.model_copy(
+        update={
+            "roles": full_architecture.roles[:2],
+            "final_role": "witness_a",
+        }
+    )
+    row = AblationRow(
+        role_id="witness_a",
+        role_name="Witness A",
+        justification="verification",
+        influence=0.0,
+        influence_ci=ConfidenceInterval(lo=-0.1, hi=0.1),
+        divergence=0.0,
+        cost_share=0.6,
+        verdict="witness",
+        n_cases=2,
+    )
+    table = AblationTable(generation=0, case_ids=["c1", "c2"], noise_rate=0.0, rows=[row])
+    full = RunResult(
+        architecture_id="g000",
+        variant="full",
+        results=[
+            CaseResult(case_id="c1", answer="bad", passed=False),
+            CaseResult(case_id="c2", answer="good", passed=True),
+        ],
+        pass_rate=0.5,
+    )
+    cases = [
+        Case(id="c1", input="input 1", expected={"total_inr": 100.0}),
+        Case(id="c2", input="input 2", expected={"total_inr": 100.0}),
+    ]
+
+    class StubLLM:
+        def complete(self, *_args: object, **_kwargs: object) -> str:
+            return json.dumps(
+                {
+                    "text": "the answer needs a safer prompt",
+                    "failure_summary": "the final answer failed",
+                    "chosen_mutation": {
+                        "type": "prune",
+                        "target_role": "witness_a",
+                        "rationale": "the witness appears redundant",
+                    },
+                    "lessons": [],
+                }
+            )
+
+    result = diagnose(
+        {"goal": "test"},
+        generation=0,
+        full=full,
+        table=table,
+        architecture=architecture,
+        cases=cases,
+        llm=StubLLM(),
+        lesson_store=LessonStore(tmp_path / "memory"),
+        run_id="run1",
+    )
+
+    assert result.mutation.type == "rewrite_prompt"
+    assert result.mutation.target_role == "witness_a"
 
 
 def test_wp10_compare_writes_second_run_artifact(tmp_path: Path) -> None:

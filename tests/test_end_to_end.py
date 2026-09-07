@@ -10,7 +10,11 @@ from typing import Any
 import pytest
 
 from occam.core import Case
+from occam.engine import loop as loop_module
+from occam.engine.diagnose import DiagnosisResult
 from occam.engine.loop import RunConfig, RunEngine
+from occam.engine.mutate import Mutation
+from occam.engine.mutate import apply_mutation as real_apply_mutation
 from occam.llm.client import Completion
 from occam.llm.config import ModelConfig
 from occam.store.reader import EventReader
@@ -63,7 +67,12 @@ def _architecture_payload() -> dict[str, Any]:
 class StubRunLLM:
     """A deterministic architect/worker boundary with real executor accounting."""
 
-    def __init__(self, cases: list[Case], *, correct: bool) -> None:
+    def __init__(
+        self,
+        cases: list[Case],
+        *,
+        correct: bool,
+    ) -> None:
         self.correct = correct
         self.expected = {case.input: case.expected for case in cases}
         worker_config = ModelConfig(
@@ -108,9 +117,9 @@ class StubRunLLM:
                     "text": "Review the failed answer.",
                     "failure_summary": "The stubbed worker answer is wrong.",
                     "chosen_mutation": {
-                        "type": "rewrite_prompt",
-                        "target_role": "calculator",
-                        "rationale": "Preserve the required answer format.",
+                        "type": "prune",
+                        "target_role": "rate_fetcher",
+                        "rationale": "The failing run should not prune without passing evidence.",
                     },
                     "lessons": [],
                 },
@@ -205,3 +214,88 @@ def test_stubbed_wrong_run_completes_three_generations_without_raising(tmp_path:
     assert outcome.summary["final_pass_rate"] == pytest.approx(0.0)
     assert outcome.summary["displayed_cost_usd"] > 0.0
     _assert_event_contracts(outcome, expected_pass_rate=0.0)
+
+    events = EventReader(outcome.run_dir).read()
+    ablation_rows = [event for event in events if event.type == "ablation.role"]
+    assert ablation_rows
+    assert all(event.data["verdict"] == "uncertain" for event in ablation_rows)
+    assert all(
+        not event.data["witnesses"] for event in events if event.type == "ablation.completed"
+    )
+    mutations = [event for event in events if event.type == "mutation.applied"]
+    assert [event.data["type"] for event in mutations] == ["rewrite_prompt", "rewrite_prompt"]
+
+
+def test_single_role_prune_failure_is_caught_inside_run_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pack = load_task_pack("fx_recon_a")
+    cases = pack.select(2)
+    llm = StubRunLLM(
+        cases,
+        correct=False,
+    )
+
+    diagnosis_architectures: list[int] = []
+
+    def unsafe_diagnosis(*_args: Any, **kwargs: Any) -> DiagnosisResult:
+        architecture = kwargs["architecture"]
+        diagnosis_architectures.append(len(architecture.roles))
+        if len(diagnosis_architectures) == 1:
+            mutation = Mutation(
+                type="collapse",
+                target_role=architecture.final_role,
+                rationale="keep one direct solver for the next generation",
+            )
+        else:
+            mutation = Mutation(
+                type="prune",
+                target_role=architecture.final_role,
+                rationale="remove the redundant solver",
+            )
+        return DiagnosisResult(
+            text="force the structural failure",
+            failure_summary="the single role is not removable",
+            mutation=mutation,
+        )
+
+    calls: list[tuple[int, str]] = []
+
+    def apply_prune(*args: Any, **kwargs: Any) -> Any:
+        architecture = args[0]
+        mutation = args[1]
+        calls.append((len(architecture.roles), mutation.type))
+        return real_apply_mutation(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "diagnose", unsafe_diagnosis)
+    monkeypatch.setattr(loop_module, "apply_mutation", apply_prune)
+
+    outcome = RunEngine(
+        pack,
+        RunConfig(
+            run_name="single-role-prune-failure",
+            out=tmp_path / "runs",
+            memory=tmp_path / "memory",
+            max_generations=3,
+            n_cases=2,
+            ablate_cases=2,
+        ),
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run()
+
+    events = EventReader(outcome.run_dir).read()
+    assert diagnosis_architectures == [3, 1]
+    assert calls == [(3, "collapse"), (1, "prune")]
+    assert outcome.best_generation == 1
+    assert outcome.summary["generations"] == 2
+    assert events[-1].type == "run.completed"
+    assert events[-1].data["best_generation"] == 1
+    logs = [event for event in events if event.type == "log"]
+    assert logs[-1].data == {
+        "level": "warning",
+        "message": (
+            "Diagnosis or mutation failed; terminating safely at the best completed generation."
+        ),
+    }

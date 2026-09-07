@@ -17,7 +17,7 @@ from occam.engine.baseline import BASELINE_MODEL, run_baseline
 from occam.engine.diagnose import diagnose
 from occam.engine.emit import writer_sink
 from occam.engine.executor import Executor, resolve_grader
-from occam.engine.mutate import apply_mutation
+from occam.engine.mutate import MutationError, apply_mutation
 from occam.engine.pass3 import Pass3Result, run_pass3
 from occam.llm.client import LLMClient
 from occam.llm.config import ModelConfig, load_model_configs
@@ -365,40 +365,58 @@ class RunEngine:
                     # retain the current architecture for the next pass.
                     continue
 
-                diagnosis = diagnose(
-                    task,
-                    generation=generation,
-                    full=full,
-                    table=table,
-                    architecture=architecture,
-                    cases=cases,
-                    history=history,
-                    lessons=store.load(active_only=True),
-                    llm=llm,
-                    lesson_store=store,
-                    run_id=run_id,
-                    event_sink=sink,
-                    model_key=self.config.diagnose_model,
-                )
-                if diagnosis.rejected_lessons:
+                try:
+                    diagnosis = diagnose(
+                        task,
+                        generation=generation,
+                        full=full,
+                        table=table,
+                        architecture=architecture,
+                        cases=cases,
+                        history=history,
+                        lessons=store.load(active_only=True),
+                        llm=llm,
+                        lesson_store=store,
+                        run_id=run_id,
+                        event_sink=sink,
+                        model_key=self.config.diagnose_model,
+                    )
+                    if diagnosis.rejected_lessons:
+                        sink(
+                            "log",
+                            {
+                                "level": "info",
+                                "message": (
+                                    f"rejected {len(diagnosis.rejected_lessons)} lesson "
+                                    "proposal(s) "
+                                    "by leak guard"
+                                ),
+                            },
+                        )
+                    application = apply_mutation(
+                        architecture,
+                        diagnosis.mutation,
+                        role_verdicts={row.role_id: row for row in table.rows},
+                        available_tools=task.tools,
+                        generation=generation + 1,
+                        event_sink=sink,
+                    )
+                except (MutationError, ValueError):
+                    # Do not expose provider or prompt contents in the event
+                    # log.  The completed generation remains the source of
+                    # truth and the normal completion path records its best
+                    # generation below.
                     sink(
                         "log",
                         {
-                            "level": "info",
+                            "level": "warning",
                             "message": (
-                                f"rejected {len(diagnosis.rejected_lessons)} lesson proposal(s) "
-                                "by leak guard"
+                                "Diagnosis or mutation failed; terminating safely at the "
+                                "best completed generation."
                             ),
                         },
                     )
-                application = apply_mutation(
-                    architecture,
-                    diagnosis.mutation,
-                    role_verdicts={row.role_id: row for row in table.rows},
-                    available_tools=task.tools,
-                    generation=generation + 1,
-                    event_sink=sink,
-                )
+                    break
                 architecture = application.architecture
                 sink(
                     "architecture.proposed",

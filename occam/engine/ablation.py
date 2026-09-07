@@ -336,13 +336,25 @@ def verdict(
     ci: ConfidenceInterval,
     measured_noise_rate: float,
     eps: float = DEFAULT_EPS,
+    *,
+    full_pass_rate: float | None = None,
+    variant_pass_rate: float | None = None,
 ) -> Verdict:
     """The verdict rule from `03 §4.3`, in code.
 
     Order matters: a role that does not move the answer beyond the noise floor
-    is a witness whatever its CI happens to say.
+    is a witness whatever its CI happens to say.  When neither paired arm has
+    a passing case, matching broken answers are not causal evidence; callers
+    that have the arm rates classify that result as uncertain instead.
     """
 
+    if (
+        full_pass_rate is not None
+        and variant_pass_rate is not None
+        and full_pass_rate <= 0.0
+        and variant_pass_rate <= 0.0
+    ):
+        return "uncertain"
     if role_divergence <= measured_noise_rate + eps:
         return "witness"
     if ci.lo > 0:
@@ -376,6 +388,8 @@ def build_row(
         hi=round(clamp(ci.hi, -1.0, 1.0), _ROUND),
     )
     role_divergence = divergence(pairs)
+    full_pass_rate = sum(pair.full_passed for pair in pairs) / len(pairs)
+    variant_pass_rate = sum(pair.variant_passed for pair in pairs) / len(pairs)
     return AblationRow(
         role_id=role.id,
         role_name=role.name,
@@ -384,7 +398,14 @@ def build_row(
         influence_ci=rounded_ci,
         divergence=round(clamp(role_divergence), _ROUND),
         cost_share=round(clamp(cost_share), _ROUND),
-        verdict=verdict(role_divergence, ci, measured_noise_rate, eps),
+        verdict=verdict(
+            role_divergence,
+            ci,
+            measured_noise_rate,
+            eps,
+            full_pass_rate=full_pass_rate,
+            variant_pass_rate=variant_pass_rate,
+        ),
         n_cases=len(pairs),
     )
 
