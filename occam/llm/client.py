@@ -42,7 +42,7 @@ class CompletionError(LLMError):
 
 
 class TruncatedCompletionError(CompletionError):
-    """The model spent its output budget on reasoning before visible content."""
+    """The provider exhausted its output budget before returning visible content."""
 
 
 @dataclass(slots=True)
@@ -128,6 +128,8 @@ class RetryPolicy:
 
 
 _TRANSIENT_TEXT = re.compile(r"\b(?:429|500|502|503|504)\b|rate.?limit|temporar", re.I)
+_MAX_TRUNCATION_DOUBLINGS = 3
+_MAX_TRUNCATION_TOKENS = 16_384
 
 
 def _status_code(exc: BaseException) -> int | None:
@@ -451,9 +453,12 @@ class LLMClient:
         provider = self._provider_for(config)
         response: ProviderResponse | None = None
         attempt = 0
-        truncation_retry = False
         started = time.perf_counter()
         current_budget = budget
+        truncation_ceiling = min(
+            _MAX_TRUNCATION_TOKENS,
+            budget * (2**_MAX_TRUNCATION_DOUBLINGS),
+        )
         while response is None:
             attempt += 1
             try:
@@ -479,16 +484,17 @@ class LLMClient:
 
             if (
                 not response.text.strip()
-                and response.reasoning
+                and not response.tool_calls
                 and response.finish_reason == "length"
             ):
-                if truncation_retry:
+                next_budget = min(current_budget * 2, truncation_ceiling)
+                if next_budget <= current_budget:
                     raise TruncatedCompletionError(
-                        "truncated completion: output budget was consumed by reasoning "
-                        f"after retry at max_tokens={current_budget}"
+                        "truncated completion: provider returned empty content with "
+                        f"finish_reason=length at max_tokens={current_budget}; retry ceiling is "
+                        f"{truncation_ceiling}"
                     )
-                truncation_retry = True
-                current_budget *= 2
+                current_budget = next_budget
                 response = None
                 continue
             break

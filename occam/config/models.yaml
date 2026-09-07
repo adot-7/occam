@@ -8,7 +8,8 @@ worker_fast:
   out_per_m: 0.0
   grant_equiv_in_per_m: 0.06
   grant_equiv_out_per_m: 0.40
-  rpm: 60
+  rpm: 12
+  max_tokens: 8192
   supports_json_schema: false
   tool_choice_modes: [auto]
 worker_alt:
