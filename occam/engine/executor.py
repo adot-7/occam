@@ -74,6 +74,20 @@ DEFAULT_MODEL_CONCURRENCY = 4
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _VARIANT_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 _EMPTY_USER_MESSAGE = "Produce your output now."
+ANSWER_PREFIX_LIMIT = 120
+GRADE_ERROR_LIMIT = 256
+_ERROR_PAYLOAD = re.compile(r"(?s)(?:\{.*\}|\[.*\])")
+_ERROR_URL = re.compile(r"(?i)\bhttps?://\S+")
+_ERROR_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(?:api[_-]?key|authorization|password|secret|token)\s*(?:=|:)\s*"
+    r"(?:['\"][^'\"]*['\"]|[^\s,;\]}]+)"
+)
+_ERROR_BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_ERROR_TOKEN = re.compile(
+    r"(?i)\b(?:sk|pk|rk|ghp|gho|ghs|ghu|xoxb|xoxp|AIza|ya29)[-_][A-Za-z0-9_-]+\b"
+)
+_ERROR_OPAQUE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+_REDACTED_ERROR = "[redacted]"
 
 
 class ExecutorError(RuntimeError):
@@ -360,14 +374,49 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _grade(grader: Callable[..., Any] | None, answer: str, expected: Any) -> tuple[bool, dict]:
-    """Normalise whatever the checker returns into ``(passed, sub_results)``."""
+def _safe_grade_error(error: Any, *, category: str = "grader") -> str:
+    """Return a bounded, one-line failure diagnostic without sensitive payloads."""
+
+    if isinstance(error, BaseException):
+        category = type(error).__name__
+    safe_category = re.sub(r"[^A-Za-z0-9_.-]", "_", category)[:64] or "grader"
+    try:
+        message = str(error)
+    except Exception:  # noqa: BLE001 - an error formatter must never raise
+        message = "unprintable checker error"
+    for pattern in (
+        _ERROR_PAYLOAD,
+        _ERROR_URL,
+        _ERROR_SECRET_ASSIGNMENT,
+        _ERROR_BEARER,
+        _ERROR_TOKEN,
+        _ERROR_OPAQUE,
+    ):
+        message = pattern.sub(_REDACTED_ERROR, message)
+    message = " ".join(message.split())
+    if len(message) > GRADE_ERROR_LIMIT - len(safe_category) - 2:
+        message = message[: GRADE_ERROR_LIMIT - len(safe_category) - 5].rstrip() + "..."
+    return f"{safe_category}: {message}" if message else safe_category
+
+
+def _safe_role_error(error: Any) -> str:
+    """Return a role failure using the same safe diagnostic contract as grading."""
+
+    return _safe_grade_error(error, category="role")
+
+
+def _grade(
+    grader: Callable[..., Any] | None,
+    answer: str,
+    expected: Any,
+) -> tuple[bool, dict, str | None]:
+    """Normalise a checker result into ``(passed, sub_results, error)``."""
 
     if grader is None:
-        return (False, {})
+        return (False, {}, None)
     outcome = grader(answer, expected)
     if isinstance(outcome, bool):
-        return (outcome, {})
+        return (outcome, {}, None)
     passed = bool(
         outcome.get("passed", False)
         if isinstance(outcome, Mapping)
@@ -379,7 +428,11 @@ def _grade(grader: Callable[..., Any] | None, answer: str, expected: Any) -> tup
         else getattr(outcome, "sub_results", {})
     )
     sub_results = {str(key): bool(value) for key, value in dict(raw or {}).items()}
-    return (passed, sub_results)
+    raw_error = (
+        outcome.get("error") if isinstance(outcome, Mapping) else getattr(outcome, "error", None)
+    )
+    grade_error = None if raw_error is None else _safe_grade_error(raw_error)
+    return (passed, sub_results, grade_error)
 
 
 def resolve_grader(checker: str) -> Callable[..., Any]:
@@ -742,18 +795,23 @@ class Executor:
 
         final_role = index[architecture.final_role]
         answer = context.get(final_role.output_key, "").strip()
+        role_error = next((trace.error for trace in traces.values() if trace.error), None)
         passed, sub_results = False, {}
-        if grader is not None:
+        grade_error: str | None = None
+        if not role_failed and grader is not None:
             try:
-                passed, sub_results = _grade(grader, answer, case.expected)
-            except Exception:  # noqa: BLE001 - a checker must never crash a run
+                passed, sub_results, grade_error = _grade(grader, answer, case.expected)
+            except Exception as exc:  # noqa: BLE001 - a checker must never crash a run
                 passed, sub_results = False, {}
+                grade_error = _safe_grade_error(exc)
         if role_failed:
             passed = False
         return CaseResult(
             case_id=case.id,
             answer=answer,
             passed=passed,
+            grade_error=grade_error,
+            role_error=role_error,
             sub_results=sub_results,
             tokens_in=sum(trace.tokens_in for trace in traces.values()),
             tokens_out=sum(trace.tokens_out for trace in traces.values()),
@@ -868,7 +926,7 @@ class Executor:
                     role.model, messages, specs or None, use_cache=use_cache
                 )
             except (LLMError, ConfigurationError) as exc:
-                error = f"{type(exc).__name__}: {exc}"
+                error = _safe_role_error(exc)
                 break
             tokens_in += completion.tokens_in
             tokens_out += completion.tokens_out
@@ -905,7 +963,9 @@ class Executor:
                     }
                 )
             if turn == role.max_turns:
-                error = f"max_turns ({role.max_turns}) reached before a final answer"
+                error = _safe_role_error(
+                    f"max_turns ({role.max_turns}) reached before a final answer"
+                )
 
         with nested_trace_guard:
             branches = list(nested_traces)
@@ -1112,6 +1172,9 @@ class Executor:
                 "passed": result.passed,
                 "cost_usd": result.cost_usd,
                 "latency_s": result.latency_s,
+                "answer_prefix": result.answer[:ANSWER_PREFIX_LIMIT],
+                "grade_error": result.grade_error,
+                "role_error": result.role_error,
             },
         )
 

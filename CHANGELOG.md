@@ -59,6 +59,11 @@ All notable changes to Occam are documented here.
 
 ### Fixed
 
+- Execution case failures now retain checker errors and expose bounded answer
+  prefixes plus checker/role reasons in the validated event projection, without
+  copying raw provider traces into events.  Role failures skip grading, and
+  checker and role errors are sanitized and bounded before they reach case
+  results or the event log.
 - Replaced `python_exec`'s arbitrary `exec` path with a fail-closed AST
   capability evaluator that preserves the FX arithmetic/Decimal/JSON surface,
   bounds source, values, steps, timeout, and output, and rejects filesystem,

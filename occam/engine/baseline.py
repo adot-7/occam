@@ -114,7 +114,11 @@ def _aggregate_case(
         sample for sample, answer in zip(samples, answers, strict=True) if answer == winner
     )
     passed, sub_results = chosen.passed, dict(chosen.sub_results)
-    if grader is not None:
+    grade_error = chosen.grade_error
+    role_error = chosen.role_error
+    if role_error:
+        passed = False
+    elif grader is not None:
         try:
             outcome = grader(winner, case.expected)
             if isinstance(outcome, bool):
@@ -137,6 +141,8 @@ def _aggregate_case(
         case_id=case.id,
         answer=chosen.answer,
         passed=passed,
+        grade_error=grade_error,
+        role_error=role_error,
         sub_results=sub_results,
         tokens_in=sum(sample.tokens_in for sample in samples),
         tokens_out=sum(sample.tokens_out for sample in samples),

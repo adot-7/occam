@@ -25,6 +25,7 @@ from occam.llm.client import CompletionError
 from occam.llm.providers import ProviderResponse
 from occam.store.reader import EventReader
 from occam.store.writer import EventWriter
+from occam.tasks.checkers import grade_fx_total
 from occam.tools.registry import ToolRegistry
 from tests.executor_doubles import (
     WORKER,
@@ -486,6 +487,77 @@ def test_llm_failure_fails_one_case_and_the_run_continues(tmp_path):
     assert result.pass_rate == pytest.approx(2 / 3)
 
 
+def test_role_failure_reason_is_persisted_in_the_case_event(tmp_path):
+    def handler(_call):
+        raise CompletionError("provider boom")
+
+    provider = ScriptedProvider(handler)
+    run_dir = tmp_path / "run"
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = Executor(
+            llm=build_client(provider, tmp_path / "cache"),
+            writer=writer,
+            run_dir=run_dir,
+        )
+        result = executor.execute(architecture(role("a")), [case()])
+
+    case_result = result.results[0]
+    assert case_result.passed is False
+    assert case_result.grade_error is None
+    assert case_result.role_error == "CompletionError: provider boom"
+    persisted = json.loads(
+        (run_dir / "generations" / "g000" / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert persisted["role_error"] == case_result.role_error
+    assert persisted["per_role"]["a"]["error"] == case_result.role_error
+    event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
+    assert event.data["role_error"] == "CompletionError: provider boom"
+    assert event.data["grade_error"] is None
+
+
+def test_role_failure_skips_grader_and_preserves_bounded_answer_prefix(tmp_path):
+    grader_calls = 0
+    answer = "final answer " + ("x" * 200)
+
+    def grader(_answer, _expected):
+        nonlocal grader_calls
+        grader_calls += 1
+        raise AssertionError("grader must not run after role failure")
+
+    def handler(call):
+        if call.system == "ROLE: a":
+            raise CompletionError("provider boom")
+        return text_response(answer)
+
+    run_dir = tmp_path / "run"
+    provider = ScriptedProvider(handler)
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = Executor(
+            llm=build_client(provider, tmp_path / "cache"),
+            grader=grader,
+            writer=writer,
+            run_dir=run_dir,
+        )
+        result = executor.execute(
+            architecture(role("a"), role("b"), final="b"),
+            [case()],
+        )
+
+    assert grader_calls == 0
+    case_result = result.results[0]
+    assert case_result.answer == answer
+    assert case_result.passed is False
+    assert case_result.grade_error is None
+    assert case_result.role_error == "CompletionError: provider boom"
+    event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
+    assert event.data["answer_prefix"] == answer[:120]
+    assert len(event.data["answer_prefix"]) == 120
+    assert event.data["grade_error"] is None
+    assert event.data["role_error"] == "CompletionError: provider boom"
+
+
 def test_a_grader_that_raises_does_not_crash_the_run(tmp_path):
     def grader(_answer, _expected):
         raise RuntimeError("checker bug")
@@ -494,6 +566,168 @@ def test_a_grader_that_raises_does_not_crash_the_run(tmp_path):
     executor = Executor(llm=build_client(provider, tmp_path / "cache"), grader=grader)
     result = executor.execute(architecture(role("a")), [case()])
     assert result.results[0].passed is False
+
+
+def test_grader_exception_reason_is_persisted_without_raw_trace_payload(tmp_path):
+    def grader(_answer, _expected):
+        raise RuntimeError("checker bug")
+
+    run_dir = tmp_path / "run"
+    provider = ScriptedProvider(lambda _call: text_response("ok"))
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = Executor(
+            llm=build_client(provider, tmp_path / "cache"),
+            grader=grader,
+            writer=writer,
+            run_dir=run_dir,
+        )
+        result = executor.execute(architecture(role("a")), [case()])
+
+    case_result = result.results[0]
+    assert case_result.passed is False
+    assert case_result.grade_error == "RuntimeError: checker bug"
+    persisted = json.loads(
+        (run_dir / "generations" / "g000" / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert persisted["grade_error"] == case_result.grade_error
+    event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
+    assert event.data["answer_prefix"] == "ok"
+    assert event.data["grade_error"] == case_result.grade_error
+    assert event.data["role_error"] is None
+    assert "per_role" not in event.data
+    assert "tool_calls" not in event.data
+
+
+def test_hostile_checker_exception_is_sanitized_and_bounded(tmp_path):
+    hostile = "checker failed sk-live-secret payload={'token': 'sk-live-secret'} " + ("x" * 400)
+
+    def grader(_answer, _expected):
+        raise RuntimeError(hostile)
+
+    run_dir = tmp_path / "run"
+    provider = ScriptedProvider(lambda _call: text_response("ok"))
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = Executor(
+            llm=build_client(provider, tmp_path / "cache"),
+            grader=grader,
+            writer=writer,
+            run_dir=run_dir,
+        )
+        result = executor.execute(architecture(role("a")), [case()])
+
+    grade_error = result.results[0].grade_error
+    assert grade_error is not None
+    assert grade_error.startswith("RuntimeError: checker failed")
+    assert "sk-live-secret" not in grade_error
+    assert "{'token':" not in grade_error
+    assert len(grade_error) <= 256
+    persisted = json.loads(
+        (run_dir / "generations" / "g000" / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
+    assert persisted["grade_error"] == grade_error
+    assert event.data["grade_error"] == grade_error
+    assert "sk-live-secret" not in json.dumps(event.data)
+
+
+def test_hostile_role_exception_is_sanitized_in_result_and_events(tmp_path):
+    hostile = (
+        "provider failed sk-live-secret Bearer sk-live-bearer "
+        "https://provider.example/v1 payload={'token': 'sk-live-secret'} " + ("x" * 400)
+    )
+    grader_calls = 0
+
+    def grader(_answer, _expected):
+        nonlocal grader_calls
+        grader_calls += 1
+        raise AssertionError("grader must not run after role failure")
+
+    def handler(_call):
+        raise CompletionError(hostile)
+
+    run_dir = tmp_path / "run"
+    provider = ScriptedProvider(handler)
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = Executor(
+            llm=build_client(provider, tmp_path / "cache"),
+            grader=grader,
+            writer=writer,
+            run_dir=run_dir,
+        )
+        result = executor.execute(architecture(role("a")), [case()])
+
+    assert grader_calls == 0
+    case_result = result.results[0]
+    role_error = case_result.role_error
+    assert role_error is not None
+    assert role_error.startswith("CompletionError: provider failed")
+    assert len(role_error) <= 256
+    for secret in (
+        "sk-live-secret",
+        "sk-live-bearer",
+        "Bearer sk-live-bearer",
+        "https://provider.example/v1",
+        "{'token': 'sk-live-secret'}",
+    ):
+        assert secret not in role_error
+    assert case_result.grade_error is None
+    assert case_result.per_role["a"].error == role_error
+
+    persisted = json.loads(
+        (run_dir / "generations" / "g000" / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
+    assert persisted["role_error"] == role_error
+    assert persisted["per_role"]["a"]["error"] == role_error
+    assert event.data["role_error"] == role_error
+    assert event.data["grade_error"] is None
+    encoded = json.dumps(persisted) + json.dumps(event.data)
+    for secret in (
+        "sk-live-secret",
+        "sk-live-bearer",
+        "Bearer sk-live-bearer",
+        "https://provider.example/v1",
+        "{'token': 'sk-live-secret'}",
+    ):
+        assert secret not in encoded
+
+
+def test_malformed_answer_reason_and_bounded_prefix_are_persisted(tmp_path):
+    answer = "not-json " + ("x" * 200)
+    run_dir = tmp_path / "run"
+    provider = ScriptedProvider(lambda _call: text_response(answer))
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = Executor(
+            llm=build_client(provider, tmp_path / "cache"),
+            grader=grade_fx_total,
+            writer=writer,
+            run_dir=run_dir,
+        )
+        result = executor.execute(
+            architecture(role("a")),
+            [case(expected={"total_inr": 1, "per_invoice": {}})],
+        )
+
+    case_result = result.results[0]
+    assert case_result.passed is False
+    assert case_result.grade_error
+    persisted = json.loads(
+        (run_dir / "generations" / "g000" / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert persisted["grade_error"] == case_result.grade_error
+    event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
+    assert event.data["grade_error"] == case_result.grade_error
+    assert event.data["answer_prefix"] == answer[:120]
+    assert len(event.data["answer_prefix"]) == 120
+    assert answer not in json.dumps(event.data)
 
 
 def test_execute_refuses_to_nest_in_a_running_loop(tmp_path):
@@ -586,6 +820,9 @@ def test_events_are_emitted_in_case_order_and_validate(tmp_path):
     assert [event.seq for event in events] == [0, 1, 2, 3, 4]
     case_events = [event for event in events if event.type == "execution.case"]
     assert [event.data["case_id"] for event in case_events] == ["c0", "c1", "c2"]
+    assert all(event.data["answer_prefix"] == "ok" for event in case_events)
+    assert all(event.data["grade_error"] is None for event in case_events)
+    assert all(event.data["role_error"] is None for event in case_events)
     assert events[0].data == {"generation": 2, "variant": "full", "n_cases": 3}
     completed = events[-1].data
     assert completed["pass_rate"] == 1.0

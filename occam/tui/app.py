@@ -90,8 +90,9 @@ class CaseInspector(ModalScreen[None]):
     The event schema intentionally keeps ``execution.case`` small. When a
     richer result record is present in that projection, this screen expands the
     per-role and raw tool fields. For summary-only fixture events it says so
-    explicitly while retaining the highlighted requested-date → rate-date row;
-    it never manufactures a response that was not recorded.
+    explicitly while retaining the bounded answer/error diagnostics and
+    highlighted requested-date → rate-date row; it never manufactures a
+    response that was not recorded.
     """
 
     BINDINGS = [

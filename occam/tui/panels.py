@@ -599,10 +599,10 @@ class CasesPanel(Panel):
 class CaseEvidencePanel(Panel):
     """Selected-case trace summary below the case row.
 
-    The compact ``execution.case`` event deliberately carries verdict, cost,
-    and latency only.  This panel keeps the trace affordance visible without
-    pretending those omitted fields are available in a fixture; richer
-    projections are rendered when a producer supplies them.
+    The compact ``execution.case`` event carries verdict, cost, latency, and
+    bounded answer/error diagnostics. This panel keeps the trace affordance
+    visible without pretending omitted per-role fields are available in a
+    fixture; richer projections are rendered when a producer supplies them.
     """
 
     title_text = "CASE TRACE"
