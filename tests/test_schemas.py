@@ -107,6 +107,10 @@ def test_every_fixture_event_validates_against_event_schema() -> None:
                 data = payload["data"]
                 assert {"answer_prefix", "grade_error", "role_error"} <= data.keys()
                 assert len(data["answer_prefix"]) <= 120
+                if data["grade_error"] is not None:
+                    assert len(data["grade_error"]) <= 256
+                if data["role_error"] is not None:
+                    assert len(data["role_error"]) <= 256
     assert run1_types is not None
     assert "log" in run1_types
 
@@ -480,6 +484,7 @@ def test_new_strict_models_capture_lessons_and_invoice_sub_results() -> None:
     result = CaseResult(case_id="fxa_001", passed=False, sub_results={"INV-1": False})
     assert result.sub_results == {"INV-1": False}
     assert result.grade_error is None
+    assert result.role_error is None
     with pytest.raises(ValidationError):
         CaseResult.model_validate({**result.model_dump(), "unexpected": True})
 
@@ -502,8 +507,17 @@ def test_execution_case_diagnostics_are_required_and_bounded() -> None:
     with pytest.raises(ValueError, match="events.schema.json"):
         validate_event(too_long_grade_error)
 
+    too_long_role_error = event.model_dump(mode="json")
+    too_long_role_error["data"]["role_error"] = "x" * 257
+    with pytest.raises(ValueError, match="events.schema.json"):
+        validate_event(too_long_role_error)
+
     with pytest.raises(ValidationError):
         CaseResult(case_id="fxa_001", passed=False, grade_error="x" * 257)
+    with pytest.raises(ValidationError):
+        CaseResult(case_id="fxa_001", passed=False, role_error="x" * 257)
+    with pytest.raises(ValidationError):
+        RoleTrace(error="x" * 257)
 
 
 def test_reducer_retains_execution_case_diagnostics() -> None:

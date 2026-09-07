@@ -73,6 +73,7 @@ class CaseResult(BaseModel):
     answer: str                 # normalised final answer
     passed: bool
     grade_error: str | None      # sanitized checker failure, ≤256 chars
+    role_error: str | None       # sanitized role failure, ≤256 chars
     sub_results: dict[str, bool] = {}   # e.g. per-invoice correctness; feeds diagnosis
     tokens_in: int; tokens_out: int
     cost_usd: float
@@ -99,7 +100,7 @@ Every line: `{"ts": ISO8601, "run_id": str, "seq": int, "type": str, "data": {..
 | `reliability.completed` | `generation`, `method:"pass3"`, `reliable_cases`, `n_cases`, `reliability_pass3` |
 | `architecture.proposed` | `architecture` (full `Architecture`), `generation` |
 | `execution.started` | `generation`, `variant`, `n_cases` |
-| `execution.case` | `generation`, `variant`, `case_id`, `passed`, `cost_usd`, `latency_s`, `answer_prefix` (≤120 chars), `grade_error` (sanitized, ≤256 chars), `role_error` |
+| `execution.case` | `generation`, `variant`, `case_id`, `passed`, `cost_usd`, `latency_s`, `answer_prefix` (≤120 chars), `grade_error` (sanitized, ≤256 chars), `role_error` (sanitized, ≤256 chars) |
 | `execution.completed` | `generation`, `variant`, `pass_rate`, `cost_usd`, `latency_s_mean`, `tokens`, `ci{lo,hi}` |
 | `ablation.started` | `generation`, `roles: [role_id]`, `n_cases`, `case_ids: [case_id]`, `noise_rate` |
 | `ablation.role` | `generation`, `role_id`, `influence`, `influence_ci{lo,hi}`, `divergence`, `cost_share`, `verdict: "load_bearing"|"witness"|"harmful"|"uncertain"` |

@@ -375,7 +375,7 @@ def _now_iso() -> str:
 
 
 def _safe_grade_error(error: Any, *, category: str = "grader") -> str:
-    """Return a bounded, one-line checker failure without sensitive payloads."""
+    """Return a bounded, one-line failure diagnostic without sensitive payloads."""
 
     if isinstance(error, BaseException):
         category = type(error).__name__
@@ -397,6 +397,12 @@ def _safe_grade_error(error: Any, *, category: str = "grader") -> str:
     if len(message) > GRADE_ERROR_LIMIT - len(safe_category) - 2:
         message = message[: GRADE_ERROR_LIMIT - len(safe_category) - 5].rstrip() + "..."
     return f"{safe_category}: {message}" if message else safe_category
+
+
+def _safe_role_error(error: Any) -> str:
+    """Return a role failure using the same safe diagnostic contract as grading."""
+
+    return _safe_grade_error(error, category="role")
 
 
 def _grade(
@@ -789,6 +795,7 @@ class Executor:
 
         final_role = index[architecture.final_role]
         answer = context.get(final_role.output_key, "").strip()
+        role_error = next((trace.error for trace in traces.values() if trace.error), None)
         passed, sub_results = False, {}
         grade_error: str | None = None
         if not role_failed and grader is not None:
@@ -804,6 +811,7 @@ class Executor:
             answer=answer,
             passed=passed,
             grade_error=grade_error,
+            role_error=role_error,
             sub_results=sub_results,
             tokens_in=sum(trace.tokens_in for trace in traces.values()),
             tokens_out=sum(trace.tokens_out for trace in traces.values()),
@@ -918,7 +926,7 @@ class Executor:
                     role.model, messages, specs or None, use_cache=use_cache
                 )
             except (LLMError, ConfigurationError) as exc:
-                error = f"{type(exc).__name__}: {exc}"
+                error = _safe_role_error(exc)
                 break
             tokens_in += completion.tokens_in
             tokens_out += completion.tokens_out
@@ -955,7 +963,9 @@ class Executor:
                     }
                 )
             if turn == role.max_turns:
-                error = f"max_turns ({role.max_turns}) reached before a final answer"
+                error = _safe_role_error(
+                    f"max_turns ({role.max_turns}) reached before a final answer"
+                )
 
         with nested_trace_guard:
             branches = list(nested_traces)
@@ -1164,10 +1174,7 @@ class Executor:
                 "latency_s": result.latency_s,
                 "answer_prefix": result.answer[:ANSWER_PREFIX_LIMIT],
                 "grade_error": result.grade_error,
-                "role_error": next(
-                    (trace.error for trace in result.per_role.values() if trace.error),
-                    None,
-                ),
+                "role_error": result.role_error,
             },
         )
 

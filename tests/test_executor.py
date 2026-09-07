@@ -504,6 +504,14 @@ def test_role_failure_reason_is_persisted_in_the_case_event(tmp_path):
     case_result = result.results[0]
     assert case_result.passed is False
     assert case_result.grade_error is None
+    assert case_result.role_error == "CompletionError: provider boom"
+    persisted = json.loads(
+        (run_dir / "generations" / "g000" / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert persisted["role_error"] == case_result.role_error
+    assert persisted["per_role"]["a"]["error"] == case_result.role_error
     event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
     assert event.data["role_error"] == "CompletionError: provider boom"
     assert event.data["grade_error"] is None
@@ -542,6 +550,7 @@ def test_role_failure_skips_grader_and_preserves_bounded_answer_prefix(tmp_path)
     assert case_result.answer == answer
     assert case_result.passed is False
     assert case_result.grade_error is None
+    assert case_result.role_error == "CompletionError: provider boom"
     event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
     assert event.data["answer_prefix"] == answer[:120]
     assert len(event.data["answer_prefix"]) == 120
@@ -623,6 +632,70 @@ def test_hostile_checker_exception_is_sanitized_and_bounded(tmp_path):
     assert persisted["grade_error"] == grade_error
     assert event.data["grade_error"] == grade_error
     assert "sk-live-secret" not in json.dumps(event.data)
+
+
+def test_hostile_role_exception_is_sanitized_in_result_and_events(tmp_path):
+    hostile = (
+        "provider failed sk-live-secret Bearer sk-live-bearer "
+        "https://provider.example/v1 payload={'token': 'sk-live-secret'} " + ("x" * 400)
+    )
+    grader_calls = 0
+
+    def grader(_answer, _expected):
+        nonlocal grader_calls
+        grader_calls += 1
+        raise AssertionError("grader must not run after role failure")
+
+    def handler(_call):
+        raise CompletionError(hostile)
+
+    run_dir = tmp_path / "run"
+    provider = ScriptedProvider(handler)
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = Executor(
+            llm=build_client(provider, tmp_path / "cache"),
+            grader=grader,
+            writer=writer,
+            run_dir=run_dir,
+        )
+        result = executor.execute(architecture(role("a")), [case()])
+
+    assert grader_calls == 0
+    case_result = result.results[0]
+    role_error = case_result.role_error
+    assert role_error is not None
+    assert role_error.startswith("CompletionError: provider failed")
+    assert len(role_error) <= 256
+    for secret in (
+        "sk-live-secret",
+        "sk-live-bearer",
+        "Bearer sk-live-bearer",
+        "https://provider.example/v1",
+        "{'token': 'sk-live-secret'}",
+    ):
+        assert secret not in role_error
+    assert case_result.grade_error is None
+    assert case_result.per_role["a"].error == role_error
+
+    persisted = json.loads(
+        (run_dir / "generations" / "g000" / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    event = next(event for event in EventReader(run_dir) if event.type == "execution.case")
+    assert persisted["role_error"] == role_error
+    assert persisted["per_role"]["a"]["error"] == role_error
+    assert event.data["role_error"] == role_error
+    assert event.data["grade_error"] is None
+    encoded = json.dumps(persisted) + json.dumps(event.data)
+    for secret in (
+        "sk-live-secret",
+        "sk-live-bearer",
+        "Bearer sk-live-bearer",
+        "https://provider.example/v1",
+        "{'token': 'sk-live-secret'}",
+    ):
+        assert secret not in encoded
 
 
 def test_malformed_answer_reason_and_bounded_prefix_are_persisted(tmp_path):
