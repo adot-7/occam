@@ -362,7 +362,9 @@ class Architect:
             "task below. Return exactly one JSON object matching the supplied Architecture "
             "schema and no prose. Use 3 to 6 roles, tag every role with a justification, "
             "bind only manifest tools, and prefer deterministic control. Put reusable task "
-            "instructions in the system_prompt of the roles that need them."
+            "instructions in the system_prompt of the roles that need them. For roles where "
+            "tool calls are expected, set max_turns >= 16 so the role has room to finish its "
+            "tool work; keep no-tool roles appropriately bounded."
         )
         sections = [
             "TASK AND TOOL MANIFEST",

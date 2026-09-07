@@ -562,6 +562,22 @@ def test_role_trace_carries_the_displayed_cost_and_its_label() -> None:
         RoleTrace.model_validate({"unexpected": True})
 
 
+def test_truncation_is_explicit_on_role_trace_and_case_result() -> None:
+    trace = RoleTrace(output="partial", truncated=True)
+    result = CaseResult(
+        case_id="fxa_001",
+        answer="partial",
+        passed=False,
+        truncated=True,
+        per_role={"r_worker": trace},
+    )
+
+    assert trace.truncated is True
+    assert result.truncated is True
+    assert RoleTrace().truncated is False
+    assert CaseResult(case_id="fxa_001", passed=False).truncated is False
+
+
 def test_task_manifest_shape_is_schema_compatible() -> None:
     task = {
         "name": "fx_recon_a",

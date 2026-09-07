@@ -181,6 +181,8 @@ class RoleTrace(ContractModel):
     from ``CostBreakdown.cost_usd``, the nominal bill from
     ``CostBreakdown.billed_cost_usd``, and the label verbatim from
     ``CostBreakdown.label`` so the TUI can say which one it is showing.
+    ``truncated`` marks a soft tool-turn budget exhaustion; it is not a role
+    error and the preserved output remains gradeable.
     """
 
     tokens_in: int = Field(default=0, ge=0)
@@ -192,11 +194,12 @@ class RoleTrace(ContractModel):
     output: str = ""
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     cached: bool = False
+    truncated: bool = False
     error: str | None = Field(default=None, max_length=256)
 
 
 class CaseResult(ContractModel):
-    """The final result and accounting for one case."""
+    """The final result and accounting for one case, including truncation state."""
 
     case_id: str
     answer: str = ""
@@ -208,6 +211,7 @@ class CaseResult(ContractModel):
     tokens_out: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0.0)
     latency_s: float = Field(default=0.0, ge=0.0)
+    truncated: bool = False
     per_role: dict[str, RoleTrace] = Field(default_factory=dict)
 
 

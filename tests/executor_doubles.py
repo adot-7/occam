@@ -156,6 +156,26 @@ class ScriptedProvider:
         self.max_in_flight = 0
 
 
+class NeverEndingToolProvider(ScriptedProvider):
+    """Keep requesting one tool, omitting text after the first turn."""
+
+    def __init__(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        first_text: str,
+    ) -> None:
+        self.tool_name = tool_name
+        self.arguments = dict(arguments)
+        self.first_text = first_text
+        super().__init__(self._respond)
+
+    def _respond(self, _call: ProviderCall) -> ProviderResponse:
+        text = self.first_text if self.count == 1 else ""
+        return tool_call_response([(self.tool_name, self.arguments)], text=text)
+
+
 def build_client(
     provider: Any,
     cache_dir: Any,

@@ -21,7 +21,9 @@ prompt:
 * Cost is accounted **per role**; ablation's ``cost_share`` reads the displayed
   equivalent, while each trace also keeps nominal billed cost and its label.
 * Any LLM failure that survives the client's retries fails that one case with
-  the error recorded in its trace.  A run is never crashed by a single case.
+  the error recorded in its trace.  A role that exhausts its tool-call turn
+  budget is instead returned as a truncated trace so the grader can judge its
+  best available output.  A run is never crashed by a single case.
 """
 
 from __future__ import annotations
@@ -817,6 +819,7 @@ class Executor:
             tokens_out=sum(trace.tokens_out for trace in traces.values()),
             cost_usd=sum(trace.cost_usd for trace in traces.values()),
             latency_s=time.perf_counter() - started,
+            truncated=any(trace.truncated for trace in traces.values()),
             per_role=traces,
         )
 
@@ -918,6 +921,7 @@ class Executor:
         cost_labels: list[str] = []
         cached = True
         output = ""
+        truncated = False
         error: str | None = None
 
         for turn in range(1, role.max_turns + 1):
@@ -936,9 +940,14 @@ class Executor:
             cached = cached and completion.cached
             text = (completion.text or "").strip()
             if not completion.tool_calls:
-                output = text
+                if text:
+                    output = text
                 break
-            output = text
+            # Tool-bearing models often omit visible text on intermediate turns.
+            # Keep the most recent non-empty assistant text so a bounded role
+            # still hands the grader its best available answer.
+            if text:
+                output = text
             messages.append(
                 {
                     "role": "assistant",
@@ -963,9 +972,7 @@ class Executor:
                     }
                 )
             if turn == role.max_turns:
-                error = _safe_role_error(
-                    f"max_turns ({role.max_turns}) reached before a final answer"
-                )
+                truncated = True
 
         with nested_trace_guard:
             branches = list(nested_traces)
@@ -987,6 +994,7 @@ class Executor:
             output=output,
             tool_calls=[*tool_calls, *branch_tool_calls],
             cached=cached and branch_cached and error is None,
+            truncated=truncated or any(branch.truncated for branch in branches),
             error=error,
         )
 

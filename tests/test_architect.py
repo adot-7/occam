@@ -159,6 +159,15 @@ def test_architect_with_zero_lessons_keeps_plain_tool_context(tmp_path: Path) ->
     assert architect.last_context.domain_rules == []
 
 
+def test_architect_guides_tool_roles_to_allow_enough_turns(tmp_path: Path) -> None:
+    llm = StubArchitectLLM()
+    Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    system_prompt = llm.calls[0]["messages"][0]["content"]
+    assert "tool calls are expected" in system_prompt
+    assert "max_turns >= 16" in system_prompt
+
+
 def test_architect_emits_schema_compatible_event(tmp_path: Path) -> None:
     memory = tmp_path / "memory" / "fx_recon"
     writer_dir = tmp_path / "run"
