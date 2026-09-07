@@ -140,7 +140,27 @@ class RunEngine:
         self.registry = registry
         self.grader = grader
 
-    def run(self) -> RunOutcome:
+    def run(self, *, max_generations: int | None = None) -> RunOutcome:
+        """Execute the run, optionally overriding its generation limit.
+
+        A caller-supplied limit is useful for bounded integrations that need
+        to observe every requested generation.  The configured path retains
+        its early-success stop so normal runs do not spend another generation
+        after reaching a perfect pass rate.
+        """
+
+        if max_generations is None:
+            generation_limit = self.config.max_generations
+            explicit_generation_limit = False
+        else:
+            if (
+                isinstance(max_generations, bool)
+                or not isinstance(max_generations, int)
+                or max_generations < 1
+            ):
+                raise ValueError("max_generations must be at least 1")
+            generation_limit = max_generations
+            explicit_generation_limit = True
         task = self.pack.task
         cases = self.pack.select(self.config.n_cases)
         run_dir = _safe_run_dir(self.config)
@@ -164,7 +184,7 @@ class RunEngine:
         config_event = {
             "models": _public_models(getattr(llm, "configs", None) or load_model_configs()),
             "budget_usd": None,
-            "max_generations": self.config.max_generations,
+            "max_generations": generation_limit,
             "cases": len(cases),
             "ablate_cases": min(self.config.ablate_cases, len(cases)),
             "pass3": self.config.pass3,
@@ -220,7 +240,7 @@ class RunEngine:
                 lessons=lessons,
                 memory=memory_path,
             )
-            for generation in range(self.config.max_generations):
+            for generation in range(generation_limit):
                 architectures[generation] = architecture
                 full = executor.run_variant(
                     architecture,
@@ -295,8 +315,8 @@ class RunEngine:
                 }
                 history.append(history_entry)
                 final = (
-                    generation + 1 >= self.config.max_generations
-                    or full.pass_rate >= 1.0
+                    generation + 1 >= generation_limit
+                    or (full.pass_rate >= 1.0 and not explicit_generation_limit)
                     or non_improving >= 2
                 )
 
@@ -337,6 +357,13 @@ class RunEngine:
                     if pass3_result is not None:
                         sink("reliability.completed", pass3_result.event_data(best_generation))
                     break
+
+                if full.pass_rate >= 1.0:
+                    # An explicitly bounded gate may request additional
+                    # generation evidence even after a perfect full run.  No
+                    # diagnosis is needed when there are no failed cases, so
+                    # retain the current architecture for the next pass.
+                    continue
 
                 diagnosis = diagnose(
                     task,
