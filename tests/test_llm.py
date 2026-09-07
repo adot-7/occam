@@ -24,6 +24,7 @@ from occam.llm import (
     load_model_configs,
 )
 from occam.llm.config import ConfigurationError, MissingCredentialsError, interpolate_env
+from occam.store.schema import validate_event
 
 
 def _config(
@@ -67,9 +68,10 @@ class FakeProvider:
 
 
 class StatusError(RuntimeError):
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, headers: dict[str, str] | None = None) -> None:
         super().__init__(str(status_code))
         self.status_code = status_code
+        self.response = SimpleNamespace(headers=headers or {})
 
 
 def test_v3_model_table_has_exact_lanes_and_lazy_credentials() -> None:
@@ -267,6 +269,77 @@ def test_client_retries_only_bounded_transient_failures(tmp_path: Path) -> None:
     assert result.text == "ok"
     assert delays == [0.1, 0.2]
     assert len(provider.calls) == 3
+
+
+def test_structured_429_retries_honor_bounded_retry_after_and_emit_safe_logs(
+    tmp_path: Path,
+) -> None:
+    events: list[tuple[str, dict[str, Any]]] = []
+    provider = FakeProvider(
+        [
+            StatusError(
+                429,
+                {"Retry-After": "999", "X-Provider-Secret": "provider-secret"},
+            ),
+            StatusError(
+                429,
+                {"retry-after": "999", "X-Provider-Secret": "provider-secret"},
+            ),
+            StatusError(429, {"Retry-After": "999"}),
+            StatusError(429, {"Retry-After": "999"}),
+            ProviderResponse(text="ok", tokens_in=1, tokens_out=1),
+        ]
+    )
+    delays: list[float] = []
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+        sleeper=delays.append,
+        event_sink=lambda event_type, data: events.append((event_type, dict(data))),
+    )
+
+    result = client.complete("worker_fast", [{"role": "user", "content": "retry"}])
+
+    assert result.text == "ok"
+    assert len(provider.calls) == 5
+    assert delays == [30.0] * 4
+    logs = [data for event_type, data in events if event_type == "log"]
+    assert len(logs) == 4
+    assert all(data["level"] == "warning" for data in logs)
+    assert all("HTTP 429" in str(data["message"]) for data in logs)
+    assert "provider-secret" not in json.dumps(events)
+    for seq, (event_type, data) in enumerate(events):
+        validate_event(
+            {
+                "ts": "2026-09-05T00:00:00Z",
+                "run_id": "retry-test",
+                "seq": seq,
+                "type": event_type,
+                "data": data,
+            }
+        )
+
+
+def test_repeated_terminal_failures_are_counted_and_not_cached(tmp_path: Path) -> None:
+    provider = FakeProvider([StatusError(503)] * 4)
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+        retry_policy=RetryPolicy(max_attempts=2, base_delay_s=0, max_delay_s=30),
+        sleeper=lambda _seconds: None,
+    )
+    messages = [{"role": "user", "content": "down"}]
+
+    for _ in range(2):
+        with pytest.raises(CompletionError, match="2 attempt"):
+            client.complete("worker_fast", messages)
+
+    assert client.failed_completions == 2
+    assert client.failed_completion_count == 2
+    assert len(provider.calls) == 4
+    assert list(tmp_path.glob("*.json")) == []
 
 
 def test_client_surfaces_non_transient_and_exhausted_failures(tmp_path: Path) -> None:

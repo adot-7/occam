@@ -189,6 +189,8 @@ def _assert_event_contracts(outcome: Any, *, expected_pass_rate: float) -> None:
     assert [event.data["generation"] for event in full_completed] == [0, 1, 2]
     assert [event.data["pass_rate"] for event in full_completed] == [expected_pass_rate] * 3
     assert sum(event.type == "run.completed" for event in events) == 1
+    completed = next(event for event in events if event.type == "run.completed")
+    assert completed.data["summary"]["failed_completions"] == 0
 
     first_state = reduce(events)
     second_state = reduce(events)
@@ -196,6 +198,7 @@ def _assert_event_contracts(outcome: Any, *, expected_pass_rate: float) -> None:
     assert first_bytes == state_json_bytes(second_state)
     validate_state(json.loads(first_bytes))
     assert first_state.completed is True
+    assert first_state.summary["failed_completions"] == 0
     assert first_state.last_seq == len(events) - 1
     assert (outcome.run_dir / "state.json").read_bytes() == first_bytes
 

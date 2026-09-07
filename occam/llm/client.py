@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass, replace
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -111,9 +114,9 @@ class Completion:
 class RetryPolicy:
     """Bounded exponential backoff for transient provider failures."""
 
-    max_attempts: int = 3
+    max_attempts: int = 6
     base_delay_s: float = 0.5
-    max_delay_s: float = 8.0
+    max_delay_s: float = 30.0
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
@@ -144,6 +147,77 @@ def _status_code(exc: BaseException) -> int | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _header_value(source: Any, name: str) -> Any:
+    """Read one HTTP header from mapping-like provider metadata."""
+
+    if isinstance(source, Mapping):
+        for key, value in source.items():
+            if str(key).lower() == name.lower():
+                return value
+        return None
+    getter = getattr(source, "get", None)
+    if not callable(getter):
+        return None
+    for candidate in (name, name.lower()):
+        try:
+            value = getter(candidate)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        if value is not None:
+            return value
+    return None
+
+
+def _retry_after_header(exc: BaseException) -> Any:
+    """Extract ``Retry-After`` without inspecting or logging provider bodies."""
+
+    response = getattr(exc, "response", None)
+    response_headers = getattr(response, "headers", None)
+    if response_headers is None and isinstance(response, Mapping):
+        response_headers = response.get("headers")
+    for source in (getattr(exc, "headers", None), response_headers):
+        value = _header_value(source, "Retry-After")
+        if value is not None:
+            return value
+    return None
+
+
+def _retry_after_delay(exc: BaseException) -> float | None:
+    """Parse a safe Retry-After delay, returning ``None`` for invalid values."""
+
+    raw = _retry_after_header(exc)
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+
+    if isinstance(raw, (int, float)):
+        seconds = float(raw)
+    elif isinstance(raw, str):
+        value = raw.strip()
+        if not value:
+            return None
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                timestamp = parsedate_to_datetime(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                timestamp = timestamp.replace(tzinfo=UTC)
+            seconds = (timestamp - datetime.now(UTC)).total_seconds()
+    else:
+        return None
+
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
 
 
 def _retryable(exc: BaseException) -> bool:
@@ -254,6 +328,7 @@ class LLMClient:
         retry_policy: RetryPolicy | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        event_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
     ) -> None:
         raw_configs = load_model_configs(config_path) if configs is None else configs
         self.configs = {}
@@ -271,10 +346,12 @@ class LLMClient:
         self.rate_limiter = rate_limiter or PerModelRateLimiter(clock=clock, sleeper=sleeper)
         self.retry_policy = retry_policy or RetryPolicy()
         self._sleeper = sleeper
+        self._event_sink = event_sink
         self._provider_instances: dict[str, Provider] = {}
         self._stats_lock = threading.Lock()
         self._provider_call_count = 0
         self._cache_hit_count = 0
+        self._failed_completions = 0
         self._displayed_cost_usd = 0.0
         self._billed_cost_usd = 0.0
 
@@ -291,6 +368,54 @@ class LLMClient:
 
         with self._stats_lock:
             return self._cache_hit_count
+
+    @property
+    def failed_completions(self) -> int:
+        """Number of completion requests that ended without a result."""
+
+        with self._stats_lock:
+            return self._failed_completions
+
+    @property
+    def failed_completion_count(self) -> int:
+        """Compatibility alias for the failed-completion metric."""
+
+        return self.failed_completions
+
+    def set_event_sink(
+        self, event_sink: Callable[[str, Mapping[str, Any]], None] | None
+    ) -> Callable[[str, Mapping[str, Any]], None] | None:
+        """Attach a run event sink and return the previously attached sink."""
+
+        with self._stats_lock:
+            previous = self._event_sink
+            self._event_sink = event_sink
+        return previous
+
+    def _record_failed_completion(self) -> None:
+        with self._stats_lock:
+            self._failed_completions += 1
+
+    def _emit_retry_event(self, failed_attempt: int, delay: float, exc: BaseException) -> None:
+        """Publish a bounded retry diagnostic without provider error contents."""
+
+        with self._stats_lock:
+            event_sink = self._event_sink
+        if event_sink is None:
+            return
+        status = _status_code(exc)
+        reason = f"HTTP {status}" if status is not None else "transient provider failure"
+        event_sink(
+            "log",
+            {
+                "level": "warning",
+                "message": (
+                    f"Retrying completion after {reason}; attempt "
+                    f"{failed_attempt + 1}/{self.retry_policy.max_attempts}; "
+                    f"delay={delay:.3f}s"
+                ),
+            },
+        )
 
     @property
     def displayed_cost_usd(self) -> float:
@@ -410,6 +535,37 @@ class LLMClient:
         use_cache: bool,
         span_object: Any | None,
     ) -> Completion:
+        """Run the cache/provider path, counting one terminal failure if it raises."""
+
+        try:
+            return self._complete_impl_once(
+                config,
+                model_key,
+                messages,
+                tools,
+                response_schema,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                use_cache=use_cache,
+                span_object=span_object,
+            )
+        except Exception:
+            self._record_failed_completion()
+            raise
+
+    def _complete_impl_once(
+        self,
+        config: ModelConfig,
+        model_key: str,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Any] | None,
+        response_schema: Mapping[str, Any] | None,
+        *,
+        max_tokens: int | None,
+        temperature: float,
+        use_cache: bool,
+        span_object: Any | None,
+    ) -> Completion:
         """Run the cache/provider path, optionally updating one completion span."""
 
         budget = config.max_tokens if max_tokens is None else max(1024, int(max_tokens))
@@ -479,7 +635,12 @@ class LLMClient:
                     raise CompletionError(
                         f"LLM completion failed after {attempt} attempt(s): {type(exc).__name__}"
                     ) from exc
-                self._sleeper(self.retry_policy.delay(attempt))
+                delay = self.retry_policy.delay(attempt)
+                retry_after = _retry_after_delay(exc)
+                if retry_after is not None:
+                    delay = min(self.retry_policy.max_delay_s, retry_after)
+                self._emit_retry_event(attempt, delay, exc)
+                self._sleeper(delay)
                 continue
 
             if (

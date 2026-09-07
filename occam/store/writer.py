@@ -10,6 +10,7 @@ import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 from typing import IO, Any
 
 from occam.core.models import Event
@@ -64,6 +65,7 @@ class EventWriter:
             raise ValueError("run_id does not match the existing event log")
         self.lock_path = self.run_dir / "events.jsonl.lock"
         self._lock_handle = self.lock_path.open("a+", encoding="utf-8")
+        self._thread_lock = RLock()
         self._closed = False
 
     def append(self, event: Event | Mapping[str, Any]) -> Event:
@@ -118,13 +120,14 @@ class EventWriter:
     def _append_lock(self) -> Iterator[None]:
         """Coordinate sequence allocation and the following append."""
 
-        if self._closed:
-            raise ValueError("event writer is closed")
-        _lock(self._lock_handle)
-        try:
-            yield
-        finally:
-            _unlock(self._lock_handle)
+        with self._thread_lock:
+            if self._closed:
+                raise ValueError("event writer is closed")
+            _lock(self._lock_handle)
+            try:
+                yield
+            finally:
+                _unlock(self._lock_handle)
 
     def write(self, event: Event | Mapping[str, Any]) -> Event:
         """Compatibility alias for callers that use ``write``."""
@@ -153,9 +156,10 @@ class EventWriter:
     def close(self) -> None:
         """Close this writer's inter-process lock handle."""
 
-        if not self._closed:
-            self._lock_handle.close()
-            self._closed = True
+        with self._thread_lock:
+            if not self._closed:
+                self._lock_handle.close()
+                self._closed = True
 
     def __enter__(self) -> EventWriter:
         return self
