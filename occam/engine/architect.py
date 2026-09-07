@@ -242,11 +242,12 @@ def _has_json_value(text: str) -> bool:
 def _strict_json_object(text: str) -> dict[str, Any]:
     """Extract exactly one JSON object from a tightly wrapped completion.
 
-    The model is allowed a Markdown JSON fence or short prose before/after one
+    The model is allowed a Markdown JSON fence or short prose before one
     object because some providers add a human-readable preamble despite the
-    response schema.  The wrapper itself may not contain JSON delimiters,
-    fences, or another JSON value; this keeps extraction deterministic and
-    prevents a valid nested/second object from being silently selected.
+    response schema.  Only whitespace may follow the object or its fence. The
+    wrapper itself may not contain JSON delimiters, fences, or another JSON
+    value; this keeps extraction deterministic and prevents a valid
+    nested/second object from being silently selected.
     """
 
     stripped = text.strip()
@@ -261,10 +262,13 @@ def _strict_json_object(text: str) -> dict[str, Any]:
         language = fence.group("language").strip().lower()
         if language not in {"", "json"}:
             raise _output_shape_error("Markdown fence must contain JSON")
-        outside = stripped[: fence.start()] + stripped[fence.end() :]
-        if any(marker in outside for marker in _WRAPPER_MARKERS):
+        before = stripped[: fence.start()]
+        after = stripped[fence.end() :]
+        if after.strip():
+            raise _output_shape_error("found non-whitespace after the JSON fence")
+        if any(marker in before for marker in _WRAPPER_MARKERS):
             raise _output_shape_error("found multiple or ambiguous JSON objects")
-        if _has_json_value(stripped[: fence.start()]) or _has_json_value(stripped[fence.end() :]):
+        if _has_json_value(before):
             raise _output_shape_error("found more than one JSON value")
         candidate = fence.group("body").strip()
         try:
@@ -286,15 +290,17 @@ def _strict_json_object(text: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise _output_shape_error("expected one JSON object")
 
-    outside = stripped[:start] + stripped[end:]
-    if any(marker in outside for marker in _WRAPPER_MARKERS):
+    before = stripped[:start]
+    after = stripped[end:]
+    if after.strip():
+        raise _output_shape_error("found non-whitespace after the JSON object")
+    if any(marker in before for marker in _WRAPPER_MARKERS):
         raise _output_shape_error("found multiple or ambiguous JSON objects")
     # A second scalar JSON value is not prose around the object.  Prose such
     # as "Here is the architecture" is intentionally not valid JSON and is
     # therefore unaffected by this check.
-    for wrapper in (stripped[:start], stripped[end:]):
-        if _has_json_value(wrapper):
-            raise _output_shape_error("found more than one JSON value")
+    if _has_json_value(before):
+        raise _output_shape_error("found more than one JSON value")
     return payload
 
 

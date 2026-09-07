@@ -247,6 +247,7 @@ def test_architect_emits_schema_compatible_event(tmp_path: Path) -> None:
     [
         lambda payload: f"Here is the architecture:\n{json.dumps(payload)}\n",
         lambda payload: f"```json\n{json.dumps(payload)}\n```\n",
+        lambda payload: f"Here is the architecture:\n```json\n{json.dumps(payload)}\n```\n",
     ],
 )
 def test_architect_accepts_one_json_object_with_minimal_wrapping(
@@ -283,6 +284,29 @@ def test_architect_rejects_missing_malformed_or_ambiguous_json(
 ) -> None:
     payload = architecture_payload()
     text = response_text(payload) if callable(response_text) else response_text
+
+    with pytest.raises(ArchitectError, match="output-shape failure"):
+        Architect(
+            llm=StubArchitectLLM(response_text=text),
+            memory=tmp_path / "memory",
+        ).propose(TASK)
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+@pytest.mark.parametrize("delimiter", [",", ":", ";"])
+@pytest.mark.parametrize("tail_kind", ["scalar", "object"])
+def test_architect_rejects_punctuation_delimited_scalar_or_object_tails(
+    tmp_path: Path,
+    fenced: bool,
+    delimiter: str,
+    tail_kind: str,
+) -> None:
+    payload = architecture_payload()
+    tail = "123" if tail_kind == "scalar" else json.dumps(payload)
+    if fenced:
+        text = f"```json\n{json.dumps(payload)}\n```{delimiter} {tail}"
+    else:
+        text = f"{json.dumps(payload)}{delimiter} {tail}"
 
     with pytest.raises(ArchitectError, match="output-shape failure"):
         Architect(
