@@ -280,11 +280,18 @@ def _safe_mutation(
     architecture: Architecture,
     requested: Mapping[str, Any] | None,
     rows: Sequence[Any],
+    *,
+    pass_rate: float | None = None,
 ) -> Mutation:
-    """Apply the code-level prune rule before the mutation reaches mutate.py."""
+    """Apply code-level mutation safety before a choice reaches ``mutate.py``.
+
+    A witness from an all-failed run is not actionable evidence, and removing a
+    role from a two-role architecture would leave a one-role team.  In either
+    case, keep the architecture intact and ask for a prompt rewrite instead.
+    """
 
     witnesses = [row for row in rows if _value(row, "verdict") == "witness"]
-    if witnesses:
+    if witnesses and pass_rate is not None and pass_rate > 0.0 and len(architecture.roles) > 2:
         target = max(
             witnesses,
             key=lambda row: (float(_value(row, "cost_share", 0.0)), str(_value(row, "role_id"))),
@@ -424,7 +431,12 @@ def diagnose(
             lessons=[],
         )
     requested = payload.chosen_mutation or payload.mutation
-    mutation = _safe_mutation(architecture, requested, _role_rows(table))
+    mutation = _safe_mutation(
+        architecture,
+        requested,
+        _role_rows(table),
+        pass_rate=full.pass_rate,
+    )
     default_case_ids = [result.case_id for result in full.results if not result.passed]
     store = lesson_store or LessonStore(getattr(task, "memory", "memory"))
     pending_lesson_events: list[tuple[str, Mapping[str, Any]]] = []
