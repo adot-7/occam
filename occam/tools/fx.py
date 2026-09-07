@@ -469,7 +469,22 @@ class FXClient:
                 handle.write(self._json_bytes(payload))
                 handle.flush()
                 os.fsync(handle.fileno())
+            if path.is_dir() and not path.is_symlink():
+                try:
+                    path.rmdir()
+                except OSError as exc:
+                    _LOGGER.warning(
+                        "FX cache target is not replaceable; leaving it untouched (%s)",
+                        type(exc).__name__,
+                    )
+                    return
             os.replace(temporary, path)
+        except IsADirectoryError as exc:
+            _LOGGER.warning(
+                "FX cache target is not replaceable; leaving it untouched (%s)",
+                type(exc).__name__,
+            )
+            return
         finally:
             if temporary is not None:
                 try:

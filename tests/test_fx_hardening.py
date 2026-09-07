@@ -368,6 +368,72 @@ def test_series_cache_reads_use_the_same_semantic_validation(tmp_path: Path) -> 
         assert repaired["response"]["rates"]["2026-04-02"]["USD"] == 1.15
 
 
+def test_daily_directory_cache_target_is_replaced(tmp_path: Path) -> None:
+    requests = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json=_daily())
+
+    with FXClient(cache_dir=tmp_path, transport=httpx.MockTransport(handler)) as client:
+        request_path = client.request_path("/2026-04-04", "EUR", "USD")
+        cache_path = client.cache_path_for(request_path)
+        cache_path.mkdir()
+
+        result = client.fx_rate("2026-04-04", "EUR", "USD")
+
+    assert result["rate"] == 1.15
+    assert requests == 1
+    assert cache_path.is_file()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_series_directory_cache_target_is_replaced(tmp_path: Path) -> None:
+    requests = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json=_series())
+
+    with FXClient(cache_dir=tmp_path, transport=httpx.MockTransport(handler)) as client:
+        request_path = client.request_path("/2026-04-01..2026-04-02", "EUR", "USD")
+        cache_path = client.cache_path_for(request_path)
+        cache_path.mkdir()
+
+        result = client.fx_series("2026-04-01", "2026-04-02", "EUR", "USD")
+
+    assert result["rates"]["2026-04-02"] == 1.15
+    assert requests == 1
+    assert cache_path.is_file()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_nonempty_directory_cache_target_is_left_untouched(tmp_path: Path) -> None:
+    requests = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json=_daily())
+
+    with FXClient(cache_dir=tmp_path, transport=httpx.MockTransport(handler)) as client:
+        request_path = client.request_path("/2026-04-04", "EUR", "USD")
+        cache_path = client.cache_path_for(request_path)
+        cache_path.mkdir()
+        sentinel = cache_path / "keep.txt"
+        sentinel.write_text("keep", encoding="utf-8")
+
+        result = client.fx_rate("2026-04-04", "EUR", "USD")
+
+    assert result["rate"] == 1.15
+    assert requests == 1
+    assert cache_path.is_dir()
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
 def test_lookup_metadata_helper_uses_actual_lookup_dates() -> None:
     from scripts.gen_fx_cases import _has_weekend_or_holiday
 
