@@ -271,7 +271,9 @@ def test_architect_accepts_one_json_object_with_minimal_wrapping(
         lambda payload: f"```json\n{json.dumps(payload)}\n```\n```json\n{json.dumps(payload)}\n```",
         lambda payload: f"```json\n[{json.dumps(payload)}]\n```",
         lambda payload: f"123\n```json\n{json.dumps(payload)}\n```",
+        lambda payload: f"123,\n```json\n{json.dumps(payload)}\n```",
         lambda payload: f"```json\n{json.dumps(payload)}\n```\n123",
+        lambda payload: f"```json\n{json.dumps(payload)}\n```\n123.",
         '{"roles": [], "roles": []}',
     ],
 )

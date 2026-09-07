@@ -233,9 +233,10 @@ def _has_json_value(text: str) -> bool:
     if end == len(candidate):
         return True
     # ``raw_decode`` accepts a valid scalar prefix from ``123 trailing``. A
-    # whitespace boundary still means the scalar is a second value, while
-    # adjoining letters are ordinary prose such as ``nullish``.
-    return candidate[end].isspace()
+    # whitespace boundary, or punctuation such as ``123,``/``123.``, means
+    # the scalar is a second or malformed JSON value. Adjoining identifier
+    # characters remain ordinary prose such as ``nullish``.
+    return candidate[end].isspace() or not (candidate[end].isalnum() or candidate[end] == "_")
 
 
 def _strict_json_object(text: str) -> dict[str, Any]:
