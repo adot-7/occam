@@ -725,13 +725,12 @@ def test_anthropic_provider_sends_native_json_schema_payload() -> None:
     assert "response_format" not in requests[0]
 
 
-def test_anthropic_provider_strips_unsupported_numeric_range_keywords() -> None:
+def test_anthropic_provider_strips_unsupported_schema_keywords() -> None:
     # Anthropic's structured-output schema subset rejects minimum/maximum on
-    # integer/number properties (live: "output_config.format.schema: For
-    # integer type, property minimum is not supported"). pydantic's
-    # model_json_schema() emits these for Field(ge=...)/Field(le=...), so the
-    # provider must sanitize the schema hint while leaving everything else -
-    # including nested $defs - intact.
+    # integer/number properties and minLength on strings. pydantic's
+    # model_json_schema() emits these constraints, so the provider must
+    # sanitize the schema hint while leaving everything else - including
+    # nested $defs - intact.
     requests: list[dict[str, Any]] = []
 
     class Messages:
@@ -753,6 +752,7 @@ def test_anthropic_provider_strips_unsupported_numeric_range_keywords() -> None:
                 "exclusiveMinimum": -1,
                 "exclusiveMaximum": 11,
             },
+            "label": {"type": "string", "minLength": 1},
             "nested": {"$ref": "#/$defs/Bound"},
         },
         "required": ["count"],
@@ -780,6 +780,7 @@ def test_anthropic_provider_strips_unsupported_numeric_range_keywords() -> None:
         "type": "object",
         "properties": {
             "count": {"type": "integer"},
+            "label": {"type": "string"},
             "nested": {"$ref": "#/$defs/Bound"},
         },
         "required": ["count"],
@@ -795,6 +796,7 @@ def test_anthropic_provider_strips_unsupported_numeric_range_keywords() -> None:
     }
     # The caller's schema object is untouched - only the outgoing payload is sanitized.
     assert schema["properties"]["count"]["minimum"] == 0
+    assert schema["properties"]["label"]["minLength"] == 1
 
 
 def test_anthropic_provider_fails_explicitly_without_native_schema_sdk_support() -> None:
