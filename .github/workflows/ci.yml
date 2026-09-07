@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  canonical:
+    name: Python 3.13
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # CI is deterministic and offline: no provider, FX HTTP, or tracing path
+      # is allowed to become live because a runner happens to expose a key.
+      OCCAM_LIVE_HTTP: "0"
+      OCCAM_LIVE_LLM: "0"
+      ANTHROPIC_API_KEY: ""
+      OPENAI_API_KEY: ""
+      TENSORMUX_API_KEY: ""
+      NEATLOGS_API_KEY: ""
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up canonical Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install project and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Full test suite
+        run: pytest -q
+
+      - name: Validate replay fixtures and determinism
+        run: |
+          python -m occam validate fixtures/demo_run1
+          python -m occam validate fixtures/demo_run2
+
+      - name: Headless replay and TUI smoke
+        env:
+          OCCAM_TUI_HEADLESS: "1"
+          OCCAM_TUI_EXIT_AFTER: "0.05"
+        run: |
+          python -m occam replay fixtures/demo_run1 --speed 64
+          python -m occam replay fixtures/demo_run2 --speed 64
+
+      - name: Build, install, and import the wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_dir="$RUNNER_TEMP/occam-wheel"
+          install_dir="$RUNNER_TEMP/occam-wheel-install"
+          mkdir -p "$wheel_dir" "$install_dir"
+          python -m pip wheel . --no-deps --no-build-isolation --wheel-dir "$wheel_dir"
+          wheel_path="$(find "$wheel_dir" -maxdepth 1 -type f -name 'occam-*.whl' -print -quit)"
+          test -n "$wheel_path"
+          python -m pip install --no-deps --target "$install_dir" "$wheel_path"
+          (
+            cd "$RUNNER_TEMP"
+            PYTHONPATH="$install_dir" python -c \
+              "from occam.core.models import CaseResult; from occam.store.schema import load_schema; assert CaseResult(case_id='ci', passed=False).grade_error is None; assert load_schema('events.schema.json')"
+          )
