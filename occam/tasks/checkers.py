@@ -172,6 +172,8 @@ def _last_json_line(answer: str) -> str:
 def _number(value: Any) -> float:
     if isinstance(value, bool) or value is None:
         raise ValueError("value is not numeric")
+    if isinstance(value, str):
+        value = value.replace(",", "")
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:

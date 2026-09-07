@@ -132,6 +132,16 @@ def test_fx_total_uses_point_one_percent_for_large_totals() -> None:
     assert result.total_tolerance == 10.0
 
 
+def test_fx_total_accepts_comma_grouped_numeric_strings() -> None:
+    result = fx_total(
+        '{"total_inr": "12,345.67", "per_invoice": {"INV-1": "12,345.67"}}',
+        {"total_inr": 12_345.67, "per_invoice": {"INV-1": 12_345.67}},
+    )
+
+    assert result.passed is True
+    assert result.sub_results == {"INV-1": True}
+
+
 def test_fx_client_uses_base_symbols_and_caches_full_request_path(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 
