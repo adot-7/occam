@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 from occam.cli import app
@@ -66,3 +69,33 @@ def test_validate_rejects_an_invalid_state_snapshot(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "state.schema.json validation failed" in result.output
+
+
+def test_llm_ping_no_cache_bypasses_the_shared_completion_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class FakeClient:
+        def __init__(self, configs: Any) -> None:
+            del configs
+
+        def complete(self, *args: Any, **kwargs: Any) -> Any:
+            del args
+            calls.append(kwargs)
+            return SimpleNamespace(
+                tokens_in=1,
+                tokens_out=1,
+                cost_usd=0.0,
+                cost_label="metered",
+                cached=False,
+                tool_calls=[{"id": "call_1"}],
+            )
+
+    monkeypatch.setattr("occam.llm.LLMClient", FakeClient)
+
+    result = RUNNER.invoke(app, ["llm", "ping", "worker_fast", "--no-cache"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0]["use_cache"] is False

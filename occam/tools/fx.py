@@ -8,6 +8,7 @@ concerns to the later WP-04 integration.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -36,6 +37,7 @@ _EXACT_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 _PROCESS_CACHE_GUARD = threading.Lock()
 _PROCESS_CACHE_KEY_LOCKS: dict[str, threading.Lock] = {}
 _PROCESS_LIVE_REQUESTS = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+_LOGGER = logging.getLogger(__name__)
 
 # These are intentionally plain.  Tool-registry descriptions and learned
 # lessons are assembled by later work packages, not by this HTTP client.
@@ -403,27 +405,29 @@ class FXClient:
         requested_start: date,
         requested_end: date,
     ) -> dict[str, Any] | None:
-        if not path.exists():
-            return None
-        if not path.is_file():
-            raise FXProtocolError(f"invalid FX cache {path}: cache path is not a file")
         try:
+            if not path.exists():
+                return None
+            if not path.is_file():
+                raise FXProtocolError("cache path is not a file")
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise FXProtocolError(f"invalid FX cache {path}: unreadable JSON") from exc
-        if not isinstance(payload, dict):
-            raise FXProtocolError(f"invalid FX cache {path}: cache envelope is not an object")
-        if payload.get("request_path") != request_path:
-            raise FXProtocolError(f"invalid FX cache {path}: request path does not match")
-        response = payload.get("response")
-        status = payload.get("status")
-        if not isinstance(response, dict):
-            raise FXProtocolError(f"invalid FX cache {path}: response is not an object")
-        if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status < 300:
-            raise FXProtocolError(
-                f"invalid FX cache {path}: status is not a successful HTTP status"
+        except (OSError, UnicodeError, json.JSONDecodeError, FXProtocolError) as exc:
+            _LOGGER.warning(
+                "invalid FX cache entry; treating it as a miss and refetching (%s)",
+                type(exc).__name__,
             )
+            return None
         try:
+            if not isinstance(payload, dict):
+                raise FXProtocolError("cache envelope is not an object")
+            if payload.get("request_path") != request_path:
+                raise FXProtocolError("request path does not match")
+            response = payload.get("response")
+            status = payload.get("status")
+            if not isinstance(response, dict):
+                raise FXProtocolError("response is not an object")
+            if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status < 300:
+                raise FXProtocolError("status is not a successful HTTP status")
             self._validate_response(
                 response,
                 base=base,
@@ -433,7 +437,11 @@ class FXClient:
                 requested_end=requested_end,
             )
         except FXProtocolError as exc:
-            raise FXProtocolError(f"invalid FX cache {path}: {exc}") from exc
+            _LOGGER.warning(
+                "invalid FX cache entry; treating it as a miss and refetching (%s)",
+                type(exc).__name__,
+            )
+            return None
         return {"response": response, "status": status}
 
     def _write_cache(

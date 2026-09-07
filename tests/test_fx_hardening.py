@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -213,7 +214,9 @@ def test_invalid_series_network_payload_is_rejected_before_cache_write(
     assert list(tmp_path.glob("*.tmp")) == []
 
 
-def test_invalid_existing_cache_is_reported_and_never_used_as_a_miss(tmp_path: Path) -> None:
+def test_invalid_existing_cache_is_a_logged_miss_and_is_repaired(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     requests = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -227,11 +230,15 @@ def test_invalid_existing_cache_is_reported_and_never_used_as_a_miss(tmp_path: P
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text("{not-json", encoding="utf-8")
 
+    caplog.set_level(logging.WARNING, logger="occam.tools.fx")
     with client:
-        with pytest.raises(FXProtocolError, match="invalid FX cache"):
-            client.fx_rate("2026-04-04", "EUR", "USD")
+        result = client.fx_rate("2026-04-04", "EUR", "USD")
 
-    assert requests == 0
+    assert result["rate"] == 1.15
+    assert requests == 1
+    assert "invalid FX cache entry; treating it as a miss and refetching" in caplog.text
+    assert "{not-json" not in caplog.text
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["response"] == _daily()
 
 
 @pytest.mark.parametrize(
@@ -242,7 +249,7 @@ def test_invalid_existing_cache_is_reported_and_never_used_as_a_miss(tmp_path: P
     ],
 )
 def test_semantically_invalid_existing_cache_is_revalidated(
-    tmp_path: Path, response: dict[str, Any], match: str
+    tmp_path: Path, response: dict[str, Any], match: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     requests = 0
 
@@ -266,11 +273,14 @@ def test_semantically_invalid_existing_cache_is_revalidated(
         encoding="utf-8",
     )
 
+    caplog.set_level(logging.WARNING, logger="occam.tools.fx")
     with client:
-        with pytest.raises(FXProtocolError, match=f"invalid FX cache.*{match}"):
-            client.fx_rate("2026-04-04", "EUR", "USD")
+        result = client.fx_rate("2026-04-04", "EUR", "USD")
 
-    assert requests == 0
+    assert result["rate"] == 1.15
+    assert requests == 1
+    assert "invalid FX cache entry; treating it as a miss and refetching" in caplog.text
+    assert match not in caplog.text
 
 
 def test_two_preopened_clients_share_one_cache_key_lock(tmp_path: Path) -> None:
@@ -351,8 +361,11 @@ def test_series_cache_reads_use_the_same_semantic_validation(tmp_path: Path) -> 
         payload["response"]["rates"]["2026-04-02"]["USD"] = -1
         cache_path.write_text(json.dumps(payload), encoding="utf-8")
 
-        with pytest.raises(FXProtocolError, match="invalid FX cache.*non-positive"):
-            client.fx_series("2026-04-01", "2026-04-02", "EUR", "USD")
+        result = client.fx_series("2026-04-01", "2026-04-02", "EUR", "USD")
+
+        assert result["rates"]["2026-04-02"] == 1.15
+        repaired = json.loads(cache_path.read_text(encoding="utf-8"))
+        assert repaired["response"]["rates"]["2026-04-02"]["USD"] == 1.15
 
 
 def test_lookup_metadata_helper_uses_actual_lookup_dates() -> None:

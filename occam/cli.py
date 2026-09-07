@@ -275,6 +275,10 @@ def replay(
 @llm_app.command("ping")
 def llm_ping(
     model_key: Annotated[str, typer.Argument(help="Configured model key to probe")],
+    no_cache: Annotated[
+        bool,
+        typer.Option("--no-cache", help="Bypass the shared completion cache."),
+    ] = False,
 ) -> None:
     """Make a completion and verify native function calling for one model."""
 
@@ -307,6 +311,7 @@ def llm_ping(
                     },
                 }
             ],
+            use_cache=not no_cache,
         )
     except MissingCredentialsError as exc:
         typer.echo(str(exc), err=True)
