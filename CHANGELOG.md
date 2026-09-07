@@ -67,6 +67,11 @@ All notable changes to Occam are documented here.
   copying raw provider traces into events.  Role failures skip grading, and
   checker and role errors are sanitized and bounded before they reach case
   results or the event log.
+
+- Clarified the Architect DAG contract: role inputs reference only the literal
+  `task` input or an earlier role `id`; `output_key` is context storage metadata,
+  never an input token. The Architect schema and bounded repair prompt now state
+  the ordering and dependency rule explicitly.
 - Replaced `python_exec`'s arbitrary `exec` path with a fail-closed AST
   capability evaluator that preserves the FX arithmetic/Decimal/JSON surface,
   bounds source, values, steps, timeout, and output, and rejects filesystem,

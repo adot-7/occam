@@ -17,6 +17,7 @@ from occam.core import (
     GenerationState,
     Lesson,
     MetricsSnapshot,
+    Role,
     RoleTrace,
     State,
 )
@@ -52,6 +53,22 @@ def test_the_two_schema_copies_stay_synchronised() -> None:
         repo_copy = json.loads((ROOT / "schemas" / name).read_text(encoding="utf-8"))
         packaged_copy = json.loads((ROOT / "occam" / "schemas" / name).read_text(encoding="utf-8"))
         assert repo_copy == packaged_copy, f"schemas/{name} and occam/schemas/{name} have diverged"
+
+
+def test_role_schema_descriptions_match_pydantic_contract() -> None:
+    """Keep mirrored event/state role metadata aligned with the core models."""
+
+    role_properties = Role.model_json_schema()["properties"]
+    architecture_properties = Architecture.model_json_schema()["properties"]
+    for name in ("events.schema.json", "state.schema.json"):
+        schema = json.loads((ROOT / "schemas" / name).read_text(encoding="utf-8"))
+        role = schema["$defs"]["role"]["properties"]
+        for field in ("id", "inputs", "output_key"):
+            assert role[field].get("description") == role_properties[field].get("description")
+        assert schema["$defs"]["architecture"]["properties"]["roles"].get(
+            "description"
+        ) == architecture_properties["roles"].get("description")
+        assert "description" not in schema["$defs"]["lesson"]["properties"]["id"]
 
 
 def test_ablation_started_requires_a_bounded_noise_rate() -> None:

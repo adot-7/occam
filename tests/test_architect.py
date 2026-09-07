@@ -11,6 +11,7 @@ import pytest
 
 from occam.core import Architecture
 from occam.engine.architect import DOMAIN_RULE_HEADING, Architect, ArchitectError
+from occam.llm import CompletionError, LLMClient, ModelConfig, ProviderResponse, RetryPolicy
 from occam.memory.lessons import LessonStore
 from occam.store.reader import EventReader
 from occam.store.schema import validate_event
@@ -93,14 +94,61 @@ def architecture_payload() -> dict[str, Any]:
 
 
 class StubArchitectLLM:
-    def __init__(self, payload: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        payload: dict[str, Any] | None = None,
+        response_text: str | None = None,
+        configs: dict[str, Any] | None = None,
+    ) -> None:
         self.payload = payload or architecture_payload()
+        self.response_text = response_text
         self.calls: list[dict[str, Any]] = []
-        self.configs = {"architect": object(), "worker_fast": object()}
+        self.configs = configs or {"architect": object(), "worker_fast": object()}
 
     def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
         self.calls.append({"model_key": model_key, "messages": messages, **kwargs})
-        return SimpleNamespace(text=json.dumps(self.payload), tool_calls=[])
+        text = self.response_text
+        if text is None:
+            text = json.dumps(self.payload)
+        return SimpleNamespace(text=text, tool_calls=[])
+
+
+class FailingArchitectLLM(StubArchitectLLM):
+    def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("sensitive provider payload")
+
+
+class ProviderFailureArchitectLLM(StubArchitectLLM):
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
+        raise CompletionError(self.message)
+
+
+class SequenceArchitectLLM(StubArchitectLLM):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__()
+        self.responses = list(responses)
+
+    def complete(self, model_key: str, messages: Any, **kwargs: Any) -> Any:
+        self.calls.append({"model_key": model_key, "messages": messages, **kwargs})
+        return SimpleNamespace(text=self.responses.pop(0), tool_calls=[])
+
+
+class SequenceProvider:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(self, config: ModelConfig, messages: Any, **kwargs: Any) -> ProviderResponse:
+        self.calls.append({"config": config, "messages": messages, **kwargs})
+        return ProviderResponse(
+            text=self.responses.pop(0),
+            tokens_in=100,
+            tokens_out=10,
+        )
 
 
 def make_lesson_store(path: Path) -> LessonStore:
@@ -192,6 +240,268 @@ def test_architect_emits_schema_compatible_event(tmp_path: Path) -> None:
     validate_event(proposal.model_dump(mode="json"))
     assert proposal.data["generation"] == 0
     assert proposal.data["architecture"]["id"] == "g000"
+
+
+@pytest.mark.parametrize(
+    "response_text",
+    [
+        lambda payload: f"Here is the architecture:\n{json.dumps(payload)}\n",
+        lambda payload: f"```json\n{json.dumps(payload)}\n```\n",
+        lambda payload: f"Here is the architecture:\n```json\n{json.dumps(payload)}\n```\n",
+    ],
+)
+def test_architect_accepts_one_json_object_with_minimal_wrapping(
+    tmp_path: Path,
+    response_text: Any,
+) -> None:
+    payload = architecture_payload()
+    llm = StubArchitectLLM(response_text=response_text(payload))
+
+    architecture = Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    assert architecture.id == "g000"
+    assert architecture.final_role == "r_calc"
+
+
+@pytest.mark.parametrize(
+    "response_text",
+    [
+        "No architecture was produced.",
+        '{"roles":',
+        lambda payload: f"{json.dumps(payload)}\n{json.dumps(payload)}",
+        lambda payload: f"```json\n{json.dumps(payload)}\n```\n```json\n{json.dumps(payload)}\n```",
+        lambda payload: f"```json\n[{json.dumps(payload)}]\n```",
+        lambda payload: f"123\n```json\n{json.dumps(payload)}\n```",
+        lambda payload: f"123,\n```json\n{json.dumps(payload)}\n```",
+        lambda payload: f"```json\n{json.dumps(payload)}\n```\n123",
+        lambda payload: f"```json\n{json.dumps(payload)}\n```\n123.",
+        '{"roles": [], "roles": []}',
+    ],
+)
+def test_architect_rejects_missing_malformed_or_ambiguous_json(
+    tmp_path: Path,
+    response_text: Any,
+) -> None:
+    payload = architecture_payload()
+    text = response_text(payload) if callable(response_text) else response_text
+
+    with pytest.raises(ArchitectError, match="output-shape failure"):
+        Architect(
+            llm=StubArchitectLLM(response_text=text),
+            memory=tmp_path / "memory",
+        ).propose(TASK)
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+@pytest.mark.parametrize("delimiter", [",", ":", ";"])
+@pytest.mark.parametrize("tail_kind", ["scalar", "object"])
+def test_architect_rejects_punctuation_delimited_scalar_or_object_tails(
+    tmp_path: Path,
+    fenced: bool,
+    delimiter: str,
+    tail_kind: str,
+) -> None:
+    payload = architecture_payload()
+    tail = "123" if tail_kind == "scalar" else json.dumps(payload)
+    if fenced:
+        text = f"```json\n{json.dumps(payload)}\n```{delimiter} {tail}"
+    else:
+        text = f"{json.dumps(payload)}{delimiter} {tail}"
+
+    with pytest.raises(ArchitectError, match="output-shape failure"):
+        Architect(
+            llm=StubArchitectLLM(response_text=text),
+            memory=tmp_path / "memory",
+        ).propose(TASK)
+
+
+def test_architect_keeps_strict_validation_after_wrapping_is_removed(tmp_path: Path) -> None:
+    payload = {**architecture_payload(), "unexpected": True}
+    text = f"Here is the architecture:\n```json\n{json.dumps(payload)}\n```"
+
+    with pytest.raises(ArchitectError, match="proposal validation failure.*strict validation"):
+        Architect(
+            llm=StubArchitectLLM(response_text=text),
+            memory=tmp_path / "memory",
+        ).propose(TASK)
+
+
+def test_architect_provider_failure_is_distinct_and_redacted(tmp_path: Path) -> None:
+    with pytest.raises(ArchitectError, match="provider failure: RuntimeError") as error:
+        Architect(llm=FailingArchitectLLM(), memory=tmp_path / "memory").propose(TASK)
+
+    assert "sensitive provider payload" not in str(error.value)
+
+
+def test_architect_rejects_non_earlier_role_dependencies(tmp_path: Path) -> None:
+    payload = architecture_payload()
+    payload["roles"] = [payload["roles"][1], payload["roles"][0], payload["roles"][2]]
+    llm = StubArchitectLLM(payload)
+
+    with pytest.raises(ArchitectError, match="non-earlier input"):
+        Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("provider_message", "metadata"),
+    [
+        (
+            "completion failed; secret=sk-ant-sensitive; provider_error[status=400; "
+            "type=invalid_request_error; code=unsupported_parameter; parameter=max_tokens]",
+            "provider_error[status=400; type=invalid_request_error; "
+            "code=unsupported_parameter; parameter=max_tokens]",
+        ),
+        (
+            "completion failed; Authorization: Bearer sensitive; provider_error[status=429; "
+            "type=rate_limit_error; code=rate_limit; parameter=unknown]",
+            "provider_error[status=429; type=rate_limit_error; code=rate_limit; parameter=unknown]",
+        ),
+    ],
+)
+def test_architect_propagates_only_safe_provider_metadata(
+    tmp_path: Path,
+    provider_message: str,
+    metadata: str,
+) -> None:
+    with pytest.raises(ArchitectError) as caught:
+        Architect(
+            llm=ProviderFailureArchitectLLM(provider_message),
+            memory=tmp_path / "memory",
+        ).propose(TASK)
+
+    message = str(caught.value)
+    assert metadata in message
+    assert "secret" not in message
+    assert "Bearer" not in message
+    assert "sensitive" not in message
+    assert "completion failed" not in message
+
+
+def test_architect_schema_and_prompt_advertise_only_configured_role_keys(tmp_path: Path) -> None:
+    llm = StubArchitectLLM(
+        configs={
+            "architect": object(),
+            "worker_alt": object(),
+            "worker_fast": object(),
+        }
+    )
+
+    Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    call = llm.calls[0]
+    role_schema = call["response_schema"]["$defs"]["Role"]
+    assert role_schema["properties"]["model"]["enum"] == ["worker_alt", "worker_fast"]
+    input_description = role_schema["properties"]["inputs"]["description"]
+    assert "earlier declared role.id" in input_description
+    assert "output_key" in input_description
+    request_text = json.dumps(call["messages"], ensure_ascii=False)
+    assert "CONFIGURED ROLE MODEL KEYS" in request_text
+    assert "provider model IDs" in request_text
+    assert "role.id" in request_text
+    assert "output_key" in request_text
+    assert "worker_fast" in request_text
+    assert "gpt-4.1" not in request_text
+
+
+def test_architect_accepts_a_configured_worker_model_key(tmp_path: Path) -> None:
+    payload = architecture_payload()
+    llm = StubArchitectLLM(
+        payload=payload,
+        response_text=f"Here is the plan:\n{json.dumps(payload)}",
+    )
+
+    architecture = Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    assert {role.model for role in architecture.roles} == {"worker_fast"}
+
+
+def test_architect_rejects_raw_provider_model_ids_before_execution(tmp_path: Path) -> None:
+    payload = architecture_payload()
+    payload["roles"][0]["model"] = "gpt-4.1"
+
+    with pytest.raises(ArchitectError, match=r"role model key\(s\) are not configured") as error:
+        Architect(llm=StubArchitectLLM(payload), memory=tmp_path / "memory").propose(TASK)
+
+    assert "gpt-4.1" in str(error.value)
+    assert "worker_fast" in str(error.value)
+
+
+def test_architect_repairs_unknown_dag_input_once_and_emits_one_event(tmp_path: Path) -> None:
+    invalid = architecture_payload()
+    invalid["roles"][2]["inputs"] = ["r_parse", "parsed"]
+    valid = architecture_payload()
+    llm = SequenceArchitectLLM([json.dumps(invalid), json.dumps(valid)])
+    emitted: list[str] = []
+
+    architecture = Architect(
+        llm=llm,
+        memory=tmp_path / "memory",
+        event_sink=lambda event_type, _data: emitted.append(event_type),
+    ).propose(TASK)
+
+    assert architecture.final_role == "r_calc"
+    assert len(llm.calls) == 2
+    repair_prompt = llm.calls[1]["messages"][-1]["content"]
+    assert "Validation category: DAG input contract" in repair_prompt
+    assert "parsed" in repair_prompt
+    assert '"worker_fast"' in repair_prompt
+    assert '"task"' in repair_prompt
+    assert "earlier declared role" in repair_prompt
+    assert "never use an output_key" in repair_prompt
+    assert '"r_parse", "parsed"' in repair_prompt
+    assert emitted == ["architecture.proposed"]
+
+
+def test_architect_repair_exhaustion_preserves_strict_failure(tmp_path: Path) -> None:
+    invalid = architecture_payload()
+    invalid["roles"][2]["inputs"] = ["r_parse", "parsed_case"]
+    llm = SequenceArchitectLLM([json.dumps(invalid), json.dumps(invalid)])
+    emitted: list[str] = []
+
+    with pytest.raises(ArchitectError, match="invalid DAG"):
+        Architect(
+            llm=llm,
+            memory=tmp_path / "memory",
+            event_sink=lambda event_type, _data: emitted.append(event_type),
+        ).propose(TASK)
+
+    assert len(llm.calls) == 2
+    assert emitted == []
+
+
+def test_architect_repair_calls_are_truthfully_accounted(tmp_path: Path) -> None:
+    invalid = architecture_payload()
+    invalid["roles"][2]["inputs"] = ["r_parse", "parsed_case"]
+    provider = SequenceProvider([json.dumps(invalid), json.dumps(architecture_payload())])
+    architect_config = ModelConfig(
+        key="architect",
+        provider="test",
+        model="claude-sonnet-5",
+        in_per_m=2.0,
+        out_per_m=10.0,
+    )
+    worker_config = ModelConfig(
+        key="worker_fast",
+        provider="test",
+        model="worker-test",
+    )
+    llm = LLMClient(
+        configs={"architect": architect_config, "worker_fast": worker_config},
+        providers={"architect": provider},
+        cache_dir=tmp_path / "cache",
+        retry_policy=RetryPolicy(max_attempts=1),
+    )
+
+    architecture = Architect(llm=llm, memory=tmp_path / "memory").propose(TASK)
+
+    assert architecture.final_role == "r_calc"
+    assert len(provider.calls) == 2
+    assert llm.provider_call_count == 2
+    expected_cost = 2 * (100 * 2.0 + 10 * 10.0) / 1_000_000
+    assert llm.displayed_cost_usd == pytest.approx(expected_cost)
+    assert llm.billed_cost_usd == pytest.approx(expected_cost)
 
 
 def test_architect_overwrites_model_guessed_id_instead_of_raising(tmp_path: Path) -> None:

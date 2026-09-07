@@ -65,7 +65,7 @@
       "additionalProperties": false,
       "required": ["id", "name", "justification", "model", "system_prompt", "tools", "inputs", "output_key"],
       "properties": {
-        "id": {"type": "string", "minLength": 1},
+        "id": {"type": "string", "minLength": 1, "description": "Simple role identifier. Later roles reference this exact id in inputs; they do not reference output_key values."},
         "name": {"type": "string", "minLength": 1},
         "justification": {
           "type": "string",
@@ -74,8 +74,8 @@
         "model": {"type": "string", "minLength": 1},
         "system_prompt": {"type": "string"},
         "tools": {"type": "array", "items": {"type": "string"}},
-        "inputs": {"type": "array", "items": {"type": "string"}},
-        "output_key": {"type": "string", "minLength": 1},
+        "inputs": {"type": "array", "description": "Dependency tokens: exactly \"task\" or an earlier declared role.id; never a role name, output_key, or invented descriptive alias.", "items": {"type": "string"}},
+        "output_key": {"type": "string", "minLength": 1, "description": "Key under which this role output is stored for context rendering; it is not a valid inputs token."},
         "memory": {"type": "string", "enum": ["none", "scratchpad", "summary"], "default": "none"},
         "max_turns": {"type": "integer", "minimum": 1, "default": 6}
       }
@@ -87,7 +87,7 @@
       "properties": {
         "id": {"type": "string", "minLength": 1},
         "parent_id": {"type": ["string", "null"]},
-        "roles": {"type": "array", "items": {"$ref": "#/$defs/role"}},
+        "roles": {"type": "array", "description": "Declare roles in topological order so each non-task inputs token names an earlier role.id.", "items": {"$ref": "#/$defs/role"}},
         "final_role": {"type": "string", "minLength": 1},
         "control": {"type": "string", "enum": ["llm", "deterministic"], "default": "deterministic"},
         "notes": {"type": "string", "default": ""}
