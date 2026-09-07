@@ -394,16 +394,16 @@ def _anthropic_messages(
     return ("\n\n".join(systems) or None), converted
 
 
-# Anthropic's structured-output schema subset rejects numeric-range
-# keywords on integer/number properties (observed live: "output_config
-# .format.schema: For integer type, property minimum is not supported").
-# Only `minimum` has been observed failing; the rest of the family is
+# Anthropic's structured-output schema subset rejects validation keywords
+# on constrained properties (observed live: "output_config.format.schema:
+# For integer type, property minimum is not supported"). Only `minimum`
+# and `minLength` have been observed failing; the related numeric family is
 # stripped defensively so the next schema change doesn't re-break this.
 # Dropping these does not weaken validation - the response is still parsed
-# and validated against the real pydantic model client-side, so ge/le
-# bounds remain enforced. Only the provider-facing generation hint shrinks.
+# and validated against the real pydantic model client-side, so model bounds
+# remain enforced. Only the provider-facing generation hint shrinks.
 _ANTHROPIC_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset(
-    {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"}
+    {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength"}
 )
 
 
