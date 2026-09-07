@@ -74,6 +74,7 @@ DEFAULT_MODEL_CONCURRENCY = 4
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _VARIANT_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 _EMPTY_USER_MESSAGE = "Produce your output now."
+ANSWER_PREFIX_LIMIT = 120
 
 
 class ExecutorError(RuntimeError):
@@ -360,14 +361,18 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _grade(grader: Callable[..., Any] | None, answer: str, expected: Any) -> tuple[bool, dict]:
-    """Normalise whatever the checker returns into ``(passed, sub_results)``."""
+def _grade(
+    grader: Callable[..., Any] | None,
+    answer: str,
+    expected: Any,
+) -> tuple[bool, dict, str | None]:
+    """Normalise a checker result into ``(passed, sub_results, error)``."""
 
     if grader is None:
-        return (False, {})
+        return (False, {}, None)
     outcome = grader(answer, expected)
     if isinstance(outcome, bool):
-        return (outcome, {})
+        return (outcome, {}, None)
     passed = bool(
         outcome.get("passed", False)
         if isinstance(outcome, Mapping)
@@ -379,7 +384,11 @@ def _grade(grader: Callable[..., Any] | None, answer: str, expected: Any) -> tup
         else getattr(outcome, "sub_results", {})
     )
     sub_results = {str(key): bool(value) for key, value in dict(raw or {}).items()}
-    return (passed, sub_results)
+    raw_error = (
+        outcome.get("error") if isinstance(outcome, Mapping) else getattr(outcome, "error", None)
+    )
+    grade_error = None if raw_error is None else str(raw_error)
+    return (passed, sub_results, grade_error)
 
 
 def resolve_grader(checker: str) -> Callable[..., Any]:
@@ -743,17 +752,20 @@ class Executor:
         final_role = index[architecture.final_role]
         answer = context.get(final_role.output_key, "").strip()
         passed, sub_results = False, {}
+        grade_error: str | None = None
         if grader is not None:
             try:
-                passed, sub_results = _grade(grader, answer, case.expected)
-            except Exception:  # noqa: BLE001 - a checker must never crash a run
+                passed, sub_results, grade_error = _grade(grader, answer, case.expected)
+            except Exception as exc:  # noqa: BLE001 - a checker must never crash a run
                 passed, sub_results = False, {}
+                grade_error = f"{type(exc).__name__}: {exc}"
         if role_failed:
             passed = False
         return CaseResult(
             case_id=case.id,
             answer=answer,
             passed=passed,
+            grade_error=grade_error,
             sub_results=sub_results,
             tokens_in=sum(trace.tokens_in for trace in traces.values()),
             tokens_out=sum(trace.tokens_out for trace in traces.values()),
@@ -1112,6 +1124,12 @@ class Executor:
                 "passed": result.passed,
                 "cost_usd": result.cost_usd,
                 "latency_s": result.latency_s,
+                "answer_prefix": result.answer[:ANSWER_PREFIX_LIMIT],
+                "grade_error": result.grade_error,
+                "role_error": next(
+                    (trace.error for trace in result.per_role.values() if trace.error),
+                    None,
+                ),
             },
         )
 

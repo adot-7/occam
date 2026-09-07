@@ -201,6 +201,7 @@ class CaseResult(ContractModel):
     case_id: str
     answer: str = ""
     passed: bool
+    grade_error: str | None = None
     sub_results: dict[str, bool] = Field(default_factory=dict)
     tokens_in: int = Field(default=0, ge=0)
     tokens_out: int = Field(default=0, ge=0)

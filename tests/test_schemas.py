@@ -103,6 +103,10 @@ def test_every_fixture_event_validates_against_event_schema() -> None:
         for payload in payloads:
             validate_event(payload)
             Event.model_validate(payload)
+            if payload["type"] == "execution.case":
+                data = payload["data"]
+                assert {"answer_prefix", "grade_error", "role_error"} <= data.keys()
+                assert len(data["answer_prefix"]) <= 120
     assert run1_types is not None
     assert "log" in run1_types
 
@@ -475,8 +479,35 @@ def test_new_strict_models_capture_lessons_and_invoice_sub_results() -> None:
 
     result = CaseResult(case_id="fxa_001", passed=False, sub_results={"INV-1": False})
     assert result.sub_results == {"INV-1": False}
+    assert result.grade_error is None
     with pytest.raises(ValidationError):
         CaseResult.model_validate({**result.model_dump(), "unexpected": True})
+
+
+def test_execution_case_diagnostics_are_required_and_bounded() -> None:
+    event = next(event for event in EventReader(RUN1) if event.type == "execution.case")
+
+    missing = event.model_dump(mode="json")
+    missing["data"].pop("answer_prefix")
+    with pytest.raises(ValueError, match="events.schema.json"):
+        validate_event(missing)
+
+    too_long = event.model_dump(mode="json")
+    too_long["data"]["answer_prefix"] = "x" * 121
+    with pytest.raises(ValueError, match="events.schema.json"):
+        validate_event(too_long)
+
+
+def test_reducer_retains_execution_case_diagnostics() -> None:
+    event = next(event for event in EventReader(RUN1) if event.type == "execution.case")
+    state = reduce(EventReader(RUN1).read())
+    execution = state.generations[f"g{event.data['generation']:03d}"].executions[
+        event.data["variant"]
+    ]
+    retained = next(case for case in execution["cases"] if case["case_id"] == event.data["case_id"])
+    assert retained["answer_prefix"] == event.data["answer_prefix"]
+    assert retained["grade_error"] is None
+    assert retained["role_error"] is None
 
 
 def test_role_trace_carries_the_displayed_cost_and_its_label() -> None:

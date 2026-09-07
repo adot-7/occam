@@ -185,14 +185,17 @@
     "executionCase": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generation", "variant", "case_id", "passed", "cost_usd", "latency_s"],
+      "required": ["generation", "variant", "case_id", "passed", "cost_usd", "latency_s", "answer_prefix", "grade_error", "role_error"],
       "properties": {
         "generation": {"type": "integer", "minimum": 0},
         "variant": {"type": "string", "minLength": 1},
         "case_id": {"type": "string", "minLength": 1},
         "passed": {"type": "boolean"},
         "cost_usd": {"type": "number", "minimum": 0},
-        "latency_s": {"type": "number", "minimum": 0}
+        "latency_s": {"type": "number", "minimum": 0},
+        "answer_prefix": {"type": "string", "maxLength": 120},
+        "grade_error": {"type": ["string", "null"]},
+        "role_error": {"type": ["string", "null"]}
       }
     },
     "executionCompleted": {
