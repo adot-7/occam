@@ -81,6 +81,8 @@ def test_v3_model_table_has_exact_lanes_and_lazy_credentials() -> None:
     assert configs["worker_fast"].supports_json_schema is False
     assert configs["worker_fast"].tool_choice_modes == ("auto",)
     assert configs["worker_fast"].grant_equiv_in_per_m == 0.06
+    assert configs["worker_fast"].rpm == 12
+    assert configs["worker_fast"].max_tokens == 8192
     assert configs["worker_alt"].model == "gpt-5-nano"
     assert configs["architect"].model == "claude-sonnet-5"
     with pytest.raises(MissingCredentialsError, match="TENSORMUX_API_KEY"):
@@ -290,10 +292,13 @@ def test_client_surfaces_non_transient_and_exhausted_failures(tmp_path: Path) ->
         client.complete("worker_fast", [{"role": "user", "content": "down"}])
 
 
-def test_reasoning_only_length_response_gets_one_doubled_budget_retry(tmp_path: Path) -> None:
+def test_empty_length_responses_retry_until_completion_and_account_final_usage(
+    tmp_path: Path,
+) -> None:
     provider = FakeProvider(
         [
-            ProviderResponse(text="", reasoning="thinking", finish_reason="length"),
+            ProviderResponse(text="", finish_reason="length"),
+            ProviderResponse(text="", finish_reason="length"),
             ProviderResponse(text="answer", tokens_in=4, tokens_out=5),
         ]
     )
@@ -303,15 +308,18 @@ def test_reasoning_only_length_response_gets_one_doubled_budget_retry(tmp_path: 
         cache_dir=tmp_path,
     )
 
-    result = client.complete("worker_fast", [{"role": "user", "content": "think"}], max_tokens=1)
+    result = client.complete("worker_fast", [{"role": "user", "content": "think"}])
 
     assert result.text == "answer"
-    assert [call["max_tokens"] for call in provider.calls] == [1024, 2048]
+    assert [call["max_tokens"] for call in provider.calls] == [2048, 4096, 8192]
+    assert result.cost_usd > 0
+    assert client.displayed_cost_usd == result.cost_usd
+    assert client.billed_cost_usd == result.billed_cost_usd == 0
 
 
-def test_reasoning_only_length_response_fails_after_the_single_retry(tmp_path: Path) -> None:
+def test_empty_length_responses_stop_at_bounded_budget(tmp_path: Path) -> None:
     response = ProviderResponse(text="", reasoning="thinking", finish_reason="length")
-    provider = FakeProvider([response, response])
+    provider = FakeProvider([response, response, response, response])
     client = LLMClient(
         {"worker_fast": _config()},
         providers={"worker_fast": provider},
@@ -320,7 +328,7 @@ def test_reasoning_only_length_response_fails_after_the_single_retry(tmp_path: P
 
     with pytest.raises(TruncatedCompletionError, match="truncated completion"):
         client.complete("worker_fast", [{"role": "user", "content": "think"}])
-    assert [call["max_tokens"] for call in provider.calls] == [2048, 4096]
+    assert [call["max_tokens"] for call in provider.calls] == [2048, 4096, 8192, 16_384]
     assert list(tmp_path.glob("*.json")) == []
 
 
