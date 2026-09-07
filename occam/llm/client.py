@@ -149,6 +149,88 @@ def _status_code(exc: BaseException) -> int | None:
     return None
 
 
+_SAFE_PROVIDER_VALUE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+
+
+def _provider_value(source: Any, name: str) -> Any:
+    """Read one optional metadata attribute without touching provider payloads."""
+
+    try:
+        if isinstance(source, Mapping):
+            return source.get(name)
+        return getattr(source, name, None)
+    except Exception:  # noqa: BLE001 - provider metadata is optional
+        return None
+
+
+def _provider_metadata_sources(exc: BaseException) -> list[Any]:
+    """Collect provider metadata containers without walking arbitrary payloads."""
+
+    response = _provider_value(exc, "response")
+    sources: list[Any] = [exc]
+    if response is not None:
+        sources.append(response)
+
+    for owner in (exc, response):
+        if owner is None:
+            continue
+        for name in ("metadata", "body", "error"):
+            container = _provider_value(owner, name)
+            if not isinstance(container, Mapping):
+                continue
+            sources.append(container)
+            nested_error = container.get("error")
+            if isinstance(nested_error, Mapping):
+                sources.append(nested_error)
+    return sources
+
+
+def _safe_provider_value(value: Any) -> str | None:
+    """Return only short scalar provider identifiers, never arbitrary payload text."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value.strip()
+    else:
+        return None
+    return text if _SAFE_PROVIDER_VALUE.fullmatch(text) else None
+
+
+def _provider_error_field(sources: Sequence[Any], names: Sequence[str]) -> str:
+    """Read one allowlisted field from the ordered provider metadata sources."""
+
+    for source in sources:
+        for name in names:
+            value = _safe_provider_value(_provider_value(source, name))
+            if value is not None:
+                return value
+    return "unknown"
+
+
+def _provider_error_metadata(exc: BaseException) -> str:
+    """Extract only safe status/type/code/parameter fields from a provider error."""
+
+    sources = _provider_metadata_sources(exc)
+    status = _status_code(exc)
+    status_value = _safe_provider_value(status)
+    if status_value is None:
+        status_value = _provider_error_field(sources, ("status_code", "status"))
+    provider_type = _provider_error_field(sources, ("type",))
+    provider_code = _provider_error_field(sources, ("code",))
+    provider_parameter = _provider_error_field(sources, ("parameter", "param"))
+    return "; ".join(
+        (
+            f"status={status_value}",
+            f"type={provider_type}",
+            f"code={provider_code}",
+            f"parameter={provider_parameter}",
+        )
+    )
+
+
 def _header_value(source: Any, name: str) -> Any:
     """Read one HTTP header from mapping-like provider metadata."""
 
@@ -633,7 +715,8 @@ class LLMClient:
                     if isinstance(exc, (LLMError, ConfigurationError)):
                         raise
                     raise CompletionError(
-                        f"LLM completion failed after {attempt} attempt(s): {type(exc).__name__}"
+                        f"LLM completion failed after {attempt} attempt(s): {type(exc).__name__}; "
+                        f"provider_error[{_provider_error_metadata(exc)}]"
                     ) from exc
                 delay = self.retry_policy.delay(attempt)
                 retry_after = _retry_after_delay(exc)

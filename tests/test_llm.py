@@ -74,6 +74,30 @@ class StatusError(RuntimeError):
         self.response = SimpleNamespace(headers=headers or {})
 
 
+class BadRequestError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__(
+            "raw provider payload https://api.example.test/v1?api_key=sk-live-secret "
+            "Authorization: Bearer header-secret"
+        )
+        self.status_code = 400
+        self.type = "invalid_request_error"
+        self.response = SimpleNamespace(
+            status_code=400,
+            metadata={"code": "unsupported_parameter", "request_id": "req-secret"},
+            headers={"Authorization": "Bearer header-secret", "x-request-id": "req-secret"},
+            url="https://api.example.test/v1/chat/completions",
+        )
+        self.body = {
+            "error": {
+                "param": "max_tokens",
+                "message": "raw payload secret should never be copied",
+            },
+            "api_key": "sk-body-secret",
+            "request": {"url": "https://api.example.test"},
+        }
+
+
 def test_v3_model_table_has_exact_lanes_and_lazy_credentials() -> None:
     configs = load_model_configs(environ={})
 
@@ -363,6 +387,40 @@ def test_client_surfaces_non_transient_and_exhausted_failures(tmp_path: Path) ->
     )
     with pytest.raises(CompletionError, match="2 attempt"):
         client.complete("worker_fast", [{"role": "user", "content": "down"}])
+
+
+def test_client_surfaces_safe_bad_request_metadata_without_provider_payload(tmp_path: Path) -> None:
+    provider = FakeProvider([BadRequestError()])
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+    )
+
+    with pytest.raises(CompletionError) as caught:
+        client.complete("worker_fast", [{"role": "user", "content": "bad"}])
+
+    message = str(caught.value)
+    assert message == (
+        "LLM completion failed after 1 attempt(s): BadRequestError; "
+        "provider_error[status=400; type=invalid_request_error; "
+        "code=unsupported_parameter; parameter=max_tokens]"
+    )
+    for unsafe in (
+        "raw provider payload",
+        "https://api.example.test",
+        "Authorization",
+        "header-secret",
+        "req-secret",
+        "sk-live-secret",
+        "sk-body-secret",
+        "raw payload secret",
+    ):
+        assert unsafe not in message
+    assert client.provider_call_count == 1
+    assert client.displayed_cost_usd == 0
+    assert client.billed_cost_usd == 0
+    assert list(tmp_path.glob("*.json")) == []
 
 
 def test_empty_length_responses_retry_until_completion_and_account_final_usage(
