@@ -175,10 +175,13 @@ class RunEngine:
         )
         grader = self.grader or resolve_grader(task.checker)
         initial_provider_calls = getattr(llm, "provider_call_count", None)
+        initial_failed_completions = getattr(llm, "failed_completions", None)
         initial_displayed_cost = getattr(llm, "displayed_cost_usd", None)
         initial_billed_cost = getattr(llm, "billed_cost_usd", None)
         writer = EventWriter(run_dir, run_id=run_id)
         sink = writer_sink(writer)
+        llm_sink_bound = isinstance(llm, LLMClient)
+        previous_llm_sink = llm.set_event_sink(sink) if llm_sink_bound else None
         shutil.copyfile(self.pack.directory / "task.yaml", run_dir / "task.yaml")
 
         config_event = {
@@ -426,6 +429,8 @@ class RunEngine:
                     },
                 )
         finally:
+            if llm_sink_bound:
+                llm.set_event_sink(previous_llm_sink)
             writer.close()
             try:
                 registry._fx_client.close() if getattr(registry, "_fx_client", None) else None
@@ -437,6 +442,11 @@ class RunEngine:
         provider_calls = getattr(llm, "provider_call_count", None)
         if isinstance(provider_calls, int) and isinstance(initial_provider_calls, int):
             provider_calls -= initial_provider_calls
+        failed_completions = getattr(llm, "failed_completions", None)
+        if isinstance(failed_completions, int) and isinstance(initial_failed_completions, int):
+            failed_completions -= initial_failed_completions
+        else:
+            failed_completions = 0
         displayed_cost = getattr(llm, "displayed_cost_usd", None)
         if isinstance(displayed_cost, (int, float)) and isinstance(
             initial_displayed_cost, (int, float)
@@ -456,6 +466,7 @@ class RunEngine:
             "generations": len(full_runs),
             "best_generation": best_generation,
             "provider_calls": provider_calls,
+            "failed_completions": max(0, int(failed_completions)),
             "displayed_cost_usd": max(0.0, float(displayed_cost)),
             "billed_cost_usd": max(0.0, float(billed_cost)),
             "cost_label": "list-rate-equivalent where configured",
