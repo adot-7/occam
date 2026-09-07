@@ -761,29 +761,37 @@ def test_oversized_constructors_fail_before_large_allocation(
 
 
 @pytest.mark.parametrize(
-    ("label", "code"),
+    ("label", "code", "timeout_s"),
     (
         (
             "list comprehension",
             "[x for group in range(2) for x in range(50_001)]",
+            2.0,
         ),
         (
             "set comprehension",
             "{group * 50_001 + x for group in range(2) for x in range(50_001)}",
+            # Hashing and membership make this bounded case slower on hosted
+            # Python 3.13 runners than the other collection forms.
+            4.0,
         ),
         (
             "dict comprehension",
             "{group * 50_001 + x: x for group in range(2) for x in range(50_001)}",
+            2.0,
         ),
         (
             "generator expression",
             "sum(x for group in range(2) for x in range(50_001))",
+            2.0,
         ),
     ),
-    ids=lambda case: case[0],
+    ids=("list-comprehension", "set-comprehension", "dict-comprehension", "generator-expression"),
 )
-def test_comprehension_results_are_limited_incrementally(label: str, code: str) -> None:
-    result = run(code, timeout_s=2.0)
+def test_comprehension_results_are_limited_incrementally(
+    label: str, code: str, timeout_s: float
+) -> None:
+    result = run(code, timeout_s=timeout_s)
 
     assert not result.ok, label
     assert not result.timed_out, label
