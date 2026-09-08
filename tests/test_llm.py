@@ -7,7 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from anthropic import BadRequestError as AnthropicBadRequestError
 
 from occam.core import ToolSpec
 from occam.llm import (
@@ -421,6 +423,38 @@ def test_client_surfaces_safe_bad_request_metadata_without_provider_payload(tmp_
     assert client.displayed_cost_usd == 0
     assert client.billed_cost_usd == 0
     assert list(tmp_path.glob("*.json")) == []
+
+
+def test_client_extracts_metadata_from_anthropic_sdk_bad_request(tmp_path: Path) -> None:
+    body = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "code": "unsupported_parameter",
+            "param": "max_tokens",
+            "message": "redacted",
+        },
+    }
+    response = httpx.Response(
+        400,
+        request=httpx.Request("POST", "http://offline.invalid"),
+        headers={"request-id": "redacted"},
+    )
+    provider = FakeProvider([AnthropicBadRequestError("redacted", response=response, body=body)])
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+    )
+
+    with pytest.raises(CompletionError) as caught:
+        client.complete("worker_fast", [{"role": "user", "content": "bad"}])
+
+    assert str(caught.value).endswith(
+        "provider_error[status=400; type=invalid_request_error; "
+        "code=unsupported_parameter; parameter=max_tokens]"
+    )
+    assert client.provider_call_count == 1
 
 
 def test_empty_length_responses_retry_until_completion_and_account_final_usage(

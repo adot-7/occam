@@ -284,7 +284,13 @@ def llm_ping(
 
     # Keep this import inside the command.  Provider modules import their SDKs
     # lazily so WP-15 can initialise Neatlogs before openai is imported.
-    from occam.llm import LLMClient, LLMError, MissingCredentialsError, load_model_configs
+    from occam.llm import (
+        LLMClient,
+        LLMError,
+        MissingCredentialsError,
+        load_model_configs,
+        safe_provider_error_metadata,
+    )
 
     try:
         configs = load_model_configs()
@@ -317,7 +323,9 @@ def llm_ping(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except LLMError as exc:
-        typer.echo(f"LLM ping failed: {type(exc).__name__}", err=True)
+        metadata = safe_provider_error_metadata(exc)
+        suffix = f"; {metadata}" if metadata is not None else ""
+        typer.echo(f"LLM ping failed: {type(exc).__name__}{suffix}", err=True)
         raise typer.Exit(code=2) from exc
     except (OSError, ValueError) as exc:
         typer.echo(str(exc), err=True)

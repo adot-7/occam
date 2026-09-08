@@ -27,6 +27,7 @@ from occam.llm.client import (
     TruncatedCompletionError,
     complete,
     get_default_client,
+    safe_provider_error_metadata,
 )
 from occam.llm.config import (
     ConfigurationError,
@@ -68,6 +69,7 @@ __all__ = [
     "ProviderError",
     "ProviderResponse",
     "RetryPolicy",
+    "safe_provider_error_metadata",
     "set_span_attributes",
     "shutdown",
     "span",
