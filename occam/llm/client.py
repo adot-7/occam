@@ -150,6 +150,9 @@ def _status_code(exc: BaseException) -> int | None:
 
 
 _SAFE_PROVIDER_VALUE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+_PROVIDER_ERROR_FIELDS = ("status", "type", "code", "parameter")
+_SAFE_PROVIDER_ERROR_FIELD = re.compile(r"^(status|type|code|parameter)=([A-Za-z0-9_.:-]{1,80})$")
+_PROVIDER_ERROR_MARKER = re.compile(r"provider_error\[([^\]\r\n]*)\]")
 
 
 def _provider_value(source: Any, name: str) -> Any:
@@ -228,6 +231,30 @@ def _provider_error_metadata(exc: BaseException) -> str:
             f"code={provider_code}",
             f"parameter={provider_parameter}",
         )
+    )
+
+
+def safe_provider_error_metadata(error: BaseException) -> str | None:
+    """Return only an already-sanitized provider metadata marker from an error."""
+
+    match = _PROVIDER_ERROR_MARKER.search(str(error))
+    if match is None:
+        return None
+    fields: dict[str, str] = {}
+    for raw_field in match.group(1).split(";"):
+        field_match = _SAFE_PROVIDER_ERROR_FIELD.fullmatch(raw_field.strip())
+        if field_match is None:
+            return None
+        name, value = field_match.groups()
+        if name in fields:
+            return None
+        fields[name] = value
+    if set(fields) != set(_PROVIDER_ERROR_FIELDS):
+        return None
+    return (
+        "provider_error["
+        + "; ".join(f"{name}={fields[name]}" for name in _PROVIDER_ERROR_FIELDS)
+        + "]"
     )
 
 
@@ -834,4 +861,5 @@ __all__ = [
     "TruncatedCompletionError",
     "complete",
     "get_default_client",
+    "safe_provider_error_metadata",
 ]
