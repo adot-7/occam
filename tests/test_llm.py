@@ -112,7 +112,7 @@ def test_v3_model_table_has_exact_lanes_and_lazy_credentials() -> None:
     assert configs["worker_fast"].rpm == 12
     assert configs["worker_fast"].max_tokens == 8192
     assert configs["worker_alt"].model == "gpt-5-nano"
-    assert configs["architect"].model == "claude-sonnet-5"
+    assert configs["architect"].model == "claude-haiku-4-5-20251001"
     with pytest.raises(MissingCredentialsError, match="TENSORMUX_API_KEY"):
         configs["worker_fast"].resolve_api_key({})
 
