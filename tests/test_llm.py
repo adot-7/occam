@@ -39,13 +39,14 @@ def _config(
     grant_equiv_out_per_m: float | None = 0.40,
     rpm: float | None = None,
     supports_json_schema: bool = False,
+    api_key: str = "${TEST_API_KEY}",
 ) -> ModelConfig:
     return ModelConfig(
         key=key,
         provider=provider,
         model="test-model",
         base_url="https://example.test/v1",
-        api_key="${TEST_API_KEY}",
+        api_key=api_key,
         in_per_m=in_per_m,
         out_per_m=out_per_m,
         grant_equiv_in_per_m=grant_equiv_in_per_m,
@@ -115,6 +116,36 @@ def test_v3_model_table_has_exact_lanes_and_lazy_credentials() -> None:
     assert configs["architect"].model == "claude-haiku-4-5-20251001"
     with pytest.raises(MissingCredentialsError, match="TENSORMUX_API_KEY"):
         configs["worker_fast"].resolve_api_key({})
+
+
+@pytest.mark.parametrize("provider_name", ["openai_compat", "anthropic"])
+def test_default_sdk_clients_disable_sdk_retries(
+    monkeypatch: pytest.MonkeyPatch, provider_name: str
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    if provider_name == "openai_compat":
+        import openai
+
+        monkeypatch.setattr(openai, "OpenAI", FakeClient)
+        config = _config(provider=provider_name, api_key="test-key")
+        OpenAICompatibleProvider()._client_for(config)
+    else:
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
+        config = _config(provider=provider_name, api_key="test-key")
+        AnthropicProvider()._client_for(config)
+
+    assert captured == {
+        "api_key": "test-key",
+        "base_url": "https://example.test/v1",
+        "max_retries": 0,
+    }
 
 
 def test_environment_interpolation_is_recursive_and_strict_mode_is_clear() -> None:

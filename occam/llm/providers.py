@@ -198,7 +198,7 @@ class OpenAICompatibleProvider:
             from openai import OpenAI
         except ImportError as exc:  # pragma: no cover - dependency is declared
             raise ConfigurationError("openai is required for openai_compat models") from exc
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": 0}
         if config.base_url:
             kwargs["base_url"] = config.base_url
         client = OpenAI(**kwargs)
@@ -478,7 +478,7 @@ class AnthropicProvider:
             import anthropic
         except ImportError as exc:  # pragma: no cover - dependency is declared
             raise ConfigurationError("anthropic is required for anthropic models") from exc
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": 0}
         if config.base_url:
             kwargs["base_url"] = config.base_url
         return anthropic.Anthropic(**kwargs)
