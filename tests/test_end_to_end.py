@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from occam.engine.diagnose import DiagnosisResult
 from occam.engine.loop import RunConfig, RunEngine
 from occam.engine.mutate import Mutation
 from occam.engine.mutate import apply_mutation as real_apply_mutation
-from occam.llm.client import Completion
+from occam.llm.client import Completion, CompletionError
 from occam.llm.config import ModelConfig
 from occam.store.reader import EventReader
 from occam.store.reducer import reduce, state_json_bytes
@@ -152,6 +153,45 @@ class StubRunLLM:
         )
 
 
+class ZeroCostMixedLLM(StubRunLLM):
+    """Offline double with cache-hit successes and an unpriced failure."""
+
+    def __init__(self, cases: list[Case]) -> None:
+        super().__init__(cases, correct=False)
+        self._failure_lock = threading.Lock()
+        self._failed_once = False
+
+    def complete(
+        self,
+        model_key: str,
+        messages: list[dict[str, Any]],
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> Completion:
+        self.provider_call_count += 1
+        if model_key != "architect":
+            with self._failure_lock:
+                if not self._failed_once:
+                    self._failed_once = True
+                    raise CompletionError("controlled provider failure")
+        text = (
+            json.dumps(_architecture_payload(), sort_keys=True)
+            if model_key == "architect"
+            else "ok"
+        )
+        return Completion(
+            text=text,
+            tool_calls=[],
+            tokens_in=10,
+            tokens_out=10,
+            cost_usd=0.0,
+            billed_cost_usd=0.0,
+            latency_s=0.0,
+            cached=True,
+            cost_label="cache-hit",
+        )
+
+
 def _run_stubbed(tmp_path: Path, *, correct: bool):
     pack = load_task_pack("fx_recon_a")
     cases = pack.select(3)
@@ -227,6 +267,56 @@ def test_stubbed_wrong_run_completes_three_generations_without_raising(tmp_path:
     )
     mutations = [event for event in events if event.type == "mutation.applied"]
     assert [event.data["type"] for event in mutations] == ["rewrite_prompt", "rewrite_prompt"]
+
+
+def test_zero_displayed_cost_ablation_terminates_with_a_valid_completion(
+    tmp_path: Path,
+) -> None:
+    pack = load_task_pack("fx_recon_a")
+    cases = pack.select(2)
+    llm = ZeroCostMixedLLM(cases)
+    outcome = RunEngine(
+        pack,
+        RunConfig(
+            run_name="zero-cost-ablation",
+            out=tmp_path / "runs",
+            memory=tmp_path / "memory",
+            max_generations=1,
+            n_cases=2,
+            ablate_cases=2,
+        ),
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run()
+
+    events = EventReader(outcome.run_dir).read()
+    for event in events:
+        validate_event(event.model_dump(mode="json", exclude_none=False))
+    assert not any(event.type.startswith("ablation.") for event in events)
+    full_results = [
+        json.loads(line)
+        for line in (outcome.run_dir / "generations" / "g000" / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    traces = [trace for result in full_results for trace in result["per_role"].values()]
+    failed = next(trace for trace in traces if trace["error"] is not None)
+    cached = next(trace for trace in traces if trace["cached"])
+    assert failed["cached"] is False
+    assert failed["cost_usd"] == 0.0
+    assert failed["cost_label"] == "unavailable"
+    assert cached["cost_usd"] == 0.0
+    assert cached["cost_label"] == "cache-hit"
+
+    completed = events[-1]
+    assert completed.type == "run.completed"
+    assert completed.data["summary"]["ablation_status"] == "unavailable"
+    assert completed.data["summary"]["structural_fidelity"] is None
+    assert outcome.summary["final_cost_usd"] == 0.0
+    state = reduce(events)
+    assert state.completed is True
+    assert state.generations["g000"].metrics is None
+    validate_state(json.loads(state_json_bytes(state)))
 
 
 def test_single_role_prune_failure_is_caught_inside_run_engine(

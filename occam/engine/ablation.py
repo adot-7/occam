@@ -519,6 +519,15 @@ def ablate(
     elif not 0.0 <= measured_noise_rate <= 1.0:
         raise ValueError("measured_noise_rate must be within [0, 1]")
 
+    # Cost shares are required for every emitted ablation row.  Check the
+    # displayed-cost denominator before advertising an ablation or running any
+    # knockouts; a zero denominator is not permission to fabricate shares from
+    # tokens, billing, or a uniform fallback.
+    shares = role_cost_shares(
+        full,
+        [role.id for role in architecture.roles],
+        case_ids=case_ids,
+    )
     emit(
         "ablation.started",
         {
@@ -528,12 +537,6 @@ def ablate(
             "case_ids": list(case_ids),
             "noise_rate": round(clamp(measured_noise_rate), _ROUND),
         },
-    )
-
-    shares = role_cost_shares(
-        full,
-        [role.id for role in architecture.roles],
-        case_ids=case_ids,
     )
     rows: list[AblationRow] = []
     for role in architecture.roles:

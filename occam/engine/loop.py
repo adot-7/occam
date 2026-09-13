@@ -22,6 +22,7 @@ from occam.engine.pass3 import Pass3Result, run_pass3
 from occam.llm.client import LLMClient
 from occam.llm.config import ModelConfig, load_model_configs
 from occam.memory.lessons import LessonStore
+from occam.metrics.aggregate import CostShareUnavailableError
 from occam.metrics.snapshot import BaselineSummary, build_snapshot, snapshot_event_data
 from occam.store.writer import EventWriter
 from occam.tasks.loader import TaskPack, load_task_pack
@@ -228,6 +229,17 @@ class RunEngine:
         all_billed = 0.0
         pass3_result: Pass3Result | None = None
         executor_results_seen = 0
+        ablation_unavailable = False
+
+        def account_executor_results() -> None:
+            """Add newly completed executor variants to run-level accounting."""
+
+            nonlocal all_displayed, all_billed, executor_results_seen
+            for result in executor.results_history[executor_results_seen:]:
+                displayed, billed = _run_cost(result)
+                all_displayed += displayed
+                all_billed += billed
+            executor_results_seen = len(executor.results_history)
 
         try:
             architect = Architect(
@@ -279,21 +291,37 @@ class RunEngine:
                 all_displayed += baseline.cost_usd
                 all_billed += baseline.billed_cost_usd
 
-                table = ablate(
-                    architecture,
-                    subset,
-                    runner=executor,
-                    generation=generation,
-                    full=full,
-                    full_repeat=repeat,
-                    measured_noise_rate=measured_noise,
-                    sink=sink,
-                )
-                for result in executor.results_history[executor_results_seen:]:
-                    displayed, billed = _run_cost(result)
-                    all_displayed += displayed
-                    all_billed += billed
-                executor_results_seen = len(executor.results_history)
+                try:
+                    table = ablate(
+                        architecture,
+                        subset,
+                        runner=executor,
+                        generation=generation,
+                        full=full,
+                        full_repeat=repeat,
+                        measured_noise_rate=measured_noise,
+                        sink=sink,
+                    )
+                except CostShareUnavailableError:
+                    # The full/repeat runs are still authoritative, but this
+                    # generation cannot produce an honest ablation table or
+                    # structural-fidelity metric.  Finish the run through the
+                    # normal completion event instead of inventing shares.
+                    account_executor_results()
+                    ablation_unavailable = True
+                    sink(
+                        "log",
+                        {
+                            "level": "warning",
+                            "message": (
+                                "Ablation unavailable: no positive displayed "
+                                "RoleTrace.cost_usd; terminating safely at the best "
+                                "completed generation."
+                            ),
+                        },
+                    )
+                    break
+                account_executor_results()
                 score = _score(full)
                 if best_score is None or score > best_score:
                     best_score = score
@@ -437,8 +465,9 @@ class RunEngine:
             except Exception:  # noqa: BLE001 - cleanup must not hide the run result
                 pass
 
-        final_generation = max(full_runs)
-        final_metrics = metrics[final_generation]
+        final_generation = max(metrics) if metrics else max(full_runs)
+        final_metrics = metrics.get(final_generation)
+        final_full = full_runs[final_generation]
         provider_calls = getattr(llm, "provider_call_count", None)
         if isinstance(provider_calls, int) and isinstance(initial_provider_calls, int):
             provider_calls -= initial_provider_calls
@@ -459,10 +488,27 @@ class RunEngine:
             billed_cost -= initial_billed_cost
         else:
             billed_cost = all_billed
+        if final_metrics is None:
+            final_pass_rate = final_full.pass_rate
+            final_cost_usd = final_full.cost_usd
+            final_calls_per_case = (
+                sum(
+                    len(trace.tool_calls)
+                    for case in final_full.results
+                    for trace in case.per_role.values()
+                )
+                / len(final_full.results)
+                if final_full.results
+                else 0.0
+            )
+        else:
+            final_pass_rate = final_metrics.pass_rate
+            final_cost_usd = final_metrics.cost_usd
+            final_calls_per_case = final_metrics.tool_calls_per_case
         summary = {
-            "final_pass_rate": final_metrics.pass_rate,
-            "final_cost_usd": final_metrics.cost_usd,
-            "calls_per_case_final": final_metrics.tool_calls_per_case,
+            "final_pass_rate": final_pass_rate,
+            "final_cost_usd": final_cost_usd,
+            "calls_per_case_final": final_calls_per_case,
             "generations": len(full_runs),
             "best_generation": best_generation,
             "provider_calls": provider_calls,
@@ -471,6 +517,14 @@ class RunEngine:
             "billed_cost_usd": max(0.0, float(billed_cost)),
             "cost_label": "list-rate-equivalent where configured",
         }
+        if ablation_unavailable:
+            summary.update(
+                {
+                    "ablation_status": "unavailable",
+                    "ablation_reason": "no positive displayed RoleTrace.cost_usd",
+                    "structural_fidelity": None,
+                }
+            )
         # The writer was closed in the cleanup block, so append completion with
         # a short-lived writer after all accounting is known.
         with EventWriter(run_dir, run_id=run_id) as completion_writer:
