@@ -819,10 +819,10 @@ def test_anthropic_provider_sends_native_json_schema_payload() -> None:
 
 def test_anthropic_provider_strips_unsupported_schema_keywords() -> None:
     # Anthropic's structured-output schema subset rejects minimum/maximum on
-    # integer/number properties and minLength on strings. pydantic's
-    # model_json_schema() emits these constraints, so the provider must
-    # sanitize the schema hint while leaving everything else - including
-    # nested $defs - intact.
+    # integer/number properties and minLength on strings. The installed SDK's
+    # schema transformer also removes defaults. Pydantic's model_json_schema()
+    # emits these fields, so the provider must sanitize the schema hint while
+    # leaving everything else - including nested $defs - intact.
     requests: list[dict[str, Any]] = []
 
     class Messages:
@@ -843,8 +843,9 @@ def test_anthropic_provider_strips_unsupported_schema_keywords() -> None:
                 "maximum": 10,
                 "exclusiveMinimum": -1,
                 "exclusiveMaximum": 11,
+                "default": 0,
             },
-            "label": {"type": "string", "minLength": 1},
+            "label": {"type": "string", "minLength": 1, "default": ""},
             "nested": {"$ref": "#/$defs/Bound"},
         },
         "required": ["count"],
@@ -852,7 +853,7 @@ def test_anthropic_provider_strips_unsupported_schema_keywords() -> None:
         "$defs": {
             "Bound": {
                 "type": "object",
-                "properties": {"value": {"type": "number", "minimum": 0.0}},
+                "properties": {"value": {"type": "number", "minimum": 0.0, "default": 0.0}},
                 "required": ["value"],
                 "additionalProperties": False,
             }
@@ -889,6 +890,9 @@ def test_anthropic_provider_strips_unsupported_schema_keywords() -> None:
     # The caller's schema object is untouched - only the outgoing payload is sanitized.
     assert schema["properties"]["count"]["minimum"] == 0
     assert schema["properties"]["label"]["minLength"] == 1
+    assert schema["properties"]["count"]["default"] == 0
+    assert schema["properties"]["label"]["default"] == ""
+    assert schema["$defs"]["Bound"]["properties"]["value"]["default"] == 0.0
 
 
 def test_anthropic_provider_fails_explicitly_without_native_schema_sdk_support() -> None:
