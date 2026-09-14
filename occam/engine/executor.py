@@ -575,18 +575,33 @@ class Executor:
             pass
         else:
             raise ExecutorError("execute() cannot be called from a running event loop")
-        return asyncio.run(
-            self.execute_async(
-                architecture,
-                cases,
-                variant=variant,
-                ablate_role=ablate_role,
-                use_cache=use_cache,
-                generation=generation,
-                grader=grader,
-                case_callback=case_callback,
-            )
+        coroutine = self.execute_async(
+            architecture,
+            cases,
+            variant=variant,
+            ablate_role=ablate_role,
+            use_cache=use_cache,
+            generation=generation,
+            grader=grader,
+            case_callback=case_callback,
         )
+        if self.phase_deadline_s is not None:
+            # ``asyncio.run`` waits for its default executor during shutdown.
+            # A phase-bounded case may have a cancelled ``to_thread`` call
+            # whose provider thread is still finishing, so that shutdown would
+            # defeat the absolute deadline.  The bounded path cancels the
+            # coroutine without waiting for that already-accounted work.
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                return loop.run_until_complete(coroutine)
+            finally:
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                finally:
+                    asyncio.set_event_loop(None)
+                    loop.close()
+        return asyncio.run(coroutine)
 
     def run_variant(
         self,
@@ -713,12 +728,38 @@ class Executor:
                     try:
                         if case_timeout is None:
                             result = await case_run
+                        elif self.phase_deadline_s is not None:
+                            phase_limited = case_timeout == remaining
+                            case_task = asyncio.ensure_future(case_run)
+                            done, _ = await asyncio.wait({case_task}, timeout=case_timeout)
+                            if not done:
+                                case_task.cancel()
+                                await asyncio.gather(case_task, return_exceptions=True)
+                                detail = "phase deadline" if phase_limited else f"{case_timeout:g}s"
+                                result = CaseResult(
+                                    case_id=case.id,
+                                    passed=False,
+                                    role_error=(f"TimeoutError: execution case exceeded {detail}"),
+                                    latency_s=case_timeout or 0.0,
+                                )
+                            else:
+                                result = case_task.result()
+                                if time.monotonic() >= self.phase_deadline_s:
+                                    result = result.model_copy(
+                                        update={
+                                            "passed": False,
+                                            "role_error": (
+                                                "TimeoutError: execution case exceeded "
+                                                "phase deadline"
+                                            ),
+                                        }
+                                    )
                         else:
                             result = await asyncio.wait_for(case_run, case_timeout)
                     except TimeoutError:
                         detail = (
                             "phase deadline"
-                            if remaining is not None and case_timeout == remaining
+                            if self.phase_deadline_s is not None and case_timeout == remaining
                             else f"{case_timeout:g}s"
                         )
                         result = CaseResult(

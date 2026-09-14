@@ -136,11 +136,13 @@ def test_baseline_phase_deadline_covers_queued_case_waves(tmp_path: Path) -> Non
 
     # One delayed worker thread can finish after cancellation, but queued
     # waves must not each receive another case-timeout window.
-    assert elapsed < 0.36
+    assert elapsed < 0.20
     assert llm.calls == 2
     assert result.complete is False
+    assert result.status == "incomplete"
     assert result.reason == "case_timeout"
     assert result.completed_case_count == 0
+    assert result.total_case_count == 3
     progress = tmp_path / "run" / "baseline" / "progress" / "sample-001.results.jsonl"
     persisted = [json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()]
     assert len(persisted) == 3
