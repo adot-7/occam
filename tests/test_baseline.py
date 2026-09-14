@@ -232,6 +232,70 @@ def test_baseline_phase_deadline_covers_queued_case_waves(tmp_path: Path) -> Non
     assert events[-1][1]["message"].startswith("Baseline progress: sample=1; completed_cases=0/3;")
 
 
+def test_baseline_cancels_model_waiter_at_phase_deadline(tmp_path: Path) -> None:
+    task, cases = _offline_task_and_cases(2)
+    started_event = threading.Event()
+    release_event = threading.Event()
+    phase_progress_event = threading.Event()
+    llm = FakeLLM(
+        delay_s=0.2,
+        started_event=started_event,
+        release_event=release_event,
+    )
+    executor = Executor(
+        llm=llm,
+        tools=ToolRegistry(),
+        case_concurrency=2,
+        model_concurrency=1,
+    )
+
+    def event_sink(event_type: str, data: Any) -> None:
+        if "timed_out_cases=2" in data.get("message", ""):
+            phase_progress_event.set()
+
+    thread, done, outcome = _run_in_thread(
+        lambda: run_baseline(
+            task,
+            cases,
+            full_cost_usd=1.0,
+            executor=executor,
+            run_dir=tmp_path / "run",
+            phase_timeout_s=0.05,
+            case_timeout_s=0.1,
+            completion_timeout_s=0.5,
+            completion_max_attempts=1,
+            event_sink=event_sink,
+        )
+    )
+
+    assert started_event.wait(timeout=2.0)
+    # Case two has acquired its case permit but is waiting on the sole model
+    # permit.  Both cases have received their phase result while case one is
+    # still inside the gated synchronous call.
+    assert phase_progress_event.wait(timeout=2.0)
+    assert llm.calls == 1
+    assert llm.max_active_calls == 1
+    assert llm.active_calls == 1
+    assert not done.is_set()
+
+    release_event.set()
+    assert done.wait(timeout=2.0)
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert "error" not in outcome
+    result = outcome["result"]
+    assert llm.calls == 1
+    assert llm.max_active_calls == 1
+    assert llm.active_calls == 0
+    assert result.complete is False
+    assert result.status == "incomplete"
+    assert result.reason == "phase_timeout"
+    assert result.completed_case_count == 0
+    assert result.total_case_count == 2
+    assert result.cost_usd == 0.0
+    assert not (tmp_path / "run" / "baseline" / "results.jsonl").exists()
+
+
 def test_baseline_two_case_probe_returns_by_phase_deadline(tmp_path: Path) -> None:
     task, cases = _offline_task_and_cases(2)
     started_event = threading.Event()

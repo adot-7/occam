@@ -729,13 +729,15 @@ class Executor:
                             case_task = asyncio.ensure_future(case_run)
                             done, _ = await asyncio.wait({case_task}, timeout=case_timeout)
                             if not done:
-                                # A cancelled coroutine does not cancel the
-                                # synchronous call already running in
-                                # ``to_thread``.  Keep both permits held until
-                                # the real case task finishes, then wait for
-                                # that release before declaring execution
-                                # complete.  Queued cases still receive their
-                                # own phase-deadline result and never start.
+                                # Cancel the case wrapper at the absolute
+                                # deadline.  ``_complete`` drains a provider
+                                # thread that has already started, while a
+                                # case still waiting for its model semaphore
+                                # is removed without starting a late call.
+                                # Keep the case permit held until either path
+                                # has actually finished before declaring
+                                # execution complete.
+                                case_task.cancel()
                                 deferred_case_tasks.append(
                                     asyncio.ensure_future(release_after_case(case_task))
                                 )
@@ -1205,16 +1207,22 @@ class Executor:
         use_cache: bool,
     ) -> Any:
         payload = [dict(message) for message in messages]
-        async with self._semaphore(model_key):
-            completion_kwargs: dict[str, Any] = {
-                "max_tokens": self.max_tokens,
-                "temperature": self.temperature,
-                "use_cache": use_cache,
-            }
-            if self.completion_timeout_s is not None:
-                completion_kwargs["timeout_s"] = self.completion_timeout_s
-            if self.completion_max_attempts is not None:
-                completion_kwargs["max_attempts"] = self.completion_max_attempts
+        semaphore = self._semaphore(model_key)
+        await semaphore.acquire()
+        completion_kwargs: dict[str, Any] = {
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "use_cache": use_cache,
+        }
+        if self.completion_timeout_s is not None:
+            completion_kwargs["timeout_s"] = self.completion_timeout_s
+        if self.completion_max_attempts is not None:
+            completion_kwargs["max_attempts"] = self.completion_max_attempts
+
+        provider_started = asyncio.Event()
+
+        async def call_provider() -> Any:
+            provider_started.set()
             return await asyncio.to_thread(
                 self.llm.complete,
                 model_key,
@@ -1223,6 +1231,27 @@ class Executor:
                 None,
                 **completion_kwargs,
             )
+
+        provider_task = asyncio.create_task(call_provider())
+        try:
+            # Shield the thread-backed task so cancellation of the case does
+            # not release the model permit while the synchronous call is still
+            # mutating client accounting in the default executor.
+            return await asyncio.shield(provider_task)
+        except asyncio.CancelledError:
+            # Python cannot kill a running thread.  Drain it before releasing
+            # the model lane and re-raising cancellation; this prevents a
+            # queued waiter from starting a provider call after the phase and
+            # prevents late stats mutation after execute_async returns.
+            if not provider_started.is_set():
+                provider_task.cancel()
+            try:
+                await asyncio.shield(provider_task)
+            except BaseException:  # noqa: BLE001 - preserve cancellation
+                pass
+            raise
+        finally:
+            semaphore.release()
 
     async def _invoke_tool(
         self,
