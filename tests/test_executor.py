@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
+import time
 from dataclasses import replace
 
 import pytest
@@ -269,6 +271,88 @@ def test_independent_roles_run_concurrently(tmp_path):
     # The barrier only releases if both independent roles are in flight at once.
     executor.execute(arch, [case()])
     assert provider.max_in_flight >= 2
+
+
+def test_phase_gate_waits_for_active_sibling_before_completion(tmp_path):
+    a_started = threading.Event()
+    a_release = threading.Event()
+    a_finished = threading.Event()
+    phase_gate = threading.Event()
+
+    def handler(call: ProviderCall):
+        if call.system == "ROLE: a":
+            a_started.set()
+            if not a_release.wait(timeout=2.0):
+                raise AssertionError("active sibling release gate was not opened")
+            a_finished.set()
+        return text_response("ok")
+
+    provider = ScriptedProvider(handler)
+
+    class SiblingDeadlineExecutor(Executor):
+        async def _complete(self, model_key, messages, tools, *, use_cache):
+            if "ROLE: b" in str(messages[0].get("content", "")):
+                if not await asyncio.to_thread(a_started.wait, 2.0):
+                    raise AssertionError("active sibling did not start")
+                # Deterministically place the phase deadline between the
+                # sibling's provider launch and role b's model-gate check.
+                self.phase_deadline_s = time.monotonic() - 1.0
+                phase_gate.set()
+            return await super()._complete(model_key, messages, tools, use_cache=use_cache)
+
+    run_dir = tmp_path / "run"
+    outcome = {}
+    done = threading.Event()
+    arch = architecture(role("a"), role("b"), final="b")
+    with EventWriter(run_dir, run_id="run") as writer:
+        executor = SiblingDeadlineExecutor(
+            llm=build_client(provider, tmp_path / "cache"),
+            writer=writer,
+            run_dir=run_dir,
+            case_concurrency=1,
+            model_concurrency=2,
+            case_timeout_s=1.0,
+            phase_deadline_s=time.monotonic() + 10.0,
+        )
+
+        def run() -> None:
+            try:
+                outcome["result"] = executor.execute(arch, [case()])
+            except BaseException as exc:  # noqa: BLE001 - surface thread failures
+                outcome["error"] = exc
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            assert a_started.wait(timeout=2.0)
+            assert phase_gate.wait(timeout=2.0)
+            assert not done.is_set()
+            assert provider.count == 1
+            assert provider.max_in_flight == 1
+            assert not a_finished.is_set()
+
+            a_release.set()
+            assert done.wait(timeout=2.0)
+            thread.join(timeout=2.0)
+            assert not thread.is_alive()
+            assert "error" not in outcome
+            result = outcome["result"]
+            assert provider.count == 1
+            assert provider.max_in_flight == 1
+            assert a_finished.is_set()
+            case_result = result.results[0]
+            assert case_result.role_error == "TimeoutError: execution case exceeded phase deadline"
+            assert case_result.per_role["b"].error == case_result.role_error
+            assert case_result.per_role["a"].cost_usd > 0.0
+            assert result.cost_usd == case_result.cost_usd
+        finally:
+            a_release.set()
+            thread.join(timeout=2.0)
+
+    events = EventReader(run_dir).read()
+    assert events[-1].type == "execution.completed"
 
 
 def test_model_concurrency_is_bounded_by_the_lane(tmp_path):

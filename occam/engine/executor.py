@@ -78,6 +78,7 @@ _VARIANT_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 _EMPTY_USER_MESSAGE = "Produce your output now."
 ANSWER_PREFIX_LIMIT = 120
 GRADE_ERROR_LIMIT = 256
+_PHASE_TIMEOUT_MESSAGE = "execution case exceeded phase deadline"
 _ERROR_PAYLOAD = re.compile(r"(?s)(?:\{.*\}|\[.*\])")
 _ERROR_URL = re.compile(r"(?i)\bhttps?://\S+")
 _ERROR_SECRET_ASSIGNMENT = re.compile(
@@ -94,6 +95,10 @@ _REDACTED_ERROR = "[redacted]"
 
 class ExecutorError(RuntimeError):
     """Base class for executor-level failures."""
+
+
+class _PhaseDeadlineError(TimeoutError):
+    """A provider launch was prevented by the executor's phase deadline."""
 
 
 class ArchitectureError(ExecutorError):
@@ -1081,6 +1086,9 @@ class Executor:
                 completion = await self._complete(
                     role.model, messages, specs or None, use_cache=use_cache
                 )
+            except _PhaseDeadlineError as exc:
+                error = f"TimeoutError: {exc}"
+                break
             except (LLMError, ConfigurationError) as exc:
                 error = _safe_role_error(exc)
                 break
@@ -1211,7 +1219,7 @@ class Executor:
         await semaphore.acquire()
         if self.phase_deadline_s is not None and time.monotonic() >= self.phase_deadline_s:
             semaphore.release()
-            raise TimeoutError("execution case exceeded phase deadline")
+            raise _PhaseDeadlineError(_PHASE_TIMEOUT_MESSAGE)
         completion_kwargs: dict[str, Any] = {
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
@@ -1226,7 +1234,7 @@ class Executor:
 
         async def call_provider() -> Any:
             if self.phase_deadline_s is not None and time.monotonic() >= self.phase_deadline_s:
-                raise TimeoutError("execution case exceeded phase deadline")
+                raise _PhaseDeadlineError(_PHASE_TIMEOUT_MESSAGE)
             provider_started.set()
             return await asyncio.to_thread(
                 self.llm.complete,
