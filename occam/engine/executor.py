@@ -1209,6 +1209,9 @@ class Executor:
         payload = [dict(message) for message in messages]
         semaphore = self._semaphore(model_key)
         await semaphore.acquire()
+        if self.phase_deadline_s is not None and time.monotonic() >= self.phase_deadline_s:
+            semaphore.release()
+            raise TimeoutError("execution case exceeded phase deadline")
         completion_kwargs: dict[str, Any] = {
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
@@ -1222,6 +1225,8 @@ class Executor:
         provider_started = asyncio.Event()
 
         async def call_provider() -> Any:
+            if self.phase_deadline_s is not None and time.monotonic() >= self.phase_deadline_s:
+                raise TimeoutError("execution case exceeded phase deadline")
             provider_started.set()
             return await asyncio.to_thread(
                 self.llm.complete,

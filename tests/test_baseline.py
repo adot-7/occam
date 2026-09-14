@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
+import pytest
+
+import occam.engine.executor as executor_module
 from occam.engine.baseline import run_baseline
 from occam.engine.executor import Executor
 from occam.llm.client import Completion
@@ -116,6 +121,33 @@ def _offline_task_and_cases(count: int = 1) -> tuple[Any, list[Any]]:
     # The baseline contract is what is under test; no tool binding is needed
     # for a local answer double.
     return pack.task.model_copy(update={"tools": []}), pack.select(count)
+
+
+def test_complete_rechecks_deadline_before_provider_submission(monkeypatch: Any) -> None:
+    real_time = executor_module.time
+    clock_values = iter((0.0, 0.006))
+    monkeypatch.setattr(
+        executor_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(clock_values), perf_counter=real_time.perf_counter),
+    )
+    started_event = threading.Event()
+    llm = FakeLLM(delay_s=0.2, started_event=started_event)
+    executor = Executor(
+        llm=llm,
+        tools=ToolRegistry(),
+        model_concurrency=1,
+        phase_deadline_s=0.005,
+    )
+
+    async def complete() -> Any:
+        return await executor._complete("worker_fast", [], None, use_cache=False)
+
+    with pytest.raises(TimeoutError, match="phase deadline"):
+        asyncio.run(complete())
+    assert llm.calls == 0
+    assert not started_event.is_set()
+    assert executor._semaphores["worker_fast"]._value == 1
 
 
 def test_baseline_timeout_persists_partial_case_and_truthful_cost(tmp_path: Path) -> None:
