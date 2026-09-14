@@ -280,6 +280,7 @@ def run_baseline(
         case_timeout_s=case_timeout_s,
         completion_timeout_s=completion_timeout_s,
         completion_max_attempts=completion_max_attempts,
+        phase_deadline_s=phase_started + phase_timeout_s,
     )
 
     def incomplete(reason: str, observed: Mapping[str, CaseResult]) -> BaselineResult:

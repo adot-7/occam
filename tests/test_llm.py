@@ -540,6 +540,31 @@ def test_empty_length_responses_retry_until_completion_and_account_final_usage(
     assert client.billed_cost_usd == result.billed_cost_usd == 0
 
 
+def test_per_call_attempt_bound_preserves_adaptive_truncation_expansion(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [
+            ProviderResponse(text="", finish_reason="length"),
+            ProviderResponse(text="answer", tokens_in=1, tokens_out=1),
+        ]
+    )
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+    )
+
+    result = client.complete(
+        "worker_fast",
+        [{"role": "user", "content": "expand"}],
+        max_attempts=1,
+    )
+
+    assert result.text == "answer"
+    assert [call["max_tokens"] for call in provider.calls] == [2048, 4096]
+
+
 def test_empty_length_responses_stop_at_bounded_budget(tmp_path: Path) -> None:
     response = ProviderResponse(text="", reasoning="thinking", finish_reason="length")
     provider = FakeProvider([response, response, response, response])

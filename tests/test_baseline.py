@@ -47,11 +47,11 @@ class FakeLLM:
         )
 
 
-def _offline_task_and_cases() -> tuple[Any, list[Any]]:
+def _offline_task_and_cases(count: int = 1) -> tuple[Any, list[Any]]:
     pack = load_task_pack("fx_recon_a")
     # The baseline contract is what is under test; no tool binding is needed
     # for a local answer double.
-    return pack.task.model_copy(update={"tools": []}), pack.select(1)
+    return pack.task.model_copy(update={"tools": []}), pack.select(count)
 
 
 def test_baseline_timeout_persists_partial_case_and_truthful_cost(tmp_path: Path) -> None:
@@ -94,6 +94,45 @@ def test_baseline_timeout_persists_partial_case_and_truthful_cost(tmp_path: Path
     assert events
     assert events[-1][0] == "log"
     assert "provider" not in events[-1][1]["message"].lower()
+
+
+def test_baseline_phase_deadline_covers_queued_case_waves(tmp_path: Path) -> None:
+    task, cases = _offline_task_and_cases(3)
+    llm = FakeLLM(delay_s=0.2)
+    executor = Executor(
+        llm=llm,
+        tools=ToolRegistry(),
+        case_concurrency=1,
+        model_concurrency=1,
+    )
+
+    started = time.monotonic()
+    result = run_baseline(
+        task,
+        cases,
+        full_cost_usd=1.0,
+        executor=executor,
+        run_dir=tmp_path / "run",
+        phase_timeout_s=0.15,
+        case_timeout_s=0.1,
+        completion_timeout_s=0.5,
+        completion_max_attempts=1,
+    )
+    elapsed = time.monotonic() - started
+
+    # One delayed worker thread can finish after cancellation, but queued
+    # waves must not each receive another case-timeout window.
+    assert elapsed < 0.36
+    assert llm.calls == 2
+    assert result.complete is False
+    assert result.reason == "case_timeout"
+    assert result.completed_case_count == 0
+    progress = tmp_path / "run" / "baseline" / "progress" / "sample-001.results.jsonl"
+    persisted = [json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()]
+    assert len(persisted) == 3
+    assert all(
+        row["role_error"].startswith("TimeoutError: execution case exceeded") for row in persisted
+    )
 
 
 def test_completed_baseline_keeps_final_results_and_progress(tmp_path: Path) -> None:

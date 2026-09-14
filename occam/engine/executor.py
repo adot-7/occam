@@ -469,6 +469,7 @@ class Executor:
         case_timeout_s: float | None = None,
         completion_timeout_s: float | None = None,
         completion_max_attempts: int | None = None,
+        phase_deadline_s: float | None = None,
     ) -> None:
         if case_concurrency < 1:
             raise ValueError("case_concurrency must be at least 1")
@@ -486,6 +487,10 @@ class Executor:
             isinstance(completion_max_attempts, bool) or completion_max_attempts < 1
         ):
             raise ValueError("completion_max_attempts must be at least 1 when set")
+        if phase_deadline_s is not None and (
+            isinstance(phase_deadline_s, bool) or not math.isfinite(float(phase_deadline_s))
+        ):
+            raise ValueError("phase_deadline_s must be finite when set")
         self._llm = llm
         self.tools = normalize_registry(tools)
         self._tool_registry = _registry_owner(tools, self.tools)
@@ -507,6 +512,7 @@ class Executor:
             None if completion_timeout_s is None else float(completion_timeout_s)
         )
         self.completion_max_attempts = completion_max_attempts
+        self.phase_deadline_s = None if phase_deadline_s is None else float(phase_deadline_s)
         self._semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._writer_lock: asyncio.Lock | None = None
@@ -647,33 +653,84 @@ class Executor:
         emitted = 0
 
         async def run_one(position: int, case: Case) -> int:
-            async with limiter:
-                case_run = self._run_case(
-                    architecture,
-                    index,
-                    levels,
-                    excluded,
-                    case,
-                    active_grader,
-                    use_cache=use_cache,
-                    generation=generation,
-                    variant=variant,
-                )
-                try:
-                    if self.case_timeout_s is None:
-                        result = await case_run
+            acquired = False
+            result: CaseResult
+            try:
+                if self.phase_deadline_s is not None:
+                    remaining = self.phase_deadline_s - time.monotonic()
+                    if remaining <= 0:
+                        result = CaseResult(
+                            case_id=case.id,
+                            passed=False,
+                            role_error="TimeoutError: execution case exceeded phase deadline",
+                        )
                     else:
-                        result = await asyncio.wait_for(case_run, self.case_timeout_s)
-                except TimeoutError:
+                        try:
+                            await asyncio.wait_for(limiter.acquire(), remaining)
+                            acquired = True
+                        except TimeoutError:
+                            result = CaseResult(
+                                case_id=case.id,
+                                passed=False,
+                                role_error="TimeoutError: execution case exceeded phase deadline",
+                            )
+                else:
+                    await limiter.acquire()
+                    acquired = True
+
+                if not acquired:
+                    results[position] = result
+                    return position
+
+                remaining = (
+                    None
+                    if self.phase_deadline_s is None
+                    else self.phase_deadline_s - time.monotonic()
+                )
+                if remaining is not None and remaining <= 0:
                     result = CaseResult(
                         case_id=case.id,
                         passed=False,
-                        role_error=(
-                            f"TimeoutError: execution case exceeded {self.case_timeout_s:g}s"
-                        ),
-                        latency_s=self.case_timeout_s or 0.0,
+                        role_error="TimeoutError: execution case exceeded phase deadline",
                     )
-                results[position] = result
+                else:
+                    case_timeout = self.case_timeout_s
+                    if remaining is not None:
+                        case_timeout = (
+                            remaining if case_timeout is None else min(case_timeout, remaining)
+                        )
+                    case_run = self._run_case(
+                        architecture,
+                        index,
+                        levels,
+                        excluded,
+                        case,
+                        active_grader,
+                        use_cache=use_cache,
+                        generation=generation,
+                        variant=variant,
+                    )
+                    try:
+                        if case_timeout is None:
+                            result = await case_run
+                        else:
+                            result = await asyncio.wait_for(case_run, case_timeout)
+                    except TimeoutError:
+                        detail = (
+                            "phase deadline"
+                            if remaining is not None and case_timeout == remaining
+                            else f"{case_timeout:g}s"
+                        )
+                        result = CaseResult(
+                            case_id=case.id,
+                            passed=False,
+                            role_error=f"TimeoutError: execution case exceeded {detail}",
+                            latency_s=case_timeout or 0.0,
+                        )
+            finally:
+                if acquired:
+                    limiter.release()
+            results[position] = result
             return position
 
         pending = {
