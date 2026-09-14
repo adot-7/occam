@@ -26,6 +26,7 @@ BASELINE_CASE_TIMEOUT_S = 3 * 60.0
 BASELINE_COMPLETION_TIMEOUT_S = 30.0
 BASELINE_COMPLETION_MAX_ATTEMPTS = 1
 _CASE_TIMEOUT_PREFIX = "TimeoutError: execution case exceeded "
+_PHASE_TIMEOUT_PREFIX = "TimeoutError: execution case exceeded phase deadline"
 
 
 @dataclass(frozen=True)
@@ -220,7 +221,16 @@ def _write_progress_results(
 
 
 def _is_case_timeout(result: CaseResult) -> bool:
-    return (result.role_error or "").startswith(_CASE_TIMEOUT_PREFIX)
+    error = result.role_error or ""
+    return error.startswith(_CASE_TIMEOUT_PREFIX) and not error.startswith(_PHASE_TIMEOUT_PREFIX)
+
+
+def _is_phase_timeout(result: CaseResult) -> bool:
+    return (result.role_error or "").startswith(_PHASE_TIMEOUT_PREFIX)
+
+
+def _is_timeout(result: CaseResult) -> bool:
+    return _is_case_timeout(result) or _is_phase_timeout(result)
 
 
 def _billed_cost(result: CaseResult) -> float:
@@ -294,7 +304,7 @@ def run_baseline(
                 results=[],
             )
         )
-        completed = sum(not _is_case_timeout(result) for result in observed.values())
+        completed = sum(not _is_timeout(result) for result in observed.values())
         return BaselineResult(
             run=sample,
             k=len(samples),
@@ -329,8 +339,8 @@ def run_baseline(
             if run_dir is not None:
                 _write_progress_results(run_dir, number, sample_observed)
             if event_sink is not None:
-                completed = sum(not _is_case_timeout(item) for item in sample_observed.values())
-                timed_out = sum(_is_case_timeout(item) for item in sample_observed.values())
+                completed = sum(not _is_timeout(item) for item in sample_observed.values())
+                timed_out = sum(_is_timeout(item) for item in sample_observed.values())
                 displayed = sum(sample.cost_usd for sample in samples) + sum(
                     item.cost_usd for item in sample_observed.values()
                 )
@@ -363,6 +373,8 @@ def run_baseline(
             case_callback=on_case,
         )
         samples.append(sample)
+        if any(_is_phase_timeout(result) for result in sample.results):
+            return incomplete("phase_timeout", observed)
         if any(_is_case_timeout(result) for result in sample.results):
             return incomplete("case_timeout", observed)
         # The executor bounds queued and active cases, but it can return after

@@ -575,33 +575,18 @@ class Executor:
             pass
         else:
             raise ExecutorError("execute() cannot be called from a running event loop")
-        coroutine = self.execute_async(
-            architecture,
-            cases,
-            variant=variant,
-            ablate_role=ablate_role,
-            use_cache=use_cache,
-            generation=generation,
-            grader=grader,
-            case_callback=case_callback,
+        return asyncio.run(
+            self.execute_async(
+                architecture,
+                cases,
+                variant=variant,
+                ablate_role=ablate_role,
+                use_cache=use_cache,
+                generation=generation,
+                grader=grader,
+                case_callback=case_callback,
+            )
         )
-        if self.phase_deadline_s is not None:
-            # ``asyncio.run`` waits for its default executor during shutdown.
-            # A phase-bounded case may have a cancelled ``to_thread`` call
-            # whose provider thread is still finishing, so that shutdown would
-            # defeat the absolute deadline.  The bounded path cancels the
-            # coroutine without waiting for that already-accounted work.
-            loop = asyncio.new_event_loop()
-            try:
-                asyncio.set_event_loop(loop)
-                return loop.run_until_complete(coroutine)
-            finally:
-                try:
-                    loop.run_until_complete(loop.shutdown_asyncgens())
-                finally:
-                    asyncio.set_event_loop(None)
-                    loop.close()
-        return asyncio.run(coroutine)
 
     def run_variant(
         self,
@@ -665,7 +650,18 @@ class Executor:
 
         results: list[CaseResult | None] = [None] * len(cases)
         limiter = asyncio.Semaphore(self.case_concurrency)
+        deferred_case_tasks: list[asyncio.Task[Any]] = []
         emitted = 0
+
+        async def release_after_case(
+            case_task: asyncio.Task[CaseResult],
+        ) -> None:
+            try:
+                await asyncio.shield(case_task)
+            except BaseException:  # noqa: BLE001 - release even if the task fails
+                pass
+            finally:
+                limiter.release()
 
         async def run_one(position: int, case: Case) -> int:
             acquired = False
@@ -733,8 +729,17 @@ class Executor:
                             case_task = asyncio.ensure_future(case_run)
                             done, _ = await asyncio.wait({case_task}, timeout=case_timeout)
                             if not done:
-                                case_task.cancel()
-                                await asyncio.gather(case_task, return_exceptions=True)
+                                # A cancelled coroutine does not cancel the
+                                # synchronous call already running in
+                                # ``to_thread``.  Keep both permits held until
+                                # the real case task finishes, then wait for
+                                # that release before declaring execution
+                                # complete.  Queued cases still receive their
+                                # own phase-deadline result and never start.
+                                deferred_case_tasks.append(
+                                    asyncio.ensure_future(release_after_case(case_task))
+                                )
+                                acquired = False
                                 detail = "phase deadline" if phase_limited else f"{case_timeout:g}s"
                                 result = CaseResult(
                                     case_id=case.id,
@@ -790,6 +795,9 @@ class Executor:
             while emitted < len(results) and results[emitted] is not None:
                 await self._emit_case(generation, variant, results[emitted])
                 emitted += 1
+
+        if deferred_case_tasks:
+            await asyncio.gather(*deferred_case_tasks, return_exceptions=True)
 
         final = [result for result in results if result is not None]
         passed = sum(1 for result in final if result.passed)

@@ -21,6 +21,8 @@ class FakeLLM:
     def __init__(self, *, delay_s: float = 0.0) -> None:
         self.delay_s = delay_s
         self.calls = 0
+        self.active_calls = 0
+        self.max_active_calls = 0
         self.configs = {
             "worker_fast": ModelConfig(
                 key="worker_fast",
@@ -33,18 +35,23 @@ class FakeLLM:
 
     def complete(self, *_args: Any, **_kwargs: Any) -> Completion:
         self.calls += 1
-        if self.delay_s:
-            time.sleep(self.delay_s)
-        return Completion(
-            text="offline answer",
-            tool_calls=[],
-            tokens_in=2,
-            tokens_out=3,
-            cost_usd=0.01,
-            billed_cost_usd=0.0,
-            latency_s=self.delay_s,
-            cached=False,
-        )
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            if self.delay_s:
+                time.sleep(self.delay_s)
+            return Completion(
+                text="offline answer",
+                tool_calls=[],
+                tokens_in=2,
+                tokens_out=3,
+                cost_usd=0.01,
+                billed_cost_usd=0.0,
+                latency_s=self.delay_s,
+                cached=False,
+            )
+        finally:
+            self.active_calls -= 1
 
 
 class LateReturningExecutor(Executor):
@@ -119,6 +126,7 @@ def test_baseline_phase_deadline_covers_queued_case_waves(tmp_path: Path) -> Non
         case_concurrency=1,
         model_concurrency=1,
     )
+    events: list[tuple[str, dict[str, Any]]] = []
 
     started = time.monotonic()
     result = run_baseline(
@@ -131,16 +139,22 @@ def test_baseline_phase_deadline_covers_queued_case_waves(tmp_path: Path) -> Non
         case_timeout_s=0.1,
         completion_timeout_s=0.5,
         completion_max_attempts=1,
+        event_sink=lambda event_type, data: events.append((event_type, dict(data))),
     )
     elapsed = time.monotonic() - started
 
-    # One delayed worker thread can finish after cancellation, but queued
-    # waves must not each receive another case-timeout window.
-    assert elapsed < 0.20
-    assert llm.calls == 2
+    # The active synchronous call is drained before the executor returns, so
+    # the phase may finish after its deadline without overlapping calls.
+    assert elapsed < 0.25
+    assert llm.calls == 1
+    assert llm.max_active_calls == 1
+    assert llm.active_calls == 0
+    calls_at_return = llm.calls
+    time.sleep(0.03)
+    assert llm.calls == calls_at_return
     assert result.complete is False
     assert result.status == "incomplete"
-    assert result.reason == "case_timeout"
+    assert result.reason == "phase_timeout"
     assert result.completed_case_count == 0
     assert result.total_case_count == 3
     progress = tmp_path / "run" / "baseline" / "progress" / "sample-001.results.jsonl"
@@ -149,6 +163,7 @@ def test_baseline_phase_deadline_covers_queued_case_waves(tmp_path: Path) -> Non
     assert all(
         row["role_error"].startswith("TimeoutError: execution case exceeded") for row in persisted
     )
+    assert events[-1][1]["message"].startswith("Baseline progress: sample=1; completed_cases=0/3;")
 
 
 def test_baseline_two_case_probe_returns_by_phase_deadline(tmp_path: Path) -> None:
@@ -179,10 +194,52 @@ def test_baseline_two_case_probe_returns_by_phase_deadline(tmp_path: Path) -> No
     assert llm.calls == 2
     assert result.complete is False
     assert result.status == "incomplete"
-    assert result.reason == "case_timeout"
+    assert result.reason == "phase_timeout"
     assert result.completed_case_count == 1
     assert result.total_case_count == 2
     assert result.cost_usd == 0.01
+    assert llm.max_active_calls == 1
+    assert llm.active_calls == 0
+    assert not (tmp_path / "run" / "baseline" / "results.jsonl").exists()
+
+
+def test_baseline_waits_for_slow_active_case_before_completion(tmp_path: Path) -> None:
+    task, cases = _offline_task_and_cases()
+    llm = FakeLLM(delay_s=0.5)
+    executor = Executor(
+        llm=llm,
+        tools=ToolRegistry(),
+        case_concurrency=1,
+        model_concurrency=1,
+    )
+
+    started = time.monotonic()
+    result = run_baseline(
+        task,
+        cases,
+        full_cost_usd=1.0,
+        executor=executor,
+        run_dir=tmp_path / "run",
+        phase_timeout_s=0.05,
+        case_timeout_s=0.1,
+        completion_timeout_s=0.5,
+        completion_max_attempts=1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert 0.5 <= elapsed < 0.65
+    assert llm.calls == 1
+    assert llm.max_active_calls == 1
+    assert llm.active_calls == 0
+    assert result.complete is False
+    assert result.status == "incomplete"
+    assert result.reason == "phase_timeout"
+    assert result.completed_case_count == 0
+    assert result.total_case_count == 1
+    assert result.cost_usd == 0.0
+    calls_at_return = llm.calls
+    time.sleep(0.03)
+    assert llm.calls == calls_at_return
     assert not (tmp_path / "run" / "baseline" / "results.jsonl").exists()
 
 
