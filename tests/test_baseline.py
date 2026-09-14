@@ -151,6 +151,41 @@ def test_baseline_phase_deadline_covers_queued_case_waves(tmp_path: Path) -> Non
     )
 
 
+def test_baseline_two_case_probe_returns_by_phase_deadline(tmp_path: Path) -> None:
+    task, cases = _offline_task_and_cases(2)
+    llm = FakeLLM(delay_s=0.06)
+    executor = Executor(
+        llm=llm,
+        tools=ToolRegistry(),
+        case_concurrency=1,
+        model_concurrency=1,
+    )
+
+    started = time.monotonic()
+    result = run_baseline(
+        task,
+        cases,
+        full_cost_usd=0.02,
+        executor=executor,
+        run_dir=tmp_path / "run",
+        phase_timeout_s=0.10,
+        case_timeout_s=0.10,
+        completion_timeout_s=0.5,
+        completion_max_attempts=1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.14
+    assert llm.calls == 2
+    assert result.complete is False
+    assert result.status == "incomplete"
+    assert result.reason == "case_timeout"
+    assert result.completed_case_count == 1
+    assert result.total_case_count == 2
+    assert result.cost_usd == 0.01
+    assert not (tmp_path / "run" / "baseline" / "results.jsonl").exists()
+
+
 def test_baseline_rejects_sample_returned_after_phase_deadline(tmp_path: Path) -> None:
     task, cases = _offline_task_and_cases(2)
     llm = FakeLLM(delay_s=0.06)
