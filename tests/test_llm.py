@@ -197,10 +197,12 @@ def test_openai_provider_sends_native_tools_and_never_json_schema_for_worker_fas
         tools=[ToolSpec(name="fx_rate", description="rate", parameters={"type": "object"})],
         response_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
         max_tokens=2048,
+        timeout_s=7.5,
     )
 
     assert completions.request is not None
     assert completions.request["temperature"] == 0.0
+    assert completions.request["timeout"] == 7.5
     assert completions.request["tool_choice"] == "auto"
     assert completions.request["tools"][0]["type"] == "function"
     assert "json_schema" not in json.dumps(completions.request)
@@ -326,6 +328,31 @@ def test_client_retries_only_bounded_transient_failures(tmp_path: Path) -> None:
     assert result.text == "ok"
     assert delays == [0.1, 0.2]
     assert len(provider.calls) == 3
+
+
+def test_per_call_limits_override_retry_policy_and_forward_timeout(tmp_path: Path) -> None:
+    events: list[tuple[str, dict[str, Any]]] = []
+    provider = FakeProvider([StatusError(503)])
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+        retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.1, max_delay_s=1),
+        sleeper=lambda _seconds: pytest.fail("per-call max_attempts must prevent a retry"),
+        event_sink=lambda event_type, data: events.append((event_type, dict(data))),
+    )
+
+    with pytest.raises(CompletionError, match="1 attempt"):
+        client.complete(
+            "worker_fast",
+            [{"role": "user", "content": "bounded"}],
+            timeout_s=7.5,
+            max_attempts=1,
+        )
+
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["timeout_s"] == 7.5
+    assert events == []
 
 
 def test_structured_429_retries_honor_bounded_retry_after_and_emit_safe_logs(
@@ -658,9 +685,11 @@ def test_anthropic_adapter_maps_system_tools_and_native_tool_use() -> None:
         tools=[{"name": "fx_rate", "description": "rate", "parameters": {"type": "object"}}],
         response_schema=None,
         max_tokens=2048,
+        timeout_s=7.5,
     )
 
     assert requests[0]["system"] == "system"
+    assert requests[0]["timeout"] == 7.5
     assert "temperature" not in requests[0]
     assert requests[0]["tools"][0]["input_schema"] == {"type": "object"}
     assert requests[0]["tool_choice"] == {"type": "auto"}

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
+import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +18,14 @@ from occam.engine.executor import Executor
 
 MAX_SAMPLES = 9
 BASELINE_MODEL = "worker_fast"
+# The baseline is a comparator, not a reason to leave the run unbounded.  Its
+# lane gets one provider attempt with an SDK request timeout; a case and the
+# whole cost-matching phase have independent upper bounds as well.
+BASELINE_PHASE_TIMEOUT_S = 10 * 60.0
+BASELINE_CASE_TIMEOUT_S = 3 * 60.0
+BASELINE_COMPLETION_TIMEOUT_S = 30.0
+BASELINE_COMPLETION_MAX_ATTEMPTS = 1
+_CASE_TIMEOUT_PREFIX = "TimeoutError: execution case exceeded "
 
 
 @dataclass(frozen=True)
@@ -25,6 +36,11 @@ class BaselineResult:
     k: int
     matched_to_cost_usd: float
     samples: tuple[RunResult, ...] = ()
+    complete: bool = True
+    status: str = "completed"
+    reason: str | None = None
+    completed_case_count: int | None = None
+    total_case_count: int | None = None
 
     @property
     def pass_rate(self) -> float:
@@ -32,7 +48,9 @@ class BaselineResult:
 
     @property
     def cost_usd(self) -> float:
-        return self.run.cost_usd
+        if self.complete:
+            return self.run.cost_usd
+        return sum(sample.cost_usd for sample in self.samples)
 
     @property
     def latency_s_mean(self) -> float:
@@ -48,6 +66,8 @@ class BaselineResult:
         )
 
     def event_data(self, generation: int) -> dict[str, Any]:
+        if not self.complete:
+            raise ValueError("an incomplete baseline has no completion event")
         return {
             "generation": generation,
             "method": "cot_sc",
@@ -155,11 +175,62 @@ def _aggregate_case(
 
 def _write_results(run_dir: str | Path, results: list[CaseResult]) -> None:
     destination = Path(run_dir) / "baseline" / "results.jsonl"
+    _write_jsonl(destination, results)
+
+
+def _write_jsonl(destination: Path, results: Sequence[CaseResult]) -> None:
+    """Atomically persist a baseline result snapshot."""
+
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", encoding="utf-8", newline="\n") as handle:
-        for result in results:
-            handle.write(json.dumps(result.model_dump(mode="json"), sort_keys=True))
-            handle.write("\n")
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            for result in results:
+                handle.write(json.dumps(result.model_dump(mode="json"), sort_keys=True))
+                handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, destination)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _write_progress_results(
+    run_dir: str | Path,
+    sample_number: int,
+    results: Mapping[str, CaseResult],
+) -> None:
+    """Persist the cases observed so far for one baseline sample."""
+
+    destination = (
+        Path(run_dir) / "baseline" / "progress" / f"sample-{sample_number:03d}.results.jsonl"
+    )
+    _write_jsonl(destination, sorted(results.values(), key=lambda result: result.case_id))
+
+
+def _is_case_timeout(result: CaseResult) -> bool:
+    return (result.role_error or "").startswith(_CASE_TIMEOUT_PREFIX)
+
+
+def _billed_cost(result: CaseResult) -> float:
+    return sum(trace.billed_cost_usd for trace in result.per_role.values())
+
+
+def _positive_limit(name: str, value: float) -> float:
+    if isinstance(value, bool) or not math.isfinite(float(value)) or value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return float(value)
 
 
 def run_baseline(
@@ -172,6 +243,11 @@ def run_baseline(
     generation: int = 0,
     model_key: str = BASELINE_MODEL,
     grader: Any = None,
+    phase_timeout_s: float = BASELINE_PHASE_TIMEOUT_S,
+    case_timeout_s: float = BASELINE_CASE_TIMEOUT_S,
+    completion_timeout_s: float = BASELINE_COMPLETION_TIMEOUT_S,
+    completion_max_attempts: int = BASELINE_COMPLETION_MAX_ATTEMPTS,
+    event_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
 ) -> BaselineResult:
     """Run CoT-SC with ``k`` samples matched to the current full-run cost.
 
@@ -182,8 +258,14 @@ def run_baseline(
 
     if not cases:
         raise ValueError("baseline needs at least one case")
+    phase_timeout_s = _positive_limit("phase_timeout_s", phase_timeout_s)
+    case_timeout_s = _positive_limit("case_timeout_s", case_timeout_s)
+    completion_timeout_s = _positive_limit("completion_timeout_s", completion_timeout_s)
+    if isinstance(completion_max_attempts, bool) or completion_max_attempts < 1:
+        raise ValueError("completion_max_attempts must be at least 1")
     architecture = _baseline_architecture(task, model_key=model_key)
     samples: list[RunResult] = []
+    phase_started = time.monotonic()
     first = executor.__class__(
         llm=executor.llm,
         tools=executor.tools,
@@ -195,28 +277,95 @@ def run_baseline(
         max_tokens=executor.max_tokens,
         case_concurrency=executor.case_concurrency,
         model_concurrency=executor._model_concurrency,
+        case_timeout_s=case_timeout_s,
+        completion_timeout_s=completion_timeout_s,
+        completion_max_attempts=completion_max_attempts,
     )
-    sample = first.run_variant(
-        architecture,
-        cases,
-        variant="baseline:cot_sc:1",
-        use_cache=False,
-        generation=generation,
-        grader=grader,
-    )
-    samples.append(sample)
-    k = _k_for_cost(full_cost_usd, sample.cost_usd)
-    for sample_number in range(2, k + 1):
-        samples.append(
-            first.run_variant(
-                architecture,
-                cases,
-                variant=f"baseline:cot_sc:{sample_number}",
-                use_cache=False,
-                generation=generation,
-                grader=grader,
+
+    def incomplete(reason: str, observed: Mapping[str, CaseResult]) -> BaselineResult:
+        sample = (
+            samples[-1]
+            if samples
+            else RunResult(
+                architecture_id=architecture.id,
+                variant="baseline:cot_sc",
+                results=[],
             )
         )
+        completed = sum(not _is_case_timeout(result) for result in observed.values())
+        return BaselineResult(
+            run=sample,
+            k=len(samples),
+            matched_to_cost_usd=full_cost_usd,
+            samples=tuple(samples),
+            complete=False,
+            status="incomplete",
+            reason=reason,
+            completed_case_count=completed,
+            total_case_count=len(cases),
+        )
+
+    k = 1
+    sample_number = 1
+    observed: dict[str, CaseResult] = {}
+    while sample_number <= k:
+        remaining = phase_timeout_s - (time.monotonic() - phase_started)
+        if remaining <= 0:
+            return incomplete("phase_timeout", observed)
+        # The case timeout is also the sample deadline because all cases are
+        # scheduled together; queued model-lane work must not keep the phase
+        # alive indefinitely.
+        first.case_timeout_s = min(case_timeout_s, remaining)
+        observed = {}
+
+        def on_case(
+            result: CaseResult,
+            number: int = sample_number,
+            sample_observed: dict[str, CaseResult] = observed,
+        ) -> None:
+            sample_observed[result.case_id] = result
+            if run_dir is not None:
+                _write_progress_results(run_dir, number, sample_observed)
+            if event_sink is not None:
+                completed = sum(not _is_case_timeout(item) for item in sample_observed.values())
+                timed_out = sum(_is_case_timeout(item) for item in sample_observed.values())
+                displayed = sum(sample.cost_usd for sample in samples) + sum(
+                    item.cost_usd for item in sample_observed.values()
+                )
+                billed = sum(
+                    _billed_cost(sample_result)
+                    for sample in samples
+                    for sample_result in sample.results
+                ) + sum(_billed_cost(item) for item in sample_observed.values())
+                event_sink(
+                    "log",
+                    {
+                        "level": "info",
+                        "message": (
+                            f"Baseline progress: sample={number}; "
+                            f"completed_cases={completed}/{len(cases)}; "
+                            f"timed_out_cases={timed_out}; "
+                            f"displayed_cost_usd={displayed:.8f}; "
+                            f"billed_cost_usd={billed:.8f}"
+                        ),
+                    },
+                )
+
+        sample = first.run_variant(
+            architecture,
+            cases,
+            variant=f"baseline:cot_sc:{sample_number}",
+            use_cache=False,
+            generation=generation,
+            grader=grader,
+            case_callback=on_case,
+        )
+        samples.append(sample)
+        if any(_is_case_timeout(result) for result in sample.results):
+            return incomplete("case_timeout", observed)
+        if sample_number == 1:
+            k = _k_for_cost(full_cost_usd, sample.cost_usd)
+        sample_number += 1
 
     by_case: dict[str, list[CaseResult]] = {case.id: [] for case in cases}
     for sample in samples:
@@ -246,6 +395,10 @@ def run_baseline(
 
 __all__ = [
     "BASELINE_MODEL",
+    "BASELINE_CASE_TIMEOUT_S",
+    "BASELINE_COMPLETION_MAX_ATTEMPTS",
+    "BASELINE_COMPLETION_TIMEOUT_S",
+    "BASELINE_PHASE_TIMEOUT_S",
     "BaselineResult",
     "MAX_SAMPLES",
     "run_baseline",

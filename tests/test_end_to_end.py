@@ -10,8 +10,9 @@ from typing import Any
 
 import pytest
 
-from occam.core import Case
+from occam.core import Case, RunResult
 from occam.engine import loop as loop_module
+from occam.engine.baseline import BaselineResult
 from occam.engine.diagnose import DiagnosisResult
 from occam.engine.loop import RunConfig, RunEngine
 from occam.engine.mutate import Mutation
@@ -316,6 +317,64 @@ def test_zero_displayed_cost_ablation_terminates_with_a_valid_completion(
     state = reduce(events)
     assert state.completed is True
     assert state.generations["g000"].metrics is None
+    validate_state(json.loads(state_json_bytes(state)))
+
+
+def test_incomplete_baseline_terminates_with_truthful_completion_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pack = load_task_pack("fx_recon_a")
+    cases = pack.select(2)
+    llm = StubRunLLM(cases, correct=False)
+    partial = RunResult(
+        architecture_id="baseline-cot-sc",
+        variant="baseline:cot_sc:1",
+        results=[],
+    )
+
+    def incomplete_baseline(*_args: Any, **_kwargs: Any) -> BaselineResult:
+        return BaselineResult(
+            run=partial,
+            k=1,
+            matched_to_cost_usd=0.01,
+            samples=(partial,),
+            complete=False,
+            status="incomplete",
+            reason="case_timeout",
+            completed_case_count=1,
+            total_case_count=2,
+        )
+
+    monkeypatch.setattr(loop_module, "run_baseline", incomplete_baseline)
+    outcome = RunEngine(
+        pack,
+        RunConfig(
+            run_name="incomplete-baseline",
+            out=tmp_path / "runs",
+            memory=tmp_path / "memory",
+            max_generations=1,
+            n_cases=2,
+            ablate_cases=2,
+        ),
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run()
+
+    events = EventReader(outcome.run_dir).read()
+    for event in events:
+        validate_event(event.model_dump(mode="json", exclude_none=False))
+    assert not any(event.type == "baseline.completed" for event in events)
+    assert events[-1].type == "run.completed"
+    summary = events[-1].data["summary"]
+    assert summary["baseline_status"] == "unavailable"
+    assert summary["baseline_reason"] == "case_timeout"
+    assert summary["baseline_completed_cases"] == 1
+    assert summary["baseline_total_cases"] == 2
+    assert summary["baseline_displayed_cost_usd"] == 0.0
+    state = reduce(events)
+    assert state.completed is True
+    assert state.summary["baseline_status"] == "unavailable"
     validate_state(json.loads(state_json_bytes(state)))
 
 

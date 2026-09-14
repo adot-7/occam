@@ -230,6 +230,12 @@ class RunEngine:
         pass3_result: Pass3Result | None = None
         executor_results_seen = 0
         ablation_unavailable = False
+        baseline_unavailable = False
+        baseline_reason: str | None = None
+        baseline_completed_cases: int | None = None
+        baseline_total_cases: int | None = None
+        baseline_partial_cost = 0.0
+        baseline_partial_billed = 0.0
 
         def account_executor_results() -> None:
             """Add newly completed executor variants to run-level accounting."""
@@ -286,10 +292,36 @@ class RunEngine:
                     generation=generation,
                     model_key=self.config.worker_model,
                     grader=grader,
+                    event_sink=sink,
                 )
-                sink("baseline.completed", baseline.event_data(generation))
                 all_displayed += baseline.cost_usd
                 all_billed += baseline.billed_cost_usd
+                if not baseline.complete:
+                    # A timeout is not a baseline score.  Keep only the
+                    # observed accounting, preserve the progress snapshot,
+                    # and finish the run with a truthful completion summary.
+                    account_executor_results()
+                    baseline_unavailable = True
+                    baseline_reason = baseline.reason or "incomplete"
+                    baseline_completed_cases = baseline.completed_case_count
+                    baseline_total_cases = baseline.total_case_count
+                    baseline_partial_cost = baseline.cost_usd
+                    baseline_partial_billed = baseline.billed_cost_usd
+                    sink(
+                        "log",
+                        {
+                            "level": "warning",
+                            "message": (
+                                "Baseline unavailable: "
+                                f"reason={baseline_reason}; "
+                                f"completed_cases={baseline_completed_cases}/"
+                                f"{baseline_total_cases}; "
+                                "terminating safely at the best completed generation."
+                            ),
+                        },
+                    )
+                    break
+                sink("baseline.completed", baseline.event_data(generation))
 
                 try:
                     table = ablate(
@@ -523,6 +555,17 @@ class RunEngine:
                     "ablation_status": "unavailable",
                     "ablation_reason": "no positive displayed RoleTrace.cost_usd",
                     "structural_fidelity": None,
+                }
+            )
+        if baseline_unavailable:
+            summary.update(
+                {
+                    "baseline_status": "unavailable",
+                    "baseline_reason": baseline_reason,
+                    "baseline_completed_cases": baseline_completed_cases,
+                    "baseline_total_cases": baseline_total_cases,
+                    "baseline_displayed_cost_usd": max(0.0, baseline_partial_cost),
+                    "baseline_billed_cost_usd": max(0.0, baseline_partial_billed),
                 }
             )
         # The writer was closed in the cleanup block, so append completion with

@@ -50,6 +50,7 @@ class Provider(Protocol):
         response_schema: Mapping[str, Any] | None,
         max_tokens: int,
         temperature: float = 0.0,
+        timeout_s: float | None = None,
     ) -> ProviderResponse: ...
 
 
@@ -214,6 +215,7 @@ class OpenAICompatibleProvider:
         response_schema: Mapping[str, Any] | None,
         max_tokens: int,
         temperature: float = 0.0,
+        timeout_s: float | None = None,
     ) -> ProviderResponse:
         request: dict[str, Any] = {
             "model": config.model,
@@ -221,6 +223,8 @@ class OpenAICompatibleProvider:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if timeout_s is not None:
+            request["timeout"] = timeout_s
         normalized_tools = normalize_openai_tools(tools)
         if normalized_tools:
             request["tools"] = normalized_tools
@@ -492,6 +496,7 @@ class AnthropicProvider:
         response_schema: Mapping[str, Any] | None,
         max_tokens: int,
         temperature: float = 0.0,
+        timeout_s: float | None = None,
     ) -> ProviderResponse:
         system, converted_messages = _anthropic_messages(messages)
         # Current Anthropic models (e.g. claude-sonnet-5) removed sampling
@@ -502,6 +507,8 @@ class AnthropicProvider:
             "max_tokens": max_tokens,
             "messages": converted_messages,
         }
+        if timeout_s is not None:
+            request["timeout"] = timeout_s
         if system:
             request["system"] = system
         normalized_tools = normalize_anthropic_tools(tools)

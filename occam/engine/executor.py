@@ -466,11 +466,26 @@ class Executor:
         max_tokens: int | None = None,
         case_concurrency: int = DEFAULT_CASE_CONCURRENCY,
         model_concurrency: int | None = None,
+        case_timeout_s: float | None = None,
+        completion_timeout_s: float | None = None,
+        completion_max_attempts: int | None = None,
     ) -> None:
         if case_concurrency < 1:
             raise ValueError("case_concurrency must be at least 1")
         if model_concurrency is not None and model_concurrency < 1:
             raise ValueError("model_concurrency must be at least 1")
+        for name, value in (
+            ("case_timeout_s", case_timeout_s),
+            ("completion_timeout_s", completion_timeout_s),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not math.isfinite(float(value)) or value <= 0
+            ):
+                raise ValueError(f"{name} must be positive when set")
+        if completion_max_attempts is not None and (
+            isinstance(completion_max_attempts, bool) or completion_max_attempts < 1
+        ):
+            raise ValueError("completion_max_attempts must be at least 1 when set")
         self._llm = llm
         self.tools = normalize_registry(tools)
         self._tool_registry = _registry_owner(tools, self.tools)
@@ -487,6 +502,11 @@ class Executor:
         self.max_tokens = max_tokens
         self.case_concurrency = case_concurrency
         self._model_concurrency = model_concurrency
+        self.case_timeout_s = None if case_timeout_s is None else float(case_timeout_s)
+        self.completion_timeout_s = (
+            None if completion_timeout_s is None else float(completion_timeout_s)
+        )
+        self.completion_max_attempts = completion_max_attempts
         self._semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._writer_lock: asyncio.Lock | None = None
@@ -539,6 +559,7 @@ class Executor:
         use_cache: bool = True,
         generation: int = 0,
         grader: Callable[..., Any] | None = None,
+        case_callback: Callable[[CaseResult], None] | None = None,
     ) -> RunResult:
         """Synchronous wrapper around :meth:`execute_async`."""
 
@@ -557,6 +578,7 @@ class Executor:
                 use_cache=use_cache,
                 generation=generation,
                 grader=grader,
+                case_callback=case_callback,
             )
         )
 
@@ -570,6 +592,7 @@ class Executor:
         use_cache: bool = True,
         generation: int = 0,
         grader: Callable[..., Any] | None = None,
+        case_callback: Callable[[CaseResult], None] | None = None,
     ) -> RunResult:
         """Run the narrow variant protocol consumed by :mod:`ablation`.
 
@@ -587,6 +610,7 @@ class Executor:
             use_cache=use_cache,
             generation=generation,
             grader=grader,
+            case_callback=case_callback,
         )
 
     async def execute_async(
@@ -599,6 +623,7 @@ class Executor:
         use_cache: bool = True,
         generation: int = 0,
         grader: Callable[..., Any] | None = None,
+        case_callback: Callable[[CaseResult], None] | None = None,
     ) -> RunResult:
         """Run every case and emit ``execution.started|case|completed``."""
 
@@ -623,7 +648,7 @@ class Executor:
 
         async def run_one(position: int, case: Case) -> int:
             async with limiter:
-                results[position] = await self._run_case(
+                case_run = self._run_case(
                     architecture,
                     index,
                     levels,
@@ -634,6 +659,21 @@ class Executor:
                     generation=generation,
                     variant=variant,
                 )
+                try:
+                    if self.case_timeout_s is None:
+                        result = await case_run
+                    else:
+                        result = await asyncio.wait_for(case_run, self.case_timeout_s)
+                except TimeoutError:
+                    result = CaseResult(
+                        case_id=case.id,
+                        passed=False,
+                        role_error=(
+                            f"TimeoutError: execution case exceeded {self.case_timeout_s:g}s"
+                        ),
+                        latency_s=self.case_timeout_s or 0.0,
+                    )
+                results[position] = result
             return position
 
         pending = {
@@ -642,7 +682,11 @@ class Executor:
         while pending:
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
-                task.result()
+                position = task.result()
+                if case_callback is not None:
+                    result = results[position]
+                    assert result is not None
+                    case_callback(result)
             # Emit in case order regardless of completion order: the event log
             # is the contract and must be reproducible.
             while emitted < len(results) and results[emitted] is not None:
@@ -1056,15 +1100,22 @@ class Executor:
     ) -> Any:
         payload = [dict(message) for message in messages]
         async with self._semaphore(model_key):
+            completion_kwargs: dict[str, Any] = {
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "use_cache": use_cache,
+            }
+            if self.completion_timeout_s is not None:
+                completion_kwargs["timeout_s"] = self.completion_timeout_s
+            if self.completion_max_attempts is not None:
+                completion_kwargs["max_attempts"] = self.completion_max_attempts
             return await asyncio.to_thread(
                 self.llm.complete,
                 model_key,
                 payload,
                 tools,
                 None,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                use_cache=use_cache,
+                **completion_kwargs,
             )
 
     async def _invoke_tool(
