@@ -266,6 +266,7 @@ def run_baseline(
     architecture = _baseline_architecture(task, model_key=model_key)
     samples: list[RunResult] = []
     phase_started = time.monotonic()
+    phase_deadline = phase_started + phase_timeout_s
     first = executor.__class__(
         llm=executor.llm,
         tools=executor.tools,
@@ -280,7 +281,7 @@ def run_baseline(
         case_timeout_s=case_timeout_s,
         completion_timeout_s=completion_timeout_s,
         completion_max_attempts=completion_max_attempts,
-        phase_deadline_s=phase_started + phase_timeout_s,
+        phase_deadline_s=phase_deadline,
     )
 
     def incomplete(reason: str, observed: Mapping[str, CaseResult]) -> BaselineResult:
@@ -310,7 +311,7 @@ def run_baseline(
     sample_number = 1
     observed: dict[str, CaseResult] = {}
     while sample_number <= k:
-        remaining = phase_timeout_s - (time.monotonic() - phase_started)
+        remaining = phase_deadline - time.monotonic()
         if remaining <= 0:
             return incomplete("phase_timeout", observed)
         # The case timeout is also the sample deadline because all cases are
@@ -364,6 +365,11 @@ def run_baseline(
         samples.append(sample)
         if any(_is_case_timeout(result) for result in sample.results):
             return incomplete("case_timeout", observed)
+        # The executor bounds queued and active cases, but it can return after
+        # the deadline while finalising a sample.  Such a sample is observed
+        # progress, not a completed baseline sample.
+        if time.monotonic() >= phase_deadline:
+            return incomplete("phase_timeout", observed)
         if sample_number == 1:
             k = _k_for_cost(full_cost_usd, sample.cost_usd)
         sample_number += 1
@@ -373,6 +379,8 @@ def run_baseline(
         for result in sample.results:
             by_case[result.case_id].append(result)
     voted = [_aggregate_case(case, by_case[case.id], grader=grader) for case in cases]
+    if time.monotonic() >= phase_deadline:
+        return incomplete("phase_timeout", observed)
     cost = sum(result.cost_usd for result in voted)
     latency = sum(result.latency_s for result in voted) / len(voted)
     result = BaselineResult(
