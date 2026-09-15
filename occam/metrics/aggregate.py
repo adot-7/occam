@@ -25,6 +25,10 @@ class LatencyStats(BaseModel):
     p90: float = Field(ge=0.0)
 
 
+class CostShareUnavailableError(ValueError):
+    """The displayed-cost denominator is unavailable for role shares."""
+
+
 def passed_count(result: RunResult) -> int:
     """Number of cases the grader marked as passing."""
 
@@ -157,7 +161,7 @@ def role_cost_shares(
     weights: dict[str, float] = {key: float(costs.get(key, 0.0)) for key in keys}
     total = math.fsum(weights.values())
     if total <= 0.0:
-        raise ValueError(
+        raise CostShareUnavailableError(
             "cannot compute role cost shares: undefined because the full run has no "
             "positive displayed RoleTrace.cost_usd (accounting invariant violation)"
         )
@@ -166,6 +170,7 @@ def role_cost_shares(
 
 __all__ = [
     "LatencyStats",
+    "CostShareUnavailableError",
     "latency_stats",
     "pass_rate",
     "pass_rate_ci",

@@ -163,6 +163,40 @@ def test_cost_share_requires_positive_displayed_role_trace_costs() -> None:
     assert role_cost_shares(unpriced, []) == {}
 
 
+def test_cost_share_does_not_fallback_for_mixed_cache_hits_and_failed_traces() -> None:
+    mixed = RunResult(
+        architecture_id="g000",
+        variant="full",
+        results=[
+            CaseResult(
+                case_id="c1",
+                passed=False,
+                per_role={
+                    "cached": RoleTrace(
+                        tokens_in=300,
+                        tokens_out=100,
+                        cached=True,
+                        cost_label="cache-hit",
+                    ),
+                    "failed": RoleTrace(
+                        tokens_in=200,
+                        tokens_out=0,
+                        cached=False,
+                        cost_label="unavailable",
+                        error="CompletionError: provider failure",
+                    ),
+                },
+            )
+        ],
+    )
+
+    # Tokens are evidence that work happened, not a substitute displayed-cost
+    # basis.  A cache hit plus a pre-completion failure therefore remains
+    # unpriced for structural-fidelity accounting.
+    with pytest.raises(ValueError, match="undefined.*invariant violation"):
+        role_cost_shares(mixed, ["cached", "failed"])
+
+
 def test_cost_shares_reject_duplicate_roles_or_result_case_ids() -> None:
     run = _run([("c1", "a", True)])
     with pytest.raises(ValueError, match="duplicate role_id"):

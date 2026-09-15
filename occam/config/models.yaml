@@ -23,6 +23,6 @@ worker_alt:
 architect:
   provider: anthropic
   api_key: ${ANTHROPIC_API_KEY}
-  model: claude-sonnet-5
-  in_per_m: 2.00
-  out_per_m: 10.00
+  model: claude-haiku-4-5-20251001
+  in_per_m: 1.00
+  out_per_m: 5.00

@@ -503,6 +503,39 @@ def test_ablate_rejects_duplicate_subset_ids_before_running_variants() -> None:
     assert runner.calls == [("full", None, True)]
 
 
+def test_ablate_preflights_zero_displayed_cost_before_emitting_or_knocking_out() -> None:
+    architecture, _ = _pipeline()
+    runner = _prd_runner()
+    full = make_run_result(
+        "full",
+        [("c01", "a", False), ("c02", "b", False)],
+        role_costs={role.id: 0.0 for role in architecture.roles},
+    )
+    for trace in full.results[0].per_role.values():
+        trace.cached = True
+        trace.cost_label = "cache-hit"
+    full.results[0].per_role["r_report"].cached = False
+    full.results[0].per_role["r_report"].cost_label = "unavailable"
+    full.results[0].per_role["r_report"].error = "CompletionError: provider failure"
+    repeat = full.model_copy(update={"variant": FULL_REPEAT})
+    events: list[dict] = []
+
+    with pytest.raises(ValueError, match="undefined.*invariant violation"):
+        ablate(
+            architecture,
+            CASES[:2],
+            runner=runner,
+            generation=0,
+            full=full,
+            full_repeat=repeat,
+            measured_noise_rate=0.0,
+            sink=collecting_sink(events),
+        )
+
+    assert events == []
+    assert runner.calls == []
+
+
 # --- events ------------------------------------------------------------------------
 
 

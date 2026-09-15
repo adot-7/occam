@@ -39,13 +39,14 @@ def _config(
     grant_equiv_out_per_m: float | None = 0.40,
     rpm: float | None = None,
     supports_json_schema: bool = False,
+    api_key: str = "${TEST_API_KEY}",
 ) -> ModelConfig:
     return ModelConfig(
         key=key,
         provider=provider,
         model="test-model",
         base_url="https://example.test/v1",
-        api_key="${TEST_API_KEY}",
+        api_key=api_key,
         in_per_m=in_per_m,
         out_per_m=out_per_m,
         grant_equiv_in_per_m=grant_equiv_in_per_m,
@@ -112,9 +113,39 @@ def test_v3_model_table_has_exact_lanes_and_lazy_credentials() -> None:
     assert configs["worker_fast"].rpm == 12
     assert configs["worker_fast"].max_tokens == 8192
     assert configs["worker_alt"].model == "gpt-5-nano"
-    assert configs["architect"].model == "claude-sonnet-5"
+    assert configs["architect"].model == "claude-haiku-4-5-20251001"
     with pytest.raises(MissingCredentialsError, match="TENSORMUX_API_KEY"):
         configs["worker_fast"].resolve_api_key({})
+
+
+@pytest.mark.parametrize("provider_name", ["openai_compat", "anthropic"])
+def test_default_sdk_clients_disable_sdk_retries(
+    monkeypatch: pytest.MonkeyPatch, provider_name: str
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    if provider_name == "openai_compat":
+        import openai
+
+        monkeypatch.setattr(openai, "OpenAI", FakeClient)
+        config = _config(provider=provider_name, api_key="test-key")
+        OpenAICompatibleProvider()._client_for(config)
+    else:
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
+        config = _config(provider=provider_name, api_key="test-key")
+        AnthropicProvider()._client_for(config)
+
+    assert captured == {
+        "api_key": "test-key",
+        "base_url": "https://example.test/v1",
+        "max_retries": 0,
+    }
 
 
 def test_environment_interpolation_is_recursive_and_strict_mode_is_clear() -> None:
@@ -166,10 +197,12 @@ def test_openai_provider_sends_native_tools_and_never_json_schema_for_worker_fas
         tools=[ToolSpec(name="fx_rate", description="rate", parameters={"type": "object"})],
         response_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
         max_tokens=2048,
+        timeout_s=7.5,
     )
 
     assert completions.request is not None
     assert completions.request["temperature"] == 0.0
+    assert completions.request["timeout"] == 7.5
     assert completions.request["tool_choice"] == "auto"
     assert completions.request["tools"][0]["type"] == "function"
     assert "json_schema" not in json.dumps(completions.request)
@@ -295,6 +328,31 @@ def test_client_retries_only_bounded_transient_failures(tmp_path: Path) -> None:
     assert result.text == "ok"
     assert delays == [0.1, 0.2]
     assert len(provider.calls) == 3
+
+
+def test_per_call_limits_override_retry_policy_and_forward_timeout(tmp_path: Path) -> None:
+    events: list[tuple[str, dict[str, Any]]] = []
+    provider = FakeProvider([StatusError(503)])
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+        retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.1, max_delay_s=1),
+        sleeper=lambda _seconds: pytest.fail("per-call max_attempts must prevent a retry"),
+        event_sink=lambda event_type, data: events.append((event_type, dict(data))),
+    )
+
+    with pytest.raises(CompletionError, match="1 attempt"):
+        client.complete(
+            "worker_fast",
+            [{"role": "user", "content": "bounded"}],
+            timeout_s=7.5,
+            max_attempts=1,
+        )
+
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["timeout_s"] == 7.5
+    assert events == []
 
 
 def test_structured_429_retries_honor_bounded_retry_after_and_emit_safe_logs(
@@ -482,6 +540,31 @@ def test_empty_length_responses_retry_until_completion_and_account_final_usage(
     assert client.billed_cost_usd == result.billed_cost_usd == 0
 
 
+def test_per_call_attempt_bound_preserves_adaptive_truncation_expansion(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [
+            ProviderResponse(text="", finish_reason="length"),
+            ProviderResponse(text="answer", tokens_in=1, tokens_out=1),
+        ]
+    )
+    client = LLMClient(
+        {"worker_fast": _config()},
+        providers={"worker_fast": provider},
+        cache_dir=tmp_path,
+    )
+
+    result = client.complete(
+        "worker_fast",
+        [{"role": "user", "content": "expand"}],
+        max_attempts=1,
+    )
+
+    assert result.text == "answer"
+    assert [call["max_tokens"] for call in provider.calls] == [2048, 4096]
+
+
 def test_empty_length_responses_stop_at_bounded_budget(tmp_path: Path) -> None:
     response = ProviderResponse(text="", reasoning="thinking", finish_reason="length")
     provider = FakeProvider([response, response, response, response])
@@ -627,9 +710,11 @@ def test_anthropic_adapter_maps_system_tools_and_native_tool_use() -> None:
         tools=[{"name": "fx_rate", "description": "rate", "parameters": {"type": "object"}}],
         response_schema=None,
         max_tokens=2048,
+        timeout_s=7.5,
     )
 
     assert requests[0]["system"] == "system"
+    assert requests[0]["timeout"] == 7.5
     assert "temperature" not in requests[0]
     assert requests[0]["tools"][0]["input_schema"] == {"type": "object"}
     assert requests[0]["tool_choice"] == {"type": "auto"}
@@ -819,10 +904,10 @@ def test_anthropic_provider_sends_native_json_schema_payload() -> None:
 
 def test_anthropic_provider_strips_unsupported_schema_keywords() -> None:
     # Anthropic's structured-output schema subset rejects minimum/maximum on
-    # integer/number properties and minLength on strings. pydantic's
-    # model_json_schema() emits these constraints, so the provider must
-    # sanitize the schema hint while leaving everything else - including
-    # nested $defs - intact.
+    # integer/number properties and minLength on strings. The installed SDK's
+    # schema transformer also removes defaults. Pydantic's model_json_schema()
+    # emits these fields, so the provider must sanitize the schema hint while
+    # leaving everything else - including nested $defs - intact.
     requests: list[dict[str, Any]] = []
 
     class Messages:
@@ -843,8 +928,9 @@ def test_anthropic_provider_strips_unsupported_schema_keywords() -> None:
                 "maximum": 10,
                 "exclusiveMinimum": -1,
                 "exclusiveMaximum": 11,
+                "default": 0,
             },
-            "label": {"type": "string", "minLength": 1},
+            "label": {"type": "string", "minLength": 1, "default": ""},
             "nested": {"$ref": "#/$defs/Bound"},
         },
         "required": ["count"],
@@ -852,7 +938,7 @@ def test_anthropic_provider_strips_unsupported_schema_keywords() -> None:
         "$defs": {
             "Bound": {
                 "type": "object",
-                "properties": {"value": {"type": "number", "minimum": 0.0}},
+                "properties": {"value": {"type": "number", "minimum": 0.0, "default": 0.0}},
                 "required": ["value"],
                 "additionalProperties": False,
             }
@@ -889,6 +975,9 @@ def test_anthropic_provider_strips_unsupported_schema_keywords() -> None:
     # The caller's schema object is untouched - only the outgoing payload is sanitized.
     assert schema["properties"]["count"]["minimum"] == 0
     assert schema["properties"]["label"]["minLength"] == 1
+    assert schema["properties"]["count"]["default"] == 0
+    assert schema["properties"]["label"]["default"] == ""
+    assert schema["$defs"]["Bound"]["properties"]["value"]["default"] == 0.0
 
 
 def test_anthropic_provider_fails_explicitly_without_native_schema_sdk_support() -> None:

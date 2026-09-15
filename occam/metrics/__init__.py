@@ -4,6 +4,7 @@
 """
 
 from occam.metrics.aggregate import (
+    CostShareUnavailableError,
     LatencyStats,
     latency_stats,
     pass_rate,
@@ -36,6 +37,7 @@ from occam.metrics.stats import (
 __all__ = [
     "DEFAULT_RESAMPLES",
     "BaselineSummary",
+    "CostShareUnavailableError",
     "LatencyStats",
     "bootstrap_mean_ci",
     "build_snapshot",

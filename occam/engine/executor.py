@@ -78,6 +78,7 @@ _VARIANT_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 _EMPTY_USER_MESSAGE = "Produce your output now."
 ANSWER_PREFIX_LIMIT = 120
 GRADE_ERROR_LIMIT = 256
+_PHASE_TIMEOUT_MESSAGE = "execution case exceeded phase deadline"
 _ERROR_PAYLOAD = re.compile(r"(?s)(?:\{.*\}|\[.*\])")
 _ERROR_URL = re.compile(r"(?i)\bhttps?://\S+")
 _ERROR_SECRET_ASSIGNMENT = re.compile(
@@ -94,6 +95,10 @@ _REDACTED_ERROR = "[redacted]"
 
 class ExecutorError(RuntimeError):
     """Base class for executor-level failures."""
+
+
+class _PhaseDeadlineError(TimeoutError):
+    """A provider launch was prevented by the executor's phase deadline."""
 
 
 class ArchitectureError(ExecutorError):
@@ -466,11 +471,31 @@ class Executor:
         max_tokens: int | None = None,
         case_concurrency: int = DEFAULT_CASE_CONCURRENCY,
         model_concurrency: int | None = None,
+        case_timeout_s: float | None = None,
+        completion_timeout_s: float | None = None,
+        completion_max_attempts: int | None = None,
+        phase_deadline_s: float | None = None,
     ) -> None:
         if case_concurrency < 1:
             raise ValueError("case_concurrency must be at least 1")
         if model_concurrency is not None and model_concurrency < 1:
             raise ValueError("model_concurrency must be at least 1")
+        for name, value in (
+            ("case_timeout_s", case_timeout_s),
+            ("completion_timeout_s", completion_timeout_s),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not math.isfinite(float(value)) or value <= 0
+            ):
+                raise ValueError(f"{name} must be positive when set")
+        if completion_max_attempts is not None and (
+            isinstance(completion_max_attempts, bool) or completion_max_attempts < 1
+        ):
+            raise ValueError("completion_max_attempts must be at least 1 when set")
+        if phase_deadline_s is not None and (
+            isinstance(phase_deadline_s, bool) or not math.isfinite(float(phase_deadline_s))
+        ):
+            raise ValueError("phase_deadline_s must be finite when set")
         self._llm = llm
         self.tools = normalize_registry(tools)
         self._tool_registry = _registry_owner(tools, self.tools)
@@ -487,6 +512,12 @@ class Executor:
         self.max_tokens = max_tokens
         self.case_concurrency = case_concurrency
         self._model_concurrency = model_concurrency
+        self.case_timeout_s = None if case_timeout_s is None else float(case_timeout_s)
+        self.completion_timeout_s = (
+            None if completion_timeout_s is None else float(completion_timeout_s)
+        )
+        self.completion_max_attempts = completion_max_attempts
+        self.phase_deadline_s = None if phase_deadline_s is None else float(phase_deadline_s)
         self._semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._writer_lock: asyncio.Lock | None = None
@@ -539,6 +570,7 @@ class Executor:
         use_cache: bool = True,
         generation: int = 0,
         grader: Callable[..., Any] | None = None,
+        case_callback: Callable[[CaseResult], None] | None = None,
     ) -> RunResult:
         """Synchronous wrapper around :meth:`execute_async`."""
 
@@ -557,6 +589,7 @@ class Executor:
                 use_cache=use_cache,
                 generation=generation,
                 grader=grader,
+                case_callback=case_callback,
             )
         )
 
@@ -570,6 +603,7 @@ class Executor:
         use_cache: bool = True,
         generation: int = 0,
         grader: Callable[..., Any] | None = None,
+        case_callback: Callable[[CaseResult], None] | None = None,
     ) -> RunResult:
         """Run the narrow variant protocol consumed by :mod:`ablation`.
 
@@ -587,6 +621,7 @@ class Executor:
             use_cache=use_cache,
             generation=generation,
             grader=grader,
+            case_callback=case_callback,
         )
 
     async def execute_async(
@@ -599,6 +634,7 @@ class Executor:
         use_cache: bool = True,
         generation: int = 0,
         grader: Callable[..., Any] | None = None,
+        case_callback: Callable[[CaseResult], None] | None = None,
     ) -> RunResult:
         """Run every case and emit ``execution.started|case|completed``."""
 
@@ -619,21 +655,135 @@ class Executor:
 
         results: list[CaseResult | None] = [None] * len(cases)
         limiter = asyncio.Semaphore(self.case_concurrency)
+        deferred_case_tasks: list[asyncio.Task[Any]] = []
         emitted = 0
 
+        async def release_after_case(
+            case_task: asyncio.Task[CaseResult],
+        ) -> None:
+            try:
+                await asyncio.shield(case_task)
+            except BaseException:  # noqa: BLE001 - release even if the task fails
+                pass
+            finally:
+                limiter.release()
+
         async def run_one(position: int, case: Case) -> int:
-            async with limiter:
-                results[position] = await self._run_case(
-                    architecture,
-                    index,
-                    levels,
-                    excluded,
-                    case,
-                    active_grader,
-                    use_cache=use_cache,
-                    generation=generation,
-                    variant=variant,
+            acquired = False
+            result: CaseResult
+            try:
+                if self.phase_deadline_s is not None:
+                    remaining = self.phase_deadline_s - time.monotonic()
+                    if remaining <= 0:
+                        result = CaseResult(
+                            case_id=case.id,
+                            passed=False,
+                            role_error="TimeoutError: execution case exceeded phase deadline",
+                        )
+                    else:
+                        try:
+                            await asyncio.wait_for(limiter.acquire(), remaining)
+                            acquired = True
+                        except TimeoutError:
+                            result = CaseResult(
+                                case_id=case.id,
+                                passed=False,
+                                role_error="TimeoutError: execution case exceeded phase deadline",
+                            )
+                else:
+                    await limiter.acquire()
+                    acquired = True
+
+                if not acquired:
+                    results[position] = result
+                    return position
+
+                remaining = (
+                    None
+                    if self.phase_deadline_s is None
+                    else self.phase_deadline_s - time.monotonic()
                 )
+                if remaining is not None and remaining <= 0:
+                    result = CaseResult(
+                        case_id=case.id,
+                        passed=False,
+                        role_error="TimeoutError: execution case exceeded phase deadline",
+                    )
+                else:
+                    case_timeout = self.case_timeout_s
+                    if remaining is not None:
+                        case_timeout = (
+                            remaining if case_timeout is None else min(case_timeout, remaining)
+                        )
+                    case_run = self._run_case(
+                        architecture,
+                        index,
+                        levels,
+                        excluded,
+                        case,
+                        active_grader,
+                        use_cache=use_cache,
+                        generation=generation,
+                        variant=variant,
+                    )
+                    try:
+                        if case_timeout is None:
+                            result = await case_run
+                        elif self.phase_deadline_s is not None:
+                            phase_limited = case_timeout == remaining
+                            case_task = asyncio.ensure_future(case_run)
+                            done, _ = await asyncio.wait({case_task}, timeout=case_timeout)
+                            if not done:
+                                # Cancel the case wrapper at the absolute
+                                # deadline.  ``_complete`` drains a provider
+                                # thread that has already started, while a
+                                # case still waiting for its model semaphore
+                                # is removed without starting a late call.
+                                # Keep the case permit held until either path
+                                # has actually finished before declaring
+                                # execution complete.
+                                case_task.cancel()
+                                deferred_case_tasks.append(
+                                    asyncio.ensure_future(release_after_case(case_task))
+                                )
+                                acquired = False
+                                detail = "phase deadline" if phase_limited else f"{case_timeout:g}s"
+                                result = CaseResult(
+                                    case_id=case.id,
+                                    passed=False,
+                                    role_error=(f"TimeoutError: execution case exceeded {detail}"),
+                                    latency_s=case_timeout or 0.0,
+                                )
+                            else:
+                                result = case_task.result()
+                                if time.monotonic() >= self.phase_deadline_s:
+                                    result = result.model_copy(
+                                        update={
+                                            "passed": False,
+                                            "role_error": (
+                                                "TimeoutError: execution case exceeded "
+                                                "phase deadline"
+                                            ),
+                                        }
+                                    )
+                        else:
+                            result = await asyncio.wait_for(case_run, case_timeout)
+                    except TimeoutError:
+                        detail = (
+                            "phase deadline"
+                            if self.phase_deadline_s is not None and case_timeout == remaining
+                            else f"{case_timeout:g}s"
+                        )
+                        result = CaseResult(
+                            case_id=case.id,
+                            passed=False,
+                            role_error=f"TimeoutError: execution case exceeded {detail}",
+                            latency_s=case_timeout or 0.0,
+                        )
+            finally:
+                if acquired:
+                    limiter.release()
+            results[position] = result
             return position
 
         pending = {
@@ -642,12 +792,19 @@ class Executor:
         while pending:
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
-                task.result()
+                position = task.result()
+                if case_callback is not None:
+                    result = results[position]
+                    assert result is not None
+                    case_callback(result)
             # Emit in case order regardless of completion order: the event log
             # is the contract and must be reproducible.
             while emitted < len(results) and results[emitted] is not None:
                 await self._emit_case(generation, variant, results[emitted])
                 emitted += 1
+
+        if deferred_case_tasks:
+            await asyncio.gather(*deferred_case_tasks, return_exceptions=True)
 
         final = [result for result in results if result is not None]
         passed = sum(1 for result in final if result.passed)
@@ -929,6 +1086,9 @@ class Executor:
                 completion = await self._complete(
                     role.model, messages, specs or None, use_cache=use_cache
                 )
+            except _PhaseDeadlineError as exc:
+                error = f"TimeoutError: {exc}"
+                break
             except (LLMError, ConfigurationError) as exc:
                 error = _safe_role_error(exc)
                 break
@@ -1055,17 +1215,56 @@ class Executor:
         use_cache: bool,
     ) -> Any:
         payload = [dict(message) for message in messages]
-        async with self._semaphore(model_key):
+        semaphore = self._semaphore(model_key)
+        await semaphore.acquire()
+        if self.phase_deadline_s is not None and time.monotonic() >= self.phase_deadline_s:
+            semaphore.release()
+            raise _PhaseDeadlineError(_PHASE_TIMEOUT_MESSAGE)
+        completion_kwargs: dict[str, Any] = {
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "use_cache": use_cache,
+        }
+        if self.completion_timeout_s is not None:
+            completion_kwargs["timeout_s"] = self.completion_timeout_s
+        if self.completion_max_attempts is not None:
+            completion_kwargs["max_attempts"] = self.completion_max_attempts
+
+        provider_started = asyncio.Event()
+
+        async def call_provider() -> Any:
+            if self.phase_deadline_s is not None and time.monotonic() >= self.phase_deadline_s:
+                raise _PhaseDeadlineError(_PHASE_TIMEOUT_MESSAGE)
+            provider_started.set()
             return await asyncio.to_thread(
                 self.llm.complete,
                 model_key,
                 payload,
                 tools,
                 None,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                use_cache=use_cache,
+                **completion_kwargs,
             )
+
+        provider_task = asyncio.create_task(call_provider())
+        try:
+            # Shield the thread-backed task so cancellation of the case does
+            # not release the model permit while the synchronous call is still
+            # mutating client accounting in the default executor.
+            return await asyncio.shield(provider_task)
+        except asyncio.CancelledError:
+            # Python cannot kill a running thread.  Drain it before releasing
+            # the model lane and re-raising cancellation; this prevents a
+            # queued waiter from starting a provider call after the phase and
+            # prevents late stats mutation after execute_async returns.
+            if not provider_started.is_set():
+                provider_task.cancel()
+            try:
+                await asyncio.shield(provider_task)
+            except BaseException:  # noqa: BLE001 - preserve cancellation
+                pass
+            raise
+        finally:
+            semaphore.release()
 
     async def _invoke_tool(
         self,

@@ -135,6 +135,17 @@ _MAX_TRUNCATION_DOUBLINGS = 3
 _MAX_TRUNCATION_TOKENS = 16_384
 
 
+def _validate_call_limits(timeout_s: float | None, max_attempts: int | None) -> None:
+    """Validate optional per-call bounds before touching the provider."""
+
+    if timeout_s is not None and (
+        isinstance(timeout_s, bool) or not math.isfinite(float(timeout_s)) or timeout_s <= 0
+    ):
+        raise ValueError("timeout_s must be positive when set")
+    if max_attempts is not None and (isinstance(max_attempts, bool) or max_attempts < 1):
+        raise ValueError("max_attempts must be at least 1 when set")
+
+
 def _status_code(exc: BaseException) -> int | None:
     for candidate in (
         getattr(exc, "status_code", None),
@@ -505,13 +516,21 @@ class LLMClient:
         with self._stats_lock:
             self._failed_completions += 1
 
-    def _emit_retry_event(self, failed_attempt: int, delay: float, exc: BaseException) -> None:
+    def _emit_retry_event(
+        self,
+        failed_attempt: int,
+        delay: float,
+        exc: BaseException,
+        *,
+        retry_policy: RetryPolicy | None = None,
+    ) -> None:
         """Publish a bounded retry diagnostic without provider error contents."""
 
         with self._stats_lock:
             event_sink = self._event_sink
         if event_sink is None:
             return
+        policy = retry_policy or self.retry_policy
         status = _status_code(exc)
         reason = f"HTTP {status}" if status is not None else "transient provider failure"
         event_sink(
@@ -520,7 +539,7 @@ class LLMClient:
                 "level": "warning",
                 "message": (
                     f"Retrying completion after {reason}; attempt "
-                    f"{failed_attempt + 1}/{self.retry_policy.max_attempts}; "
+                    f"{failed_attempt + 1}/{policy.max_attempts}; "
                     f"delay={delay:.3f}s"
                 ),
             },
@@ -584,6 +603,8 @@ class LLMClient:
         temperature: float = 0.0,
         use_cache: bool = True,
         trace_attributes: Mapping[str, Any] | None = None,
+        timeout_s: float | None = None,
+        max_attempts: int | None = None,
     ) -> Completion:
         """Complete one request, applying cache, limiter, retry and cost rules.
 
@@ -597,6 +618,7 @@ class LLMClient:
             config = self.configs[model_key]
         except KeyError as exc:
             raise ConfigurationError(f"unknown model key {model_key!r}") from exc
+        _validate_call_limits(timeout_s, max_attempts)
         if not is_enabled():
             return self._complete_impl(
                 config,
@@ -608,6 +630,8 @@ class LLMClient:
                 temperature=temperature,
                 use_cache=use_cache,
                 span_object=None,
+                timeout_s=timeout_s,
+                max_attempts=max_attempts,
             )
         attributes = dict(trace_attributes or {})
         # ``model`` is the provider model id shown in the dashboard; the key is
@@ -625,6 +649,8 @@ class LLMClient:
                     temperature=temperature,
                     use_cache=use_cache,
                     span_object=span_object,
+                    timeout_s=timeout_s,
+                    max_attempts=max_attempts,
                 )
             except Exception as exc:  # noqa: BLE001 - preserve provider errors
                 set_span_attributes(span_object, {"error": type(exc).__name__, "cached": False})
@@ -643,6 +669,8 @@ class LLMClient:
         temperature: float,
         use_cache: bool,
         span_object: Any | None,
+        timeout_s: float | None,
+        max_attempts: int | None,
     ) -> Completion:
         """Run the cache/provider path, counting one terminal failure if it raises."""
 
@@ -657,6 +685,8 @@ class LLMClient:
                 temperature=temperature,
                 use_cache=use_cache,
                 span_object=span_object,
+                timeout_s=timeout_s,
+                max_attempts=max_attempts,
             )
         except Exception:
             self._record_failed_completion()
@@ -674,9 +704,16 @@ class LLMClient:
         temperature: float,
         use_cache: bool,
         span_object: Any | None,
+        timeout_s: float | None,
+        max_attempts: int | None,
     ) -> Completion:
         """Run the cache/provider path, optionally updating one completion span."""
 
+        retry_policy = (
+            self.retry_policy
+            if max_attempts is None
+            else replace(self.retry_policy, max_attempts=max_attempts)
+        )
         budget = config.max_tokens if max_tokens is None else max(1024, int(max_tokens))
         request = self._request_payload(
             config, messages, tools, response_schema, budget, temperature
@@ -734,22 +771,24 @@ class LLMClient:
                     "max_tokens": current_budget,
                 }
                 provider_kwargs["temperature"] = temperature
+                if timeout_s is not None:
+                    provider_kwargs["timeout_s"] = timeout_s
                 with self._stats_lock:
                     self._provider_call_count += 1
                 response = _coerce_response(provider.complete(config, messages, **provider_kwargs))
             except Exception as exc:
-                if not _retryable(exc) or attempt >= self.retry_policy.max_attempts:
+                if not _retryable(exc) or attempt >= retry_policy.max_attempts:
                     if isinstance(exc, (LLMError, ConfigurationError)):
                         raise
                     raise CompletionError(
                         f"LLM completion failed after {attempt} attempt(s): {type(exc).__name__}; "
                         f"provider_error[{_provider_error_metadata(exc)}]"
                     ) from exc
-                delay = self.retry_policy.delay(attempt)
+                delay = retry_policy.delay(attempt)
                 retry_after = _retry_after_delay(exc)
                 if retry_after is not None:
-                    delay = min(self.retry_policy.max_delay_s, retry_after)
-                self._emit_retry_event(attempt, delay, exc)
+                    delay = min(retry_policy.max_delay_s, retry_after)
+                self._emit_retry_event(attempt, delay, exc, retry_policy=retry_policy)
                 self._sleeper(delay)
                 continue
 
@@ -835,6 +874,8 @@ def complete(
     temperature: float = 0.0,
     use_cache: bool = True,
     trace_attributes: Mapping[str, Any] | None = None,
+    timeout_s: float | None = None,
+    max_attempts: int | None = None,
 ) -> Completion:
     """Module-level convenience wrapper for the shared completion interface."""
 
@@ -847,6 +888,8 @@ def complete(
         temperature=temperature,
         use_cache=use_cache,
         trace_attributes=trace_attributes,
+        timeout_s=timeout_s,
+        max_attempts=max_attempts,
     )
 
 

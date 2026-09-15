@@ -50,6 +50,7 @@ class Provider(Protocol):
         response_schema: Mapping[str, Any] | None,
         max_tokens: int,
         temperature: float = 0.0,
+        timeout_s: float | None = None,
     ) -> ProviderResponse: ...
 
 
@@ -198,7 +199,7 @@ class OpenAICompatibleProvider:
             from openai import OpenAI
         except ImportError as exc:  # pragma: no cover - dependency is declared
             raise ConfigurationError("openai is required for openai_compat models") from exc
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": 0}
         if config.base_url:
             kwargs["base_url"] = config.base_url
         client = OpenAI(**kwargs)
@@ -214,6 +215,7 @@ class OpenAICompatibleProvider:
         response_schema: Mapping[str, Any] | None,
         max_tokens: int,
         temperature: float = 0.0,
+        timeout_s: float | None = None,
     ) -> ProviderResponse:
         request: dict[str, Any] = {
             "model": config.model,
@@ -221,6 +223,8 @@ class OpenAICompatibleProvider:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if timeout_s is not None:
+            request["timeout"] = timeout_s
         normalized_tools = normalize_openai_tools(tools)
         if normalized_tools:
             request["tools"] = normalized_tools
@@ -396,19 +400,27 @@ def _anthropic_messages(
 
 # Anthropic's structured-output schema subset rejects validation keywords
 # on constrained properties (observed live: "output_config.format.schema:
-# For integer type, property minimum is not supported"). Only `minimum`
-# and `minLength` have been observed failing; the related numeric family is
-# stripped defensively so the next schema change doesn't re-break this.
+# For integer type, property minimum is not supported"). The installed SDK's
+# schema transformer also removes `default`; a controlled Haiku differential
+# showed that this was the only remaining structural difference between the
+# failing Occam schema and a successful transformed request.
 # Dropping these does not weaken validation - the response is still parsed
 # and validated against the real pydantic model client-side, so model bounds
 # remain enforced. Only the provider-facing generation hint shrinks.
 _ANTHROPIC_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset(
-    {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength"}
+    {
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "minLength",
+        "default",
+    }
 )
 
 
 def _strip_anthropic_unsupported_schema_keywords(value: Any) -> Any:
-    """Recursively drop numeric-range keywords Anthropic's schema subset rejects."""
+    """Recursively drop schema keywords unsupported by the provider request."""
 
     if isinstance(value, Mapping):
         return {
@@ -470,7 +482,7 @@ class AnthropicProvider:
             import anthropic
         except ImportError as exc:  # pragma: no cover - dependency is declared
             raise ConfigurationError("anthropic is required for anthropic models") from exc
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": 0}
         if config.base_url:
             kwargs["base_url"] = config.base_url
         return anthropic.Anthropic(**kwargs)
@@ -484,6 +496,7 @@ class AnthropicProvider:
         response_schema: Mapping[str, Any] | None,
         max_tokens: int,
         temperature: float = 0.0,
+        timeout_s: float | None = None,
     ) -> ProviderResponse:
         system, converted_messages = _anthropic_messages(messages)
         # Current Anthropic models (e.g. claude-sonnet-5) removed sampling
@@ -494,6 +507,8 @@ class AnthropicProvider:
             "max_tokens": max_tokens,
             "messages": converted_messages,
         }
+        if timeout_s is not None:
+            request["timeout"] = timeout_s
         if system:
             request["system"] = system
         normalized_tools = normalize_anthropic_tools(tools)
